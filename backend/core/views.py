@@ -49,7 +49,7 @@ from .permissions import (
     IsSelfOrInstitutional, IsInstitutionMemberOrAdministrator, IsOfferOwnerOrInstitutional,
     INSTITUTIONAL_TYPES, user_can_view_photo,
     get_active_environment, get_effective_role, effective_role_or_none, mask_email, mask_phone,
-    send_mail_env_aware,
+    send_mail_env_aware, _peut_gerer_stock_point,
 )
 from .geo_lookup import commune_code_from_point, commune_secteur_codes, commune_risques, commune_risques_date_maj
 from .imports import (
@@ -778,13 +778,25 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         )
         return Response(DossierSerializer(dossier, context=self.get_serializer_context()).data)
 
-    @action(detail=True, methods=["post"], url_path="definir-statut", permission_classes=[IsInstitutionalActor])
+    @action(detail=True, methods=["post"], url_path="definir-statut", permission_classes=[permissions.IsAuthenticated])
     def definir_statut(self, request, pk=None):
-        """Change le statut du dossier directement depuis la vue régulateur, pour les statuts
-        intermédiaires (avant clôture). CLOTURE/RESOLU restent exclusivement gérés par
-        cloturer(), qui a sa propre garde plus stricte (régulateur du dossier ou responsable de
-        la crise, pas n'importe quel institutionnel) — jamais dupliquée ici."""
+        """Change le statut du dossier directement depuis la vue régulateur — ou depuis "Mes
+        interventions" pour le chef/régulateur de l'équipe affectée (même garde que
+        definir_priorite/marquer_important ci-dessus : un chef d'équipe non-institutionnel doit
+        pouvoir faire évoluer le statut de ses propres dossiers sans attendre un institutionnel).
+        Pour les statuts intermédiaires (avant clôture) uniquement. CLOTURE/RESOLU restent
+        exclusivement gérés par cloturer(), qui a sa propre garde plus stricte (régulateur du
+        dossier ou responsable de la crise, pas n'importe quel institutionnel) — jamais
+        dupliquée ici."""
         dossier = self.get_object()
+        equipe = dossier.equipe
+        est_chef_equipe = equipe is not None and request.user.id in (equipe.leader_id, equipe.regulateur_id)
+        if not est_chef_equipe and get_effective_role(request) not in INSTITUTIONAL_TYPES:
+            return Response(
+                {"error": "Seul le chef ou le régulateur de l'équipe affectée peut changer le statut."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         nouveau_statut = request.data.get('statut')
         statuts_autorises = (
             Dossier.Statut.NOUVEAU, Dossier.Statut.EN_ATTENTE_DISTRIBUTION,
@@ -7426,21 +7438,6 @@ class MaterielCatalogueViewSet(TagLikeViewSetMixin, viewsets.ModelViewSet):
         instance.delete()
 
 
-def _peut_gerer_stock_point(request, point) -> bool:
-    """Même garde-fou que MaterielPointViewSet._can_manage (dupliqué ici plutôt que factorisé,
-    comme le reste de ce fichier le fait déjà pour ce contrôle) — admin, responsable du point,
-    ou chef/membre de son équipe."""
-    user = request.user
-    if get_effective_role(request) == UserRole.ADMINISTRATOR:
-        return True
-    if point.responsable_id == user.id:
-        return True
-    if point.equipe:
-        if point.equipe.leader_id == user.id:
-            return True
-        if point.equipe.members.filter(id=user.id).exists():
-            return True
-    return False
 
 
 class ContributionMaterielViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
@@ -7498,19 +7495,7 @@ class MaterielPointViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet)
     filterset_fields = ["point", "statut", "item"]
 
     def _can_manage(self, request, point):
-        # Même logique que DisponibilitePointEquipeViewSet._can_manage (pas de notion de
-        # "membre" ici — n'importe quel membre de l'équipe peut mettre à jour un stock).
-        user = request.user
-        if get_effective_role(request) == UserRole.ADMINISTRATOR:
-            return True
-        if point.responsable_id == user.id:
-            return True
-        if point.equipe:
-            if point.equipe.leader_id == user.id:
-                return True
-            if point.equipe.members.filter(id=user.id).exists():
-                return True
-        return False
+        return _peut_gerer_stock_point(request, point)
 
     def perform_create(self, serializer):
         point = serializer.validated_data.get('point')
@@ -7563,17 +7548,7 @@ class RegistrePresenceViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewS
     filterset_fields = ["point", "type_personne"]
 
     def _can_manage(self, request, point):
-        user = request.user
-        if get_effective_role(request) == UserRole.ADMINISTRATOR:
-            return True
-        if point.responsable_id == user.id:
-            return True
-        if point.equipe:
-            if point.equipe.leader_id == user.id:
-                return True
-            if point.equipe.members.filter(id=user.id).exists():
-                return True
-        return False
+        return _peut_gerer_stock_point(request, point)
 
     def perform_create(self, serializer):
         point = serializer.validated_data.get('point')
@@ -7695,6 +7670,15 @@ class DeclarationSecuriteViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
 
     def perform_create(self, serializer):
         centre = serializer.validated_data.get('centre_accueil')
+        # Une entrée saisie depuis le secrétariat d'un centre n'envoie pas `crise` (le centre
+        # la détermine déjà sans ambiguïté) — contrairement au formulaire public "je suis en
+        # sécurité", qui la fait choisir explicitement. Sans cette déduction, la création
+        # échouait systématiquement en 400 pour toute saisie côté secrétariat (crise absente
+        # du payload, champ pourtant obligatoire en base).
+        if not serializer.validated_data.get('crise'):
+            if centre is None:
+                raise ValidationError({"crise": "Ce champ est obligatoire."})
+            serializer.validated_data['crise'] = centre.crise
         declare_par = self.request.user if self.request.user.is_authenticated else None
         declaration = serializer.save(
             declare_par=declare_par,
