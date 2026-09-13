@@ -30,6 +30,7 @@ export interface Team {
   mission_active_titre?: string | null;
   mission_active_crise_id?: string | null;
   mission_active_crise_nom?: string | null;
+  mission_active_statut?: 'EN_PREPARATION' | 'EN_COURS' | 'TERMINEE' | null;
   institution?:         string | null;      // UUID de l'institution responsable (auto-complétée à la création si absente)
   institution_nom?:     string | null;
   institution_delegataire?:     string | null; // UUID de l'institution délégataire courante (lecture seule, voir TeamService.definirDelegation/retirerDelegation)
@@ -37,6 +38,11 @@ export interface Team {
   equipe_parente?:              string | null; // UUID de l'équipe de tête à laquelle celle-ci est rattachée comme ressource (lecture seule, voir TeamService.rattacherEquipe/detacherEquipe)
   equipe_parente_nom?:          string | null;
   sous_equipes_info?:           { id: string; nom: string }[];
+  canal_meshcore_id?:           string | null;
+  canal_meshcore_nom?:          string | null;
+  canal_meshcore_provisionne?:  boolean;
+  canal_meshtastic_id?:         string | null;
+  canal_meshtastic_nom?:        string | null;
   member_ids:           string[];
   members_info?:        TeamMemberInfo[];
   vehicules_count?:     number;            // Offres de type Transport affectées à l'équipe (lecture seule)

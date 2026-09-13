@@ -141,6 +141,10 @@ from .models import (
     StatutImplication,
     User, Crisis, TypeCrise, Request, RequestPhoto, Offer, OfferPhoto, OfferMessage, Information, DisponibiliteOffre, DisponibilitePointEquipe, MaterielPoint,
     MaterielCatalogue, ContributionMateriel, StatutMateriel, TypeMateriel, NiveauStock, RegistrePresence, TypePersonneAccueillie, DeclarationSecurite, SituationDeclarant,
+    CompagnonMeshCore, NoeudMeshUtilisateur, MessageMeshLog, DirectionMessageMesh, StatutMessageMesh,
+    RelaisMeshCore, CanalMeshCore, MessageCanalMeshCore, ContactMeshCore, TypeContactMeshCore,
+    CompagnonMeshtastic, NoeudUtilisateurMeshtastic, MessageMeshtasticLog,
+    CanalMeshtastic, MessageCanalMeshtastic, ContactMeshtastic,
     AffectationPointBenevole, StatutAffectation,
     RecherchePersonne, RecherchePersonneCommentaire, Besoin, Notification, DossierParticipant,
     RecherchePersonneCommentairePhoto, RecherchePersonneLecture, RecherchePersonneLectureHistorique,
@@ -293,6 +297,19 @@ from .serializers import (
     DisponibilitePointEquipeSerializer,
     MaterielPointSerializer,
     MaterielCatalogueSerializer,
+    CompagnonMeshCoreSerializer,
+    NoeudMeshUtilisateurSerializer,
+    MessageMeshLogSerializer,
+    RelaisMeshCoreSerializer,
+    CanalMeshCoreSerializer,
+    MessageCanalMeshCoreSerializer,
+    ContactMeshCoreSerializer,
+    CompagnonMeshtasticSerializer,
+    NoeudUtilisateurMeshtasticSerializer,
+    MessageMeshtasticLogSerializer,
+    CanalMeshtasticSerializer,
+    MessageCanalMeshtasticSerializer,
+    ContactMeshtasticSerializer,
     ContributionMaterielSerializer,
     RegistrePresenceSerializer,
     DeclarationSecuriteSerializer,
@@ -859,6 +876,20 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             ancien_etat=ancien_statut, nouvel_etat=nouveau_statut,
             commentaire=f"Statut du dossier {dossier.numero} changé : {ancien_statut} → {nouveau_statut}",
         )
+        # Angle mort relevé en audit : un changement de statut intermédiaire ne notifiait
+        # personne, contrairement à marquer_important/cloturer sur le même ViewSet — même
+        # motif que DossierCommentaireViewSet.perform_create (tous les participants, sauf
+        # l'auteur du changement).
+        for participant in dossier.participants.all():
+            if participant.utilisateur_id == request.user.id:
+                continue
+            Notification.objects.create(
+                utilisateur=participant.utilisateur,
+                dossier=dossier,
+                titre="Statut du dossier modifié",
+                message=f"Le dossier {dossier.numero} ({dossier.titre}) est passé au statut « {dossier.get_statut_display()} ».",
+                environment=dossier.environment,
+            )
         return Response(DossierSerializer(dossier, context=self.get_serializer_context()).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsInstitutionalActor])
@@ -991,7 +1022,20 @@ class UserViewSet(viewsets.ModelViewSet):
             return [IsSelfOrInstitutional()]
         if self.action in ('reactiver', 'actualiser_risques'):
             return [IsInstitutionalActor()]
+        if self.action == 'preview':
+            return [permissions.IsAuthenticated()]
         return [permissions.IsAuthenticated()]
+
+    @action(detail=True, methods=["get"])
+    def preview(self, request, pk=None):
+        """Photo de profil, jamais servie en clair (voir UserSerializer.photo_url) : soi-même,
+        ou un acteur institutionnel — jamais un compte tiers quelconque."""
+        user = self.get_object()
+        if not user.photo:
+            return Response(status=404)
+        if not (request.user.id == user.id or get_effective_role(request) in INSTITUTIONAL_TYPES):
+            return Response(status=403)
+        return FileResponse(open(user.photo.path, "rb"))
 
     @action(detail=False, methods=["post"], url_path="actualiser-risques")
     def actualiser_risques(self, request):
@@ -1982,6 +2026,11 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         Request.objects.filter(crisis=crise, actif=False).delete()
         Information.objects.filter(crisis=crise, actif=False).delete()
 
+        _notifier_institutions_impliquees_crise(
+            request, crise, f"Crise clôturée : {crise.name}",
+            f"La crise « {crise.name} » a été clôturée par {user.email}.",
+        )
+
         return Response({"status": "ok", "end_date": crise.end_date})
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdministrator])
@@ -2004,6 +2053,10 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             ancien_etat="CLOTUREE",
             nouvel_etat="OUVERTE",
             commentaire=f"Crise {crise.name} réouverte par {request.user.email}",
+        )
+        _notifier_institutions_impliquees_crise(
+            request, crise, f"Crise réouverte : {crise.name}",
+            f"La crise « {crise.name} » a été réouverte par {request.user.email}.",
         )
 
         return Response({"status": "ok"})
@@ -3184,6 +3237,35 @@ class RequestPhotoViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         return FileResponse(open(photo.image.path, "rb"))
 
 
+def _notifier_membres_equipe(request, team, titre, message, exclure_acteur=True):
+    """Angle mort relevé en audit : definir-mission/definir-delegation/retirer-delegation/
+    lier-point/delier-point/assigner-crise ne notifiaient jamais personne (contrairement à
+    assigner_ressource/provisionner_canal_meshcore sur le même ViewSet). Notifie chaque
+    membre de l'équipe, sauf l'auteur de l'action lui-même."""
+    membres = team.members.all()
+    if exclure_acteur:
+        membres = membres.exclude(id=request.user.id)
+    for membre in membres:
+        Notification.objects.create(
+            utilisateur=membre, titre=titre, message=message,
+            environment=get_active_environment(request),
+        )
+
+
+def _notifier_contacts_institution(request, institution, titre, message):
+    """Notifie chaque contact actif d'une institution (ex: institution délégataire) —
+    variante de _notifier_membres_equipe pour les notifications qui concernent une
+    institution entière plutôt que les seuls membres d'une équipe."""
+    contacts = ContactInstitution.objects.filter(institution=institution, actif=True)
+    for contact in contacts:
+        if contact.utilisateur_id == request.user.id:
+            continue
+        Notification.objects.create(
+            utilisateur=contact.utilisateur, titre=titre, message=message,
+            environment=get_active_environment(request),
+        )
+
+
 def _notify_institution_referent_of_team(team, institution, request):
     """Prévient le référent de l'institution qu'une équipe vient d'être créée sous son
     rattachement — le référent est le contact principal (ContactInstitution.contact_principal)
@@ -3219,6 +3301,37 @@ def _notify_institution_referent_of_team(team, institution, request):
         )
     except Exception as e:
         print(f"Erreur envoi email référent institution (équipe) : {e}")
+
+
+def _declarer_institution_acteur_via_point(crise, institution, point, request):
+    """Crée l'ImplicationInstitution (ACTEUR) si nécessaire quand une institution devient
+    responsable d'un point sur une crise — factorisé entre PointOperationnelViewSet.
+    perform_create et perform_update (avant ce correctif, seule la création de point déclarait
+    l'implication ; une équipe créée à la volée lors de l'ÉDITION d'un point déjà existant, ex:
+    depuis le wizard de démarrage de crise, ne déclarait jamais son institution comme actrice).
+    Statut aligné sur la même règle que la déclaration manuelle (ImplicationInstitutionViewSet) :
+    auto-validée pour une institution publique, en attente de validation par un régulateur
+    AUT_LOCALE sinon (voir _institution_est_publique)."""
+    if not (crise and institution):
+        return
+    implication, created = ImplicationInstitution.objects.get_or_create(
+        crise=crise,
+        institution=institution,
+        type_implication=TypeImplication.ACTEUR,
+        defaults={
+            "utilisateur": request.user, "actif": True, "environment": point.environment,
+            "statut": StatutImplication.VALIDEE if _institution_est_publique(institution) else StatutImplication.EN_ATTENTE,
+        },
+    )
+    if created:
+        audit_log(
+            request=request,
+            action_code="CREATION",
+            objet_type="ImplicationInstitution",
+            objet_id=implication.id,
+            crise=crise,
+            commentaire=f"{institution.nom} déclarée acteur sur la crise {crise.name} (gestion de {point.nom})",
+        )
 
 
 def _creer_equipe_pour_point(point, nom, institution, request):
@@ -3313,6 +3426,73 @@ def _appartient_a_equipe(request, team) -> bool:
         return True
     return bool(team.institution_delegataire_id) and _appartient_a_institution(
         request, team.institution_delegataire
+    )
+
+
+def _assurer_implication_impliquee(request, institution_id, crise):
+    """Garantit qu'une institution assignée à une crise (équipe rattachée via
+    assigner_crise/definir_mission) y a au moins un statut officiel — IMPLIQUE, toujours
+    auto-validée (voir ImplicationInstitutionViewSet.perform_create), jamais un mandat ACTEUR.
+    N'écrase jamais une implication existante (IMPLIQUE ou ACTEUR), ne fait qu'en garantir
+    une au minimum. Doublon structurel relevé en audit : sans ça, une équipe pouvait
+    apparaître opérationnelle sur une crise sans que son institution y ait le moindre statut."""
+    if not institution_id:
+        return
+    if ImplicationInstitution.objects.filter(crise=crise, institution_id=institution_id).exists():
+        return
+    ImplicationInstitution.objects.create(
+        crise=crise, institution_id=institution_id, type_implication=TypeImplication.IMPLIQUE,
+        statut=StatutImplication.VALIDEE, utilisateur=request.user, actif=True,
+        environment=get_active_environment(request),
+    )
+
+
+def _nom_canal_meshtastic_equipe(team) -> str:
+    """"Equipe" + nom d'équipe, sans le doubler quand le nom de l'équipe commence déjà par
+    "Équipe"/"Equipe" (convention de nommage très répandue côté équipes, ex: "Équipe Voirie —
+    Points de transit" aurait sinon donné "EquipeÉquipe Voirie..."). Tronqué à 20 caractères :
+    au-delà, certains firmwares Meshtastic affichent mal le nom du canal."""
+    nom_equipe = team.name.strip()
+    prefixe_deja_present = nom_equipe.lower().startswith(('équipe', 'equipe'))
+    base = nom_equipe if prefixe_deja_present else f"Equipe{nom_equipe}"
+    return base[:20]
+
+
+def _assurer_canal_meshtastic_et_notifier(request, team, user):
+    """Si `user` a un nœud Meshtastic personnel actif, s'assure que l'équipe a déjà un canal
+    Meshtastic (le crée s'il n'existe pas encore — ne le régénère JAMAIS ici, contrairement à
+    TeamViewSet.provisionner_canal_meshtastic qui, lui, notifie tous les membres à la fois) et
+    envoie ses informations en DM à CE seul membre — c'est le déclenchement automatique "à
+    l'affectation" (voir docstring de provisionner_canal_meshtastic pour le détail du
+    fonctionnement PKI/repli canal principal, identique ici)."""
+    noeud = NoeudUtilisateurMeshtastic.objects.filter(utilisateur=user, actif=True).first()
+    if noeud is None:
+        return
+
+    canal = getattr(team, 'canal_meshtastic', None)
+    if canal is None:
+        canal = CanalMeshtastic.objects.create(
+            equipe=team, institution=team.institution,
+            nom=_nom_canal_meshtastic_equipe(team),
+            psk_hex=secrets.token_hex(16),
+            environment=get_active_environment(request),
+        )
+
+    compagnon = CompagnonMeshtastic.objects.filter(actif=True, principal=True).first() \
+        or CompagnonMeshtastic.objects.filter(actif=True).first()
+    if compagnon is None:
+        return
+
+    MessageMeshtasticLog.objects.create(
+        compagnon=compagnon,
+        canal=None,
+        direction=DirectionMessageMesh.SORTANT,
+        contact_node_num=noeud.node_num,
+        contenu=f"{canal.psk_hex} - {canal.nom}",
+        statut=StatutMessageMesh.EN_ATTENTE,
+        expediteur=request.user if request.user.is_authenticated else None,
+        equipe=team,
+        environment=get_active_environment(request),
     )
 
 
@@ -3730,13 +3910,19 @@ class PlanMissionModeleViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
 class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     # TeamSerializer déréférence aussi institution/institution_delegataire/regulateur (FK) et
     # themes/competences/assigned_informations (M2M) en plus de ce qui était déjà prefetch —
-    # 77 requêtes mesurées pour 13 équipes DEMO avant cet ajout.
+    # 77 requêtes mesurées pour 13 équipes DEMO avant cet ajout. mission_active(.crise)/
+    # canal_meshcore/canal_meshtastic ajoutés avec les fonctionnalités du même nom (voir
+    # TeamSerializer) — sans ça, chacun requêtait une fois par équipe (régression mesurée par
+    # test_query_optimization.py).
     queryset           = Team.objects.prefetch_related(
         'members',
         Prefetch('assigned_offers', queryset=Offer.objects.select_related('offer_type')),
         'assigned_crises', 'assigned_requests', 'sous_equipes',
         'themes', 'competences', 'assigned_informations',
-    ).select_related('leader', 'equipe_parente', 'institution', 'institution_delegataire', 'regulateur').all()
+    ).select_related(
+        'leader', 'equipe_parente', 'institution', 'institution_delegataire', 'regulateur',
+        'mission_active', 'mission_active__crise', 'canal_meshcore', 'canal_meshtastic',
+    ).all()
     serializer_class   = TeamSerializer
 
     def get_permissions(self):
@@ -3754,7 +3940,8 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             'lier_point', 'delier_point',
             'rattacher_equipe', 'detacher_equipe',
             'definir_statut_ressource', 'reactiver', 'vue_mairie', 'institutions_liees',
-            'ressources_mobilisees', 'assigner_crise',
+            'ressources_mobilisees', 'assigner_crise', 'provisionner_canal_meshcore',
+            'provisionner_canal_meshtastic',
         ):
             return [IsInstitutionalActor()]
         return [permissions.IsAuthenticated()]
@@ -4130,6 +4317,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             defaults={'actif': True},
         )
         team.members.add(user)
+        _assurer_canal_meshtastic_et_notifier(request, team, user)
 
         if invited:
             # Le lien "vue équipe" de _notify_new_team_member est un lien de connexion magique :
@@ -4180,6 +4368,19 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         mission.equipes.add(team)
         team.mission_active = mission
         team.save(update_fields=['mission_active'])
+        # Synchronise le chemin d'écriture équipe<->crise séparé (assigned_crises, voir
+        # TeamViewSet.assigner_crise) — sans ça, une équipe affectée à une mission d'une crise
+        # peut rester absente de assigned_crises, invisible du recrutement/matching hébergement/
+        # stats qui filtrent dessus (voir doc de conception, doublon relevé explicitement).
+        if crise:
+            team.assigned_crises.add(crise)
+            _assurer_implication_impliquee(request, team.institution_id, crise)
+
+        _notifier_membres_equipe(
+            request, team, "Nouvelle mission",
+            f"Votre équipe a une nouvelle mission : « {mission.titre} »"
+            + (f" (crise : {crise.name})" if crise else "") + ".",
+        )
 
         audit_log(
             request=request,
@@ -4236,6 +4437,14 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_id=team.id,
             commentaire=f"Équipe déléguée à {institution.nom}",
         )
+        _notifier_contacts_institution(
+            request, institution, "Délégation d'équipe",
+            f"Votre institution a été désignée pour gérer l'équipe « {team.name} ».",
+        )
+        _notifier_membres_equipe(
+            request, team, "Équipe déléguée",
+            f"Votre équipe est désormais gérée par {institution.nom}.",
+        )
 
         return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
 
@@ -4264,6 +4473,14 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_type="Team",
             objet_id=team.id,
             commentaire=f"Délégation à {ancienne.nom} retirée",
+        )
+        _notifier_contacts_institution(
+            request, ancienne, "Fin de délégation d'équipe",
+            f"Votre institution n'est plus en charge de l'équipe « {team.name} ».",
+        )
+        _notifier_membres_equipe(
+            request, team, "Fin de délégation",
+            f"{ancienne.nom} ne gère plus votre équipe.",
         )
 
         return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
@@ -4419,6 +4636,25 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             commentaire=f"Ressource « {offer.title} » — statut : {engagement.get_statut_display()}",
         )
 
+        # Angle mort relevé en audit : contrairement à assigner_ressource (email systématique
+        # via send_engagement_confirmation_email), un changement de statut manuel ultérieur ne
+        # notifiait jamais la personne/l'entreprise ayant proposé la ressource.
+        destinataire_email = offer.author.email if offer.author_id else offer.email_offer
+        titre = f"Ressource « {offer.title} » : statut mis à jour"
+        message = f"Le statut de votre ressource « {offer.title} » est désormais : {engagement.get_statut_display()}."
+        if offer.author_id:
+            Notification.objects.create(
+                utilisateur=offer.author, titre=titre, message=message, environment=engagement.environment,
+            )
+        if destinataire_email:
+            try:
+                send_mail_env_aware(
+                    request, subject=titre, message=message, from_email=None,
+                    recipient_list=[destinataire_email], fail_silently=True,
+                )
+            except Exception as e:
+                print(f"Erreur envoi email statut ressource : {e}")
+
         return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
 
     @action(detail=True, methods=['post'], url_path='creer-dossier')
@@ -4509,6 +4745,9 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         point.equipe = team
         point.save(update_fields=['equipe'])
+        if point.crise_id:
+            team.assigned_crises.add(point.crise)
+            _assurer_implication_impliquee(request, team.institution_id, point.crise)
 
         audit_log(
             request=request,
@@ -4516,6 +4755,10 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_type="Team",
             objet_id=team.id,
             commentaire=f"Point lié : « {point.nom} » ({point.type.libelle})",
+        )
+        _notifier_membres_equipe(
+            request, team, "Point rattaché à votre équipe",
+            f"Le point « {point.nom} » ({point.type.libelle}) est désormais rattaché à votre équipe.",
         )
 
         return Response(PointOperationnelSerializer(point, context=self.get_serializer_context()).data)
@@ -4543,6 +4786,11 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             return Response({"error": "Crise introuvable."}, status=status.HTTP_400_BAD_REQUEST)
 
         team.assigned_crises.add(crise)
+        _assurer_implication_impliquee(request, team.institution_id, crise)
+        _notifier_membres_equipe(
+            request, team, "Équipe rattachée à une crise",
+            f"Votre équipe est désormais rattachée à la crise « {crise.name} ».",
+        )
 
         audit_log(
             request=request,
@@ -4553,6 +4801,173 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         )
 
         return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=['post'], url_path='provisionner-canal-meshcore')
+    def provisionner_canal_meshcore(self, request, pk=None):
+        """Crée (ou régénère) LE canal MeshCore privé de cette équipe, et envoie ses
+        informations (nom + clé) en DM à chaque membre équipé d'un nœud MeshCore personnel
+        actif — répond au problème de routage des DM (MessageMeshLog.equipe résolu via
+        `expediteur.teams.first()`, arbitraire dès qu'un utilisateur appartient à plusieurs
+        équipes) : un message de canal, lui, appartient sans ambiguïté à l'équipe du canal.
+
+        `regenerer=true` génère une nouvelle clé (l'ancienne cesse de fonctionner pour qui l'a
+        déjà) et la renvoie à tous les membres ACTUELS uniquement — c'est le mécanisme de
+        révocation : retirer un membre problématique de l'équipe puis régénérer coupe son
+        accès, sans avoir à suivre individuellement qui a reçu quelle clé.
+
+        Ne pousse rien à distance sur les nœuds personnels (impossible : un canal MeshCore se
+        configure localement sur chaque appareil, voir docstring de CanalMeshCore) — le
+        destinataire du DM doit configurer le canal lui-même sur son propre nœud. Le
+        service-pont, en revanche, provisionne automatiquement sa copie du canal sur le
+        companion partagé (voir CompagnonMeshCoreViewSet.canaux_a_provisionner et
+        boucle_provisionnement_canaux côté pont), pour pouvoir y envoyer/recevoir en son nom."""
+        team = self.get_object()
+        if not _appartient_a_equipe(request, team):
+            return Response(
+                {"error": "Vous ne pouvez provisionner un canal MeshCore que pour les équipes de votre institution (ou de l'institution déléguée)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        regenerer = bool(request.data.get('regenerer'))
+        canal = getattr(team, 'canal_meshcore', None)
+        canal_nouveau = canal is None
+        if canal is None:
+            canal = CanalMeshCore.objects.create(
+                equipe=team, institution=team.institution,
+                nom=f"Équipe {team.name}"[:32],
+                cle_partagee_hex=secrets.token_hex(16),
+                environment=get_active_environment(request),
+            )
+        elif regenerer:
+            canal.cle_partagee_hex = secrets.token_hex(16)
+            # La clé change : l'ancien provisionnement local (compagnon/canal_idx) ne
+            # correspond plus à rien, le pont doit reconfigurer son slot avec la nouvelle clé
+            # avant de pouvoir renvoyer/recevoir dessus (voir canaux_a_provisionner, qui
+            # sélectionne aussi sur canal_idx vide).
+            canal.canal_idx = None
+            canal.compagnon = None
+            canal.save(update_fields=['cle_partagee_hex', 'canal_idx', 'compagnon'])
+
+        compagnon = CompagnonMeshCore.objects.filter(actif=True, principal=True).first() \
+            or CompagnonMeshCore.objects.filter(actif=True).first()
+
+        destinataires = []
+        if compagnon is not None:
+            noeuds = NoeudMeshUtilisateur.objects.filter(utilisateur__in=team.members.all(), actif=True).select_related('utilisateur')
+            for noeud in noeuds:
+                MessageMeshLog.objects.create(
+                    compagnon=compagnon,
+                    direction=DirectionMessageMesh.SORTANT,
+                    contact_pubkey_hex=noeud.pubkey_hex,
+                    # Clé en premier (copier-coller plus facile, demande explicite) et message
+                    # volontairement court : un message plus long échoue nettement plus souvent
+                    # en LoRa (temps d'antenne plus long = plus exposé aux collisions/erreurs),
+                    # constaté en pratique ce soir — 0% de réussite au-delà de ~75 octets contre
+                    # ~50% pour un message très court, dans les mêmes conditions radio.
+                    contenu=f"{canal.cle_partagee_hex} - {canal.nom}",
+                    statut=StatutMessageMesh.EN_ATTENTE,
+                    expediteur=request.user,
+                    equipe=team,
+                    environment=get_active_environment(request),
+                )
+                destinataires.append(noeud.utilisateur_id)
+
+        audit_log(
+            request=request,
+            action_code="CREATION" if canal_nouveau else "MODIFICATION",
+            objet_type="CanalMeshCore",
+            objet_id=canal.id,
+            commentaire=(
+                f"Canal MeshCore {'régénéré' if regenerer else 'provisionné'} pour l'équipe « {team.name} » "
+                f"— clé envoyée à {len(destinataires)} membre(s) équipé(s)."
+            ),
+        )
+
+        return Response({
+            "canal_id": str(canal.id),
+            "nom": canal.nom,
+            "destinataires": len(destinataires),
+            "compagnon_disponible": compagnon is not None,
+        })
+
+    @action(detail=True, methods=['post'], url_path='provisionner-canal-meshtastic')
+    def provisionner_canal_meshtastic(self, request, pk=None):
+        """Équivalent Meshtastic de provisionner_canal_meshcore : crée (ou régénère) LE canal
+        Meshtastic privé de cette équipe (PSK partagée), et envoie ses informations (clé
+        d'abord, nom ensuite — copier-coller plus facile) en DM à chaque membre équipé d'un
+        nœud Meshtastic personnel actif.
+
+        Différence importante avec MeshCore : le DM lui-même est envoyé chiffré par clé
+        publique (PKI) dès qu'on connaît déjà celle du destinataire (voir ContactMeshtastic.
+        public_key_hex, captée passivement via son NodeInfo — voir meshtastic-bridge/
+        crypto.py) — bien plus fiable et confidentiel qu'un DM chiffré par la PSK d'un canal
+        partagé, repli automatique si la clé publique n'est pas encore connue (voir
+        MessageMeshtasticLogViewSet.a_envoyer). Le CANAL D'ÉQUIPE annoncé dans le message,
+        lui, reste toujours une PSK partagée classique : Meshtastic n'a pas d'équivalent PKI
+        pour une conversation de GROUPE (le PKI n'est que point-à-point), le destinataire doit
+        donc toujours configurer ce canal lui-même sur son propre appareil, exactement comme
+        pour MeshCore (voir docstring de CanalMeshtastic)."""
+        team = self.get_object()
+        if not _appartient_a_equipe(request, team):
+            return Response(
+                {"error": "Vous ne pouvez provisionner un canal Meshtastic que pour les équipes de votre institution (ou de l'institution déléguée)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        regenerer = bool(request.data.get('regenerer'))
+        canal = getattr(team, 'canal_meshtastic', None)
+        canal_nouveau = canal is None
+        if canal is None:
+            canal = CanalMeshtastic.objects.create(
+                equipe=team, institution=team.institution,
+                nom=_nom_canal_meshtastic_equipe(team),
+                psk_hex=secrets.token_hex(16),
+                environment=get_active_environment(request),
+            )
+        elif regenerer:
+            canal.psk_hex = secrets.token_hex(16)
+            canal.save(update_fields=['psk_hex'])
+
+        compagnon = CompagnonMeshtastic.objects.filter(actif=True, principal=True).first() \
+            or CompagnonMeshtastic.objects.filter(actif=True).first()
+
+        destinataires = []
+        if compagnon is not None:
+            noeuds = NoeudUtilisateurMeshtastic.objects.filter(utilisateur__in=team.members.all(), actif=True).select_related('utilisateur')
+            for noeud in noeuds:
+                MessageMeshtasticLog.objects.create(
+                    compagnon=compagnon,
+                    # None : laisse le pont choisir automatiquement PKI (si la clé publique du
+                    # destinataire est déjà connue) ou le canal principal en repli — voir
+                    # docstring ci-dessus et MessageMeshtasticLogViewSet.a_envoyer.
+                    canal=None,
+                    direction=DirectionMessageMesh.SORTANT,
+                    contact_node_num=noeud.node_num,
+                    contenu=f"{canal.psk_hex} - {canal.nom}",
+                    statut=StatutMessageMesh.EN_ATTENTE,
+                    expediteur=request.user,
+                    equipe=team,
+                    environment=get_active_environment(request),
+                )
+                destinataires.append(noeud.utilisateur_id)
+
+        audit_log(
+            request=request,
+            action_code="CREATION" if canal_nouveau else "MODIFICATION",
+            objet_type="CanalMeshtastic",
+            objet_id=canal.id,
+            commentaire=(
+                f"Canal Meshtastic {'régénéré' if regenerer else 'provisionné'} pour l'équipe « {team.name} » "
+                f"— clé envoyée à {len(destinataires)} membre(s) équipé(s)."
+            ),
+        )
+
+        return Response({
+            "canal_id": str(canal.id),
+            "nom": canal.nom,
+            "destinataires": len(destinataires),
+            "compagnon_disponible": compagnon is not None,
+        })
 
     @action(detail=True, methods=['post'], url_path='delier-point')
     def delier_point(self, request, pk=None):
@@ -4582,6 +4997,10 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_type="Team",
             objet_id=team.id,
             commentaire=f"Point délié : « {point.nom} »",
+        )
+        _notifier_membres_equipe(
+            request, team, "Point détaché de votre équipe",
+            f"Le point « {point.nom} » n'est plus rattaché à votre équipe.",
         )
 
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -4695,6 +5114,26 @@ class MissionViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         if get_effective_role(self.request) in INSTITUTIONAL_TYPES:
             return qs
         return qs.filter(equipes__members=self.request.user).distinct()
+
+    def _synchroniser_equipes(self, mission):
+        """Même correctif que TeamViewSet.definir_mission/assigner_crise/lier_point (doublon
+        structurel relevé en audit) — mais manquait ici, sur le chemin de création/édition
+        générique de la page Missions, qui contourne entièrement ces actions. Sans ça, une
+        mission créée ou éditée directement ici pouvait avoir une crise et des équipes sans
+        que Team.assigned_crises ne le reflète jamais."""
+        if not mission.crise_id:
+            return
+        for team in mission.equipes.all():
+            team.assigned_crises.add(mission.crise_id)
+            _assurer_implication_impliquee(self.request, team.institution_id, mission.crise)
+
+    def perform_create(self, serializer):
+        mission = serializer.save(environment=get_active_environment(self.request))
+        self._synchroniser_equipes(mission)
+
+    def perform_update(self, serializer):
+        mission = serializer.save()
+        self._synchroniser_equipes(mission)
 
 def _apply_rayon_km(request, queryset):
     """Filtre `queryset` (Offer) par rayon en kilomètres autour de la commune de l'institution
@@ -6481,6 +6920,23 @@ class NotificationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             utilisateur=self.request.user, environment=get_active_environment(self.request)
         ).order_by('-date_creation')
 
+def _notifier_lecteurs_et_createur_recherche(request, recherche, titre, message):
+    """Notifie le créateur de la fiche et toute personne l'ayant consultée
+    (RecherchePersonneLecture), sauf l'auteur de l'action — utilisé par retrouver/archiver
+    (angles morts relevés en audit : jusqu'ici, seul l'historique interne était mis à jour)."""
+    destinataires_ids = set(
+        RecherchePersonneLecture.objects.filter(recherche=recherche)
+        .values_list('utilisateur_id', flat=True)
+    )
+    if recherche.createur_id:
+        destinataires_ids.add(recherche.createur_id)
+    destinataires_ids.discard(request.user.id)
+    for user_id in destinataires_ids:
+        Notification.objects.create(
+            utilisateur_id=user_id, titre=titre, message=message, environment=recherche.environment,
+        )
+
+
 class RecherchePersonneViewSet(
     EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
 ):
@@ -6564,6 +7020,10 @@ class RecherchePersonneViewSet(
             objet_id=recherche.id,
             commentaire="Consultation recherche personne"
         )
+        _notifier_lecteurs_et_createur_recherche(
+            request, recherche, f"Recherche archivée : {recherche.prenom} {recherche.nom}",
+            f"La fiche de recherche concernant {recherche.prenom} {recherche.nom} a été archivée.",
+        )
         return Response({"status": "ok"})
 
     @action(
@@ -6609,6 +7069,14 @@ class RecherchePersonneViewSet(
             evenement="Personne retrouvée",
             commentaire="La personne a été déclarée retrouvée",
             environment=recherche.environment,
+        )
+
+        # Angle mort relevé en audit : jusqu'ici, ni le créateur de la fiche ni les
+        # intervenants qui l'ont consultée n'apprenaient le dénouement autrement qu'en
+        # rouvrant l'écran — sur le module le plus sensible humainement du site.
+        _notifier_lecteurs_et_createur_recherche(
+            request, recherche, f"{recherche.prenom} {recherche.nom} a été retrouvé(e)",
+            f"La recherche concernant {recherche.prenom} {recherche.nom} est close : la personne a été retrouvée.",
         )
 
         return Response(
@@ -6843,7 +7311,12 @@ class RecherchePersonnePhotoViewSet(
 
         photo = self.get_object()
 
-        if not request.user.is_authenticated:
+        # Avant ce correctif : "authentifié" seul (déjà garanti par permission_classes,
+        # donc sans filtrage réel) — n'importe quel compte de la plateforme pouvait
+        # consulter les photos de galerie de n'importe quelle personne recherchée. Même
+        # règle que la photo principale (RecherchePersonneViewSet.preview) : créateur ou
+        # acteur institutionnel.
+        if not user_can_view_photo(request, photo.recherche, author_field='createur'):
             return Response(status=403)
 
         return FileResponse(
@@ -6880,7 +7353,8 @@ class RecherchePersonneCommentairePhotoViewSet(
 
         photo = self.get_object()
 
-        if not request.user.is_authenticated:
+        # Même correctif que RecherchePersonnePhotoViewSet.preview ci-dessus.
+        if not user_can_view_photo(request, photo.commentaire.recherche, author_field='createur'):
             return Response(status=403)
 
         return FileResponse(
@@ -7587,14 +8061,25 @@ class PointOperationnelViewSet(
         # Même mécanisme qu'à la création (voir perform_create) : un point déjà existant mais
         # encore sans équipe pouvait jusqu'ici seulement se voir assigner une équipe EXISTANTE
         # (select "Équipe responsable") — créer une équipe à la volée n'était possible qu'au
-        # moment de la création du point, obligeant sinon un aller-retour par l'écran équipes.
-        # Ignoré si le point a déjà une équipe : remplacer l'équipe en place n'est pas le rôle
-        # de ce paramètre (utiliser le select existant pour ça).
+        # moment de la création du point, obligeant sinon un aller-retour par l'écran équipes
+        # (ex: wizard de démarrage de crise, qui crée d'abord le point puis y attache une
+        # équipe à l'étape suivante). Ignoré si le point a déjà une équipe : remplacer
+        # l'équipe en place n'est pas le rôle de ce paramètre (utiliser le select existant).
         nouvelle_equipe_nom = (self.request.data.get('nouvelle_equipe_nom') or '').strip()
         if nouvelle_equipe_nom and not point.equipe_id:
-            _creer_equipe_pour_point(
-                point, nouvelle_equipe_nom, self._resolve_institution_for_new_team(), self.request
-            )
+            institution = self._resolve_institution_for_new_team()
+            # Avant ce correctif, seule la création de point déclarait l'institution comme
+            # actrice de la crise (voir perform_create) — une équipe créée à la volée ici
+            # (édition) ne le faisait jamais, laissant le point "cadré" mais l'institution non
+            # déclarée sur la crise malgré tout.
+            _declarer_institution_acteur_via_point(point.crise, institution, point, self.request)
+            _creer_equipe_pour_point(point, nouvelle_equipe_nom, institution, self.request)
+
+        # Même correctif qu'en création (voir perform_create) : couvre aussi le cas d'une
+        # crise ou d'une équipe ajoutée/changée après coup sur un point déjà existant.
+        if point.crise_id and point.equipe_id:
+            point.equipe.assigned_crises.add(point.crise)
+            _assurer_implication_impliquee(self.request, point.equipe.institution_id, point.crise)
 
     def _resolve_institution_for_new_team(self):
         """Institution à rattacher à une équipe créée à la volée (voir perform_create/
@@ -7620,6 +8105,39 @@ class PointOperationnelViewSet(
         return institution
 
     def perform_create(self, serializer):
+        # Devenir responsable d'un point sur une crise vaut déclaration "acteur" pour
+        # l'institution — pas besoin de le déclarer une seconde fois. `institution` n'est pas un
+        # champ de PointOperationnel : c'est un choix fait dans le formulaire de création, lu
+        # directement depuis le payload. Si l'utilisateur n'a pas le droit de déclarer pour cette
+        # institution (pas contact, pas admin), on retombe sur l'ancienne heuristique (son propre
+        # rattachement) plutôt que d'échouer silencieusement. Résolue même sans crise : sert
+        # aussi à rattacher la nouvelle équipe créée avec le point (voir plus bas), qui n'exige
+        # pas de crise.
+        nouvelle_equipe_nom = (self.request.data.get('nouvelle_equipe_nom') or '').strip()
+        crise = serializer.validated_data.get('crise')
+        institution = None
+        if crise or nouvelle_equipe_nom:
+            institution = self._resolve_institution_for_new_team()
+
+        # Une institution privée (association, entreprise, AASC) ne peut pas obtenir un mandat
+        # d'acteur opérationnel par ce simple raccourci — sans quoi la validation par un
+        # régulateur AUT_LOCALE (ImplicationInstitutionViewSet.valider) serait entièrement
+        # contournable en créant directement un point plutôt qu'en déclarant "acteur". Vérifié
+        # AVANT la création du point, pas après : le mandat doit précéder l'action, pas la
+        # suivre. Une institution publique, ou déjà mandatée (implication ACTEUR VALIDEE
+        # existante), n'est pas concernée.
+        if crise and institution and not _institution_est_publique(institution):
+            deja_mandatee = ImplicationInstitution.objects.filter(
+                crise=crise, institution=institution, type_implication=TypeImplication.ACTEUR,
+                statut=StatutImplication.VALIDEE, actif=True,
+            ).exists()
+            if not deja_mandatee:
+                raise PermissionDenied(
+                    "Votre institution doit être mandatée par un régulateur de cette crise "
+                    "(déclaration \"acteur opérationnel\" validée, onglet Institutions de la "
+                    "crise) avant de pouvoir créer un point opérationnel dessus."
+                )
+
         point = serializer.save(responsable=self.request.user, environment=get_active_environment(self.request))
 
         audit_log(
@@ -7631,44 +8149,26 @@ class PointOperationnelViewSet(
             commentaire=f"Création point opérationnel : {point.nom}",
         )
 
-        # Devenir responsable d'un point sur une crise vaut déclaration "acteur" pour
-        # l'institution — pas besoin de le déclarer une seconde fois. `institution` n'est pas un
-        # champ de PointOperationnel : c'est un choix fait dans le formulaire de création, lu
-        # directement depuis le payload. Si l'utilisateur n'a pas le droit de déclarer pour cette
-        # institution (pas contact, pas admin), on retombe sur l'ancienne heuristique (son propre
-        # rattachement) plutôt que d'échouer silencieusement. Résolue même sans crise : sert
-        # aussi à rattacher la nouvelle équipe créée avec le point (voir plus bas), qui n'exige
-        # pas de crise.
-        nouvelle_equipe_nom = (self.request.data.get('nouvelle_equipe_nom') or '').strip()
-        if point.crise_id or nouvelle_equipe_nom:
-            institution = self._resolve_institution_for_new_team()
+        # `institution`/`nouvelle_equipe_nom` déjà résolus plus haut, avant la création du
+        # point, pour le contrôle de mandat ci-dessus.
+        _declarer_institution_acteur_via_point(point.crise, institution, point, self.request)
 
-            if point.crise_id and institution:
-                implication, created = ImplicationInstitution.objects.get_or_create(
-                    crise=point.crise,
-                    institution=institution,
-                    type_implication=TypeImplication.ACTEUR,
-                    defaults={"utilisateur": self.request.user, "actif": True, "environment": point.environment},
-                )
-                if created:
-                    audit_log(
-                        request=self.request,
-                        action_code="CREATION",
-                        objet_type="ImplicationInstitution",
-                        objet_id=implication.id,
-                        crise=point.crise,
-                        commentaire=(
-                            f"{institution.nom} déclarée acteur sur la crise "
-                            f"{point.crise.name} (gestion de {point.nom})"
-                        ),
-                    )
+        # Créer une équipe en même temps que le point, plutôt que d'obliger à en créer une
+        # séparément avant de pouvoir en assigner une — seulement si aucune équipe n'a déjà
+        # été choisie dans le formulaire (mutuellement exclusifs côté frontend). Même mécanisme
+        # réutilisé depuis perform_update pour un point déjà existant. Indépendant du bloc
+        # ci-dessus : un point sans crise (nouvelle_equipe_nom seul) doit pouvoir créer son
+        # équipe malgré tout.
+        if nouvelle_equipe_nom and not point.equipe_id:
+            _creer_equipe_pour_point(point, nouvelle_equipe_nom, institution, self.request)
 
-            # Créer une équipe en même temps que le point, plutôt que d'obliger à en créer une
-            # séparément avant de pouvoir en assigner une — seulement si aucune équipe n'a déjà
-            # été choisie dans le formulaire (mutuellement exclusifs côté frontend). Même
-            # mécanisme réutilisé depuis perform_update pour un point déjà existant.
-            if nouvelle_equipe_nom and not point.equipe_id:
-                _creer_equipe_pour_point(point, nouvelle_equipe_nom, institution, self.request)
+        # Doublon structurel relevé en audit : PointOperationnel.crise n'était jamais recoupé
+        # avec equipe.assigned_crises — un point pouvait être lié à une crise à laquelle son
+        # équipe titulaire n'était jamais formellement assignée. Couvre les deux cas : équipe
+        # créée à la volée juste au-dessus, ou équipe existante choisie directement au payload.
+        if point.crise_id and point.equipe_id:
+            point.equipe.assigned_crises.add(point.crise)
+            _assurer_implication_impliquee(self.request, point.equipe.institution_id, point.crise)
 
     HEURES_PAR_CRENEAU = 6  # MATIN/MIDI/SOIR/NUIT ≈ 4 créneaux de 6h sur 24h — approximation
     # affichée telle quelle (voir décision : affichage seul, pas de blocage automatique).
@@ -8412,6 +8912,11 @@ class DeclarationSecuriteViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
                 + (f" — centre {centre.nom}" if centre else " — auto-déclaration")
             ),
         )
+        _notifier_institutions_impliquees_crise(
+            self.request, declaration.crise, "Nouvelle déclaration de sécurité",
+            f"{declaration.prenom_referent} {declaration.nom_referent} s'est déclaré(e) en sécurité"
+            + (f" au centre {centre.nom}" if centre else "") + ".",
+        )
 
     def perform_update(self, serializer):
         """Permet à l'auteur de faire évoluer sa propre situation (arrivée/départ d'un centre
@@ -8452,6 +8957,10 @@ class DeclarationSecuriteViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
                 f"Déclaration de sécurité mise à jour : {declaration.prenom_referent} {declaration.nom_referent}"
                 f" — {declaration.get_situation_display()}"
             ),
+        )
+        _notifier_institutions_impliquees_crise(
+            self.request, declaration.crise, "Déclaration de sécurité mise à jour",
+            f"{declaration.prenom_referent} {declaration.nom_referent} : {declaration.get_situation_display()}.",
         )
 
     @action(detail=False, methods=["get"], permission_classes=[IsInstitutionalActor])
@@ -8495,6 +9004,34 @@ def _institution_est_autorite_locale(institution) -> bool:
     return type_code in {"MAIRIE", "EPCI"}
 
 
+def _institution_est_publique(institution) -> bool:
+    """Une institution est publique — pas de mandat requis pour agir sur une crise — si son
+    type est explicitement marqué `est_public` (voir InstitutionType.est_public, seedé pour
+    les codes connus par la migration 0141) OU s'il s'agit d'une mairie/EPCI au sens de
+    `_institution_est_autorite_locale` (code non seedé, ex: créé dynamiquement depuis
+    l'annuaire officiel sous une casse/orthographe différente, ou institution de test) — les
+    deux critères se complètent, aucun des deux seuls ne couvre tous les cas réels."""
+    return bool(getattr(institution.type, "est_public", False)) or _institution_est_autorite_locale(institution)
+
+
+def _notifier_institutions_impliquees_crise(request, crise, titre, message):
+    """Angle mort relevé en audit : clôture/réouverture d'une crise ne notifiait personne
+    (seul un audit_log était écrit) — les équipes/institutions impliquées l'apprenaient en
+    rouvrant l'écran. Notifie chaque contact actif de chaque institution ayant une
+    implication (IMPLIQUE ou ACTEUR, tout statut confondu) sur cette crise."""
+    institution_ids = ImplicationInstitution.objects.filter(
+        crise=crise, actif=True,
+    ).values_list('institution_id', flat=True).distinct()
+    contacts = ContactInstitution.objects.filter(institution_id__in=institution_ids, actif=True)
+    for contact in contacts:
+        if contact.utilisateur_id == request.user.id:
+            continue
+        Notification.objects.create(
+            utilisateur=contact.utilisateur, titre=titre, message=message,
+            environment=crise.environment, crise=crise,
+        )
+
+
 def _regulateurs_aut_locale_de_la_crise(crise):
     """Comptes AUT_LOCALE rattachés (ContactInstitution actif) à une institution elle-même
     impliquée (validée, active) sur `crise` — destinataires de la notification de demande de
@@ -8532,6 +9069,36 @@ def _notifier_demande_validation_implication(request, implication):
                 )
             except Exception as e:
                 print(f"Erreur envoi email validation implication : {e}")
+
+
+def _notifier_verdict_implication(request, implication, valide: bool):
+    """Angle mort relevé en audit : l'institution déclarante était notifiée à la soumission
+    (_notifier_demande_validation_implication) mais jamais du verdict — elle devait revenir
+    vérifier elle-même. Notifie chaque contact actif de l'institution déclarante."""
+    verbe = "validée" if valide else "refusée"
+    titre = f"Votre déclaration acteur sur « {implication.crise.name} » a été {verbe}"
+    message = (
+        f"La déclaration acteur opérationnel de {implication.institution.nom} sur la crise "
+        f"« {implication.crise.name} » a été {verbe} par un régulateur."
+    )
+    destinataires = User.objects.filter(
+        id__in=ContactInstitution.objects.filter(
+            institution=implication.institution, actif=True,
+        ).values_list('utilisateur_id', flat=True),
+    )
+    for user in destinataires:
+        Notification.objects.create(
+            utilisateur=user, titre=titre, message=message, environment=implication.environment,
+            crise=implication.crise,
+        )
+        if user.email:
+            try:
+                send_mail_env_aware(
+                    request, subject=titre, message=message, from_email=None,
+                    recipient_list=[user.email], fail_silently=True,
+                )
+            except Exception as e:
+                print(f"Erreur envoi email verdict implication : {e}")
 
 
 class ImplicationInstitutionViewSet(
@@ -8573,13 +9140,14 @@ class ImplicationInstitutionViewSet(
                 responsable_id, responsable_email, institution, self.request
             )
 
-        # Une institution non-AUT_LOCALE (association, AASC...) qui se déclare acteur
-        # opérationnel reste en attente jusqu'à validation par un régulateur AUT_LOCALE de la
-        # crise — IMPLIQUE et ACTEUR déclaré par une AUT_LOCALE restent auto-validés (statut
-        # VALIDEE, valeur par défaut du modèle).
+        # Une institution privée (association, entreprise, AASC — voir InstitutionType.est_public)
+        # qui se déclare acteur opérationnel reste en attente jusqu'à validation par un
+        # régulateur AUT_LOCALE de la crise : c'est le mandat légal exigé d'une association
+        # n'intervenant pas sur délégation d'une collectivité. IMPLIQUE et ACTEUR déclaré par une
+        # institution publique restent auto-validés (statut VALIDEE, valeur par défaut du modèle).
         statut = StatutImplication.VALIDEE
         type_implication = serializer.validated_data.get("type_implication")
-        if type_implication == TypeImplication.ACTEUR and not _institution_est_autorite_locale(institution):
+        if type_implication == TypeImplication.ACTEUR and not _institution_est_publique(institution):
             statut = StatutImplication.EN_ATTENTE
 
         implication = serializer.save(
@@ -8626,6 +9194,7 @@ class ImplicationInstitutionViewSet(
             crise=implication.crise,
             commentaire=f"Déclaration acteur de {implication.institution.nom} validée par {request.user.email}.",
         )
+        _notifier_verdict_implication(request, implication, valide=True)
         return Response(self.get_serializer(implication).data)
 
     @action(detail=True, methods=['post'])
@@ -8648,6 +9217,7 @@ class ImplicationInstitutionViewSet(
             crise=implication.crise,
             commentaire=f"Déclaration acteur de {implication.institution.nom} refusée par {request.user.email}.",
         )
+        _notifier_verdict_implication(request, implication, valide=False)
         return Response(self.get_serializer(implication).data)
 
     def perform_destroy(self, instance):
@@ -8751,3 +9321,736 @@ class InstitutionDomaineViewSet(
             commentaire=f"Création domaine institution : {domaine.domaine} pour {domaine.institution.nom}",
         )
 
+
+
+class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Nœuds MeshCore en rôle Companion utilisés comme passerelle radio (voir le service-pont
+    externe `meshcore-bridge/`, non hébergé dans ce dépôt Django). Phase de test (voir doc de
+    conception « Maillage Terrain ») : pas encore de scoping institution strict sur la lecture,
+    juste IsInstitutionalActor en écriture comme le reste des ressources d'infrastructure."""
+
+    queryset = CompagnonMeshCore.objects.select_related('institution').all()
+    serializer_class = CompagnonMeshCoreSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        # `rapporter_etat` est appelé par le service-pont (compte de service authentifié,
+        # pas un acteur institutionnel) : authentifié suffit, voir docstring de l'action.
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        compagnon = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="CompagnonMeshCore",
+            objet_id=compagnon.id,
+            commentaire=f"Création companion MeshCore : {compagnon.nom}",
+        )
+
+    @action(detail=True, methods=['post'], url_path='rapporter-etat')
+    def rapporter_etat(self, request, pk=None):
+        """Le service-pont appelle cette action à chaque changement de statut de connexion —
+        c'est ce qui alimente `dernier_etat`/`derniere_connexion` affichés côté admin, puisque
+        la connexion MeshCore elle-même vit dans un processus externe, jamais dans Django."""
+        compagnon = self.get_object()
+        etat = request.data.get('etat')
+        if etat not in ('CONNECTE', 'DECONNECTE', 'ERREUR'):
+            return Response({'detail': "etat doit être CONNECTE, DECONNECTE ou ERREUR."}, status=status.HTTP_400_BAD_REQUEST)
+
+        compagnon.dernier_etat = etat
+        if etat == 'CONNECTE':
+            compagnon.derniere_connexion = timezone.now()
+            compagnon.derniere_erreur = None
+            pubkey = request.data.get('pubkey_hex')
+            if pubkey:
+                compagnon.pubkey_hex = pubkey
+        elif etat == 'ERREUR':
+            compagnon.derniere_erreur = request.data.get('erreur', '')
+
+        compagnon.save(update_fields=['dernier_etat', 'derniere_connexion', 'derniere_erreur', 'pubkey_hex'])
+        return Response(CompagnonMeshCoreSerializer(compagnon).data)
+
+    @action(detail=True, methods=['post'], url_path='synchroniser-contacts')
+    def synchroniser_contacts(self, request, pk=None):
+        """Le service-pont appelle cette action périodiquement (voir bridge.py) avec le
+        répertoire de contacts déjà tenu par le firmware du companion (EventType.CONTACTS) —
+        upsert par (compagnon, pubkey_hex), jamais de suppression ici : un contact qui
+        n'apparaît plus dans une synchro reste visible (peut-être juste hors de portée
+        temporairement), un nettoyage explicite serait un choix produit à part."""
+        compagnon = self.get_object()
+        contacts = request.data.get('contacts', [])
+        if not isinstance(contacts, list):
+            return Response({'detail': "'contacts' doit être une liste."}, status=status.HTTP_400_BAD_REQUEST)
+
+        synchronises = 0
+        for contact in contacts:
+            pubkey_hex = contact.get('pubkey_hex')
+            if not pubkey_hex:
+                continue
+            # N'inclure `nom`/`type_contact` que si réellement fournis : un appel de
+            # rafraîchissement de position seule (voir CompagnonMeshCoreViewSet.
+            # pubkeys_a_suivre, appelé par le pont pendant une mission EN_COURS) n'a que
+            # pubkey_hex/latitude/longitude — les inclure avec un fallback vide/INCONNU
+            # écraserait silencieusement le nom et le type déjà connus de ce contact à
+            # chaque rafraîchissement de position.
+            defaults = {}
+            if 'nom' in contact:
+                defaults['nom'] = contact.get('nom') or ''
+            if 'type_contact' in contact:
+                defaults['type_contact'] = contact.get('type_contact') or TypeContactMeshCore.INCONNU
+            lat, lon = contact.get('latitude'), contact.get('longitude')
+            if lat and lon:
+                from django.contrib.gis.geos import Point
+                defaults['location'] = Point(float(lon), float(lat), srid=4326)
+            dernier_advert = contact.get('dernier_advert')
+            if dernier_advert:
+                from datetime import datetime, timezone as dt_timezone
+                defaults['dernier_advert'] = datetime.fromtimestamp(dernier_advert, tz=dt_timezone.utc)
+
+            ContactMeshCore.objects.update_or_create(
+                compagnon=compagnon, pubkey_hex=pubkey_hex,
+                defaults={**defaults, 'environment': get_active_environment(request)},
+            )
+            synchronises += 1
+
+            # Import automatique des répéteurs détectés — avant ce correctif, il fallait
+            # cliquer "Importer" manuellement (voir relaisDetectes côté front), sans protection
+            # anti-doublon : chaque clic recréait une ligne identique (jusqu'à 9 doublons
+            # trouvés en base pour un même répéteur avant la migration 0145). update_or_create
+            # par pubkey_hex (désormais unique) évite ça ET tient la position à jour à chaque
+            # synchro si le répéteur a bougé, plutôt qu'un import figé une seule fois.
+            if defaults.get('type_contact') == TypeContactMeshCore.REPEATER and 'location' in defaults:
+                RelaisMeshCore.objects.update_or_create(
+                    pubkey_hex=pubkey_hex,
+                    defaults={
+                        'nom': defaults.get('nom') or f"Répéteur {pubkey_hex[:8]}",
+                        'location': defaults['location'],
+                        'institution': compagnon.institution,
+                        'environment': get_active_environment(request),
+                    },
+                )
+
+        return Response({'synchronises': synchronises})
+
+    @action(detail=True, methods=['get'], url_path='pubkeys-a-suivre')
+    def pubkeys_a_suivre(self, request, pk=None):
+        """Le service-pont appelle ceci périodiquement pour savoir quels contacts DÉJÀ connus
+        de ce companion (voir synchroniser_contacts) méritent une interrogation active de
+        position (req_telemetry/send_statusreq côté pont — plus frais qu'une simple annonce
+        périodique, mais sollicite la radio/batterie du nœud terrain) : uniquement les nœuds
+        d'utilisateurs membres d'une équipe dont la mission courante est EN_COURS. En dehors
+        d'une mission, aucun nœud personnel n'est suivi activement — voir doc de conception
+        « Maillage Terrain »."""
+        compagnon = self.get_object()
+        pubkeys_connus = compagnon.contacts.values_list('pubkey_hex', flat=True)
+        pubkeys_cibles = (
+            NoeudMeshUtilisateur.objects.filter(
+                actif=True,
+                pubkey_hex__in=list(pubkeys_connus),
+                utilisateur__teams__mission_active__statut=Mission.Statut.EN_COURS,
+            )
+            .values_list('pubkey_hex', flat=True)
+            .distinct()
+        )
+        return Response({'pubkeys': sorted(pubkeys_cibles)})
+
+    @action(detail=True, methods=['get'], url_path='canaux-a-provisionner')
+    def canaux_a_provisionner(self, request, pk=None):
+        """Le service-pont appelle ceci périodiquement pour savoir quels canaux d'équipe
+        (voir TeamViewSet.provisionner_canal_meshcore) ne sont pas encore configurés
+        localement sur CE companion (canal_idx vide, ou provisionné sur un autre companion —
+        voir docstring de CanalMeshCore : un canal se configure appareil par appareil, jamais
+        à distance). Expose la clé en clair : action réservée au compte de service du pont,
+        seul habilité à appeler set_channel."""
+        compagnon = self.get_object()
+        canaux = CanalMeshCore.objects.filter(actif=True, equipe__isnull=False).filter(
+            Q(canal_idx__isnull=True) | ~Q(compagnon=compagnon)
+        )
+        return Response([
+            {"id": str(c.id), "nom": c.nom, "cle_partagee_hex": c.cle_partagee_hex}
+            for c in canaux
+        ])
+
+    @action(detail=True, methods=['post'], url_path='rapporter-canal-provisionne')
+    def rapporter_canal_provisionne(self, request, pk=None):
+        """Le service-pont appelle ceci après avoir configuré avec succès un canal localement
+        (set_channel) — enregistre l'index de slot attribué sur CE companion, nécessaire pour
+        envoyer/recevoir dessus ensuite (send_chan_msg prend un index local, pas une clé)."""
+        compagnon = self.get_object()
+        canal_id = request.data.get('canal_id')
+        canal_idx = request.data.get('canal_idx')
+        if canal_id is None or canal_idx is None:
+            return Response({"detail": "canal_id et canal_idx sont requis."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            canal = CanalMeshCore.objects.get(id=canal_id)
+        except (CanalMeshCore.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Canal introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        canal.compagnon = compagnon
+        canal.canal_idx = canal_idx
+        canal.save(update_fields=['compagnon', 'canal_idx'])
+        return Response({"ok": True})
+
+
+class NoeudMeshUtilisateurViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Correspondance clé publique MeshCore <-> compte utilisateur — voir docstring du modèle."""
+
+    queryset = NoeudMeshUtilisateur.objects.select_related('utilisateur').all()
+    serializer_class = NoeudMeshUtilisateurSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy', 'positions_en_mission'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        noeud = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="NoeudMeshUtilisateur",
+            objet_id=noeud.id,
+            commentaire=f"Association nœud MeshCore {noeud.pubkey_hex[:12]}… -> {noeud.utilisateur.email}",
+        )
+
+    @action(detail=False, methods=['get'], url_path='positions-en-mission')
+    def positions_en_mission(self, request):
+        """Positions actuelles des nœuds personnels d'utilisateurs membres d'une équipe dont
+        la mission courante est EN_COURS — jamais en dehors d'une mission (voir demande
+        produit « Maillage Terrain » : la position d'un bénévole n'est affichée sur la carte
+        que pendant une mission active, pas en continu). La fraîcheur de ces positions est
+        entretenue côté pont par une interrogation active pendant qu'une mission tourne (voir
+        CompagnonMeshCoreViewSet.pubkeys_a_suivre) — ici on ne fait que lire la dernière
+        position connue (ContactMeshCore), quelle que soit sa source (annonce passive ou
+        interrogation active)."""
+        noeuds = (
+            NoeudMeshUtilisateur.objects.filter(
+                actif=True,
+                utilisateur__teams__mission_active__statut=Mission.Statut.EN_COURS,
+            )
+            .select_related('utilisateur')
+            .distinct()
+        )
+
+        resultats = []
+        for noeud in noeuds:
+            contact = (
+                ContactMeshCore.objects.filter(pubkey_hex=noeud.pubkey_hex, location__isnull=False)
+                .order_by('-dernier_advert')
+                .first()
+            )
+            if not contact:
+                continue
+            equipe = noeud.utilisateur.teams.filter(mission_active__statut=Mission.Statut.EN_COURS).first()
+            resultats.append({
+                'noeud_id': str(noeud.id),
+                'utilisateur_id': str(noeud.utilisateur_id),
+                'utilisateur_nom': (
+                    f"{noeud.utilisateur.first_name} {noeud.utilisateur.last_name}".strip()
+                    or noeud.utilisateur.email
+                ),
+                'nom_noeud': noeud.nom_noeud,
+                'pubkey_hex': noeud.pubkey_hex,
+                'latitude': contact.location.y,
+                'longitude': contact.location.x,
+                'dernier_advert': contact.dernier_advert,
+                'equipe_id': str(equipe.id) if equipe else None,
+                'equipe_nom': equipe.name if equipe else None,
+                'mission_id': str(equipe.mission_active_id) if equipe and equipe.mission_active_id else None,
+                'mission_titre': equipe.mission_active.titre if equipe and equipe.mission_active else None,
+            })
+        return Response(resultats)
+
+
+class MessageMeshLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """DM MeshCore privés régulateur <-> équipe. Principe d'accès (voir doc de conception
+    « Maillage Terrain ») : administrer un companion n'est pas lire les messages qui y
+    transitent — la visibilité est cloisonnée à l'équipe de l'expéditeur, plus stricte que le
+    scoping institution/zone habituel de l'application."""
+
+    queryset = MessageMeshLog.objects.select_related('compagnon', 'expediteur', 'equipe').all()
+    serializer_class = MessageMeshLogSerializer
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsInstitutionalActor()]
+        # create/partial_update/a_envoyer : appelés par le service-pont (dépose un message
+        # entrant, met à jour le statut d'un message sortant après tentative d'envoi, ou
+        # interroge la file d'attente sortante) — compte de service authentifié, pas un acteur
+        # institutionnel humain.
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        equipe_id = self.request.query_params.get('equipe')
+        if equipe_id:
+            qs = qs.filter(equipe_id=equipe_id)
+        # Fil de discussion avec UNE personne précise (voir la vue chat unifiée côté front) —
+        # distinct du filtre équipe ci-dessus, qui mélangerait les messages de tous les
+        # membres équipés d'une même équipe dans un seul fil.
+        contact_pubkey_hex = self.request.query_params.get('contact_pubkey_hex')
+        if contact_pubkey_hex:
+            qs = qs.filter(contact_pubkey_hex=contact_pubkey_hex)
+        if self.action not in ('list', 'retrieve'):
+            return qs
+        if effective_role_or_none(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        user = self.request.user
+        return qs.filter(Q(equipe__leader=user) | Q(equipe__regulateur=user))
+
+    def perform_create(self, serializer):
+        contact_pubkey_hex = serializer.validated_data.get('contact_pubkey_hex')
+        direction = serializer.validated_data.get('direction')
+        expediteur = None
+        if direction == DirectionMessageMesh.ENTRANT and contact_pubkey_hex:
+            # Message reçu du mesh : l'expéditeur réel est la personne de terrain identifiée
+            # par sa clé publique — jamais le compte de service du pont, qui ne fait que
+            # relayer (voir NoeudMeshUtilisateur). Le pont ne transmet qu'un PRÉFIXE de clé
+            # (ce que la trame radio CONTACT_MSG_RECV porte réellement, pas la clé complète) —
+            # on la retrouve ici via le nœud déjà connu, et on normalise vers la clé complète
+            # pour que le filtre `contact_pubkey_hex` du fil de discussion (get_queryset
+            # ci-dessus, comparé à NoeudMeshUtilisateur.pubkey_hex côté front) matche.
+            noeud = NoeudMeshUtilisateur.objects.filter(pubkey_hex__startswith=contact_pubkey_hex, actif=True).select_related('utilisateur').first()
+            expediteur = noeud.utilisateur if noeud else None
+            if noeud:
+                contact_pubkey_hex = noeud.pubkey_hex
+        elif direction == DirectionMessageMesh.SORTANT:
+            # Message composé depuis l'interface : l'expéditeur est le régulateur connecté.
+            expediteur = self.request.user if self.request.user.is_authenticated else None
+        equipe = expediteur.teams.first() if expediteur is not None else None
+
+        message = serializer.save(
+            environment=get_active_environment(self.request), expediteur=expediteur, equipe=equipe,
+            contact_pubkey_hex=contact_pubkey_hex,
+        )
+        if message.direction == DirectionMessageMesh.ENTRANT and message.statut == StatutMessageMesh.EN_ATTENTE:
+            # Un message entrant est par définition déjà reçu, pas "en attente d'envoi" —
+            # filet de sécurité si le service-pont omet `statut` dans son POST.
+            message.statut = StatutMessageMesh.RECU
+            message.save(update_fields=['statut'])
+
+    @action(detail=False, methods=['get'], url_path='a-envoyer')
+    def a_envoyer(self, request):
+        """Messages sortants en attente pour un companion donné — le service-pont interroge
+        cette action à intervalle régulier (voir meshcore-bridge/bridge.py) plutôt que d'exposer
+        un port entrant sur le conteneur du pont, plus simple à opérer."""
+        compagnon_id = request.query_params.get('compagnon')
+        qs = self.get_queryset().filter(direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE)
+        if compagnon_id:
+            qs = qs.filter(compagnon_id=compagnon_id)
+        return Response(MessageMeshLogSerializer(qs, many=True).data)
+
+
+class RelaisMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Répéteurs MeshCore — infrastructure pure, purement déclarative (voir docstring du
+    modèle). Affichés sur la carte comme les autres points d'intérêt de l'app."""
+
+    queryset = RelaisMeshCore.objects.select_related('institution').all()
+    serializer_class = RelaisMeshCoreSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        relais = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="RelaisMeshCore",
+            objet_id=relais.id,
+            commentaire=f"Création relais MeshCore : {relais.nom}",
+        )
+
+
+class CanalMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Canaux MeshCore (coordination générale, visibilité large) — voir docstring du modèle."""
+
+    queryset = CanalMeshCore.objects.select_related('institution', 'crise').all()
+    serializer_class = CanalMeshCoreSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        canal = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="CanalMeshCore",
+            objet_id=canal.id,
+            commentaire=f"Création canal MeshCore : {canal.nom}",
+        )
+
+
+class MessageCanalMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Messages postés sur un canal MeshCore partagé — visibilité alignée sur le canal
+    (institution/crise), pas de cloisonnement par équipe (voir MessageMeshLogViewSet pour les
+    DM privés, qui eux le sont)."""
+
+    queryset = MessageCanalMeshCore.objects.select_related('canal', 'expediteur').all()
+    serializer_class = MessageCanalMeshCoreSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        canal_id = self.request.query_params.get('canal')
+        if canal_id:
+            qs = qs.filter(canal_id=canal_id)
+        return qs
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        direction = serializer.validated_data.get('direction')
+        expediteur = self.request.user if direction == DirectionMessageMesh.SORTANT and self.request.user.is_authenticated else None
+        serializer.save(environment=get_active_environment(self.request), expediteur=expediteur)
+
+    @action(detail=False, methods=['get'], url_path='a-envoyer')
+    def a_envoyer(self, request):
+        """Même principe que MessageMeshLogViewSet.a_envoyer, pour les messages de canal."""
+        canal_id = request.query_params.get('canal')
+        qs = self.get_queryset().filter(direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE)
+        if canal_id:
+            qs = qs.filter(canal_id=canal_id)
+        return Response(MessageCanalMeshCoreSerializer(qs, many=True).data)
+
+
+class ContactMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Répertoire de contacts déjà connu du firmware d'un companion (voir
+    CompagnonMeshCoreViewSet.synchroniser_contacts) — lecture seule ici, jamais créé/modifié
+    à la main : sert à faciliter les associations (NoeudMeshUtilisateur) et la découverte de
+    répéteurs, pas à être édité côté site."""
+
+    queryset = ContactMeshCore.objects.select_related('compagnon').all()
+    serializer_class = ContactMeshCoreSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        compagnon_id = self.request.query_params.get('compagnon')
+        if compagnon_id:
+            qs = qs.filter(compagnon_id=compagnon_id)
+        return qs
+
+
+class CompagnonMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Identités de nœud Meshtastic logicielles utilisées comme passerelle via un broker MQTT
+    tiers (voir docstring du modèle et `meshtastic-bridge/`, hors de ce dépôt Django). Même
+    posture que CompagnonMeshCoreViewSet : phase de test, IsInstitutionalActor en écriture."""
+
+    queryset = CompagnonMeshtastic.objects.select_related('institution').all()
+    serializer_class = CompagnonMeshtasticSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        compagnon = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="CompagnonMeshtastic",
+            objet_id=compagnon.id,
+            commentaire=f"Création companion Meshtastic : {compagnon.nom}",
+        )
+
+    @action(detail=True, methods=['post'], url_path='rapporter-etat')
+    def rapporter_etat(self, request, pk=None):
+        """Même rôle que CompagnonMeshCoreViewSet.rapporter_etat : le pont appelle ceci à
+        chaque changement d'état de sa connexion MQTT."""
+        compagnon = self.get_object()
+        etat = request.data.get('etat')
+        if etat not in ('CONNECTE', 'DECONNECTE', 'ERREUR'):
+            return Response({'detail': "etat doit être CONNECTE, DECONNECTE ou ERREUR."}, status=status.HTTP_400_BAD_REQUEST)
+
+        compagnon.dernier_etat = etat
+        if etat == 'CONNECTE':
+            compagnon.derniere_connexion = timezone.now()
+            compagnon.derniere_erreur = None
+        elif etat == 'ERREUR':
+            compagnon.derniere_erreur = request.data.get('erreur', '')
+
+        compagnon.save(update_fields=['dernier_etat', 'derniere_connexion', 'derniere_erreur'])
+        return Response(CompagnonMeshtasticSerializer(compagnon).data)
+
+    @action(detail=True, methods=['get'], url_path='avec-cle-privee')
+    def avec_cle_privee(self, request, pk=None):
+        """Expose la clé privée X25519 EN CLAIR — jamais via la sérialisation normale (voir
+        CompagnonMeshtasticSerializer, qui l'exclut explicitement). Réservé au pont, qui en a
+        besoin pour calculer l'échange Diffie-Hellman d'un DM chiffré par clé publique (PKI) —
+        même principe que CanalMeshtasticViewSet.avec_cle pour les PSK de canal."""
+        compagnon = self.get_object()
+        return Response({
+            'id': str(compagnon.id), 'x25519_private_key_hex': compagnon.x25519_private_key_hex,
+            'x25519_public_key_hex': compagnon.x25519_public_key_hex,
+        })
+
+    @action(detail=True, methods=['post'], url_path='synchroniser-contacts')
+    def synchroniser_contacts(self, request, pk=None):
+        """Le pont appelle ceci avec les nœuds Meshtastic découverts passivement sur MQTT
+        (paquets NodeInfo/Position décodés) — upsert par (compagnon, node_num), même logique
+        que CompagnonMeshCoreViewSet.synchroniser_contacts (jamais de suppression : un nœud qui
+        n'apparaît plus reste visible, juste potentiellement hors de portée)."""
+        compagnon = self.get_object()
+        contacts = request.data.get('contacts', [])
+        if not isinstance(contacts, list):
+            return Response({'detail': "'contacts' doit être une liste."}, status=status.HTTP_400_BAD_REQUEST)
+
+        synchronises = 0
+        for contact in contacts:
+            node_num = contact.get('node_num')
+            if node_num is None:
+                continue
+            defaults = {}
+            if 'long_name' in contact:
+                defaults['long_name'] = contact.get('long_name') or ''
+            if 'short_name' in contact:
+                defaults['short_name'] = contact.get('short_name') or ''
+            if 'hardware_model' in contact:
+                defaults['hardware_model'] = contact.get('hardware_model') or None
+            if contact.get('public_key_hex'):
+                defaults['public_key_hex'] = contact['public_key_hex']
+            lat, lon = contact.get('latitude'), contact.get('longitude')
+            if lat and lon:
+                from django.contrib.gis.geos import Point
+                defaults['location'] = Point(float(lon), float(lat), srid=4326)
+            dernier_advert = contact.get('dernier_advert')
+            if dernier_advert:
+                from datetime import datetime, timezone as dt_timezone
+                defaults['dernier_advert'] = datetime.fromtimestamp(dernier_advert, tz=dt_timezone.utc)
+
+            ContactMeshtastic.objects.update_or_create(
+                compagnon=compagnon, node_num=node_num,
+                defaults={**defaults, 'environment': get_active_environment(request)},
+            )
+            synchronises += 1
+
+        return Response({'synchronises': synchronises})
+
+
+class NoeudUtilisateurMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Correspondance node_num Meshtastic <-> compte utilisateur — voir docstring du modèle."""
+
+    queryset = NoeudUtilisateurMeshtastic.objects.select_related('utilisateur').all()
+    serializer_class = NoeudUtilisateurMeshtasticSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy', 'positions_en_mission'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        noeud = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="NoeudUtilisateurMeshtastic",
+            objet_id=noeud.id,
+            commentaire=f"Association nœud Meshtastic {noeud.node_num:08x} -> {noeud.utilisateur.email}",
+        )
+
+    @action(detail=False, methods=['get'], url_path='positions-en-mission')
+    def positions_en_mission(self, request):
+        """Même règle produit que NoeudMeshUtilisateurViewSet.positions_en_mission : la
+        position d'un nœud personnel n'est affichée sur la carte que pendant une mission EN_COURS
+        de l'équipe de son porteur — même si Meshtastic diffuse nativement sa position en
+        continu sur le mesh (propriété du protocole qu'on ne peut pas changer), on ne la SURFACE
+        jamais sur la carte assista-crise en dehors de ce cadre, par cohérence avec MeshCore."""
+        noeuds = (
+            NoeudUtilisateurMeshtastic.objects.filter(
+                actif=True,
+                utilisateur__teams__mission_active__statut=Mission.Statut.EN_COURS,
+            )
+            .select_related('utilisateur')
+            .distinct()
+        )
+
+        resultats = []
+        for noeud in noeuds:
+            contact = (
+                ContactMeshtastic.objects.filter(node_num=noeud.node_num, location__isnull=False)
+                .order_by('-dernier_advert')
+                .first()
+            )
+            if not contact:
+                continue
+            equipe = noeud.utilisateur.teams.filter(mission_active__statut=Mission.Statut.EN_COURS).first()
+            resultats.append({
+                'noeud_id': str(noeud.id),
+                'utilisateur_id': str(noeud.utilisateur_id),
+                'utilisateur_nom': (
+                    f"{noeud.utilisateur.first_name} {noeud.utilisateur.last_name}".strip()
+                    or noeud.utilisateur.email
+                ),
+                'nom_noeud': noeud.nom_noeud,
+                'node_num': noeud.node_num,
+                'latitude': contact.location.y,
+                'longitude': contact.location.x,
+                'dernier_advert': contact.dernier_advert,
+                'equipe_id': str(equipe.id) if equipe else None,
+                'equipe_nom': equipe.name if equipe else None,
+                'mission_id': str(equipe.mission_active_id) if equipe and equipe.mission_active_id else None,
+                'mission_titre': equipe.mission_active.titre if equipe and equipe.mission_active else None,
+            })
+        return Response(resultats)
+
+
+class MessageMeshtasticLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """DM Meshtastic privés régulateur <-> équipe — même principe de cloisonnement que
+    MessageMeshLogViewSet (MeshCore) : administrer un companion n'est pas lire les messages."""
+
+    queryset = MessageMeshtasticLog.objects.select_related('compagnon', 'expediteur', 'equipe', 'canal').all()
+    serializer_class = MessageMeshtasticLogSerializer
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        equipe_id = self.request.query_params.get('equipe')
+        if equipe_id:
+            qs = qs.filter(equipe_id=equipe_id)
+        contact_node_num = self.request.query_params.get('contact_node_num')
+        if contact_node_num:
+            qs = qs.filter(contact_node_num=contact_node_num)
+        if self.action not in ('list', 'retrieve'):
+            return qs
+        if effective_role_or_none(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        user = self.request.user
+        return qs.filter(Q(equipe__leader=user) | Q(equipe__regulateur=user))
+
+    def perform_create(self, serializer):
+        contact_node_num = serializer.validated_data.get('contact_node_num')
+        direction = serializer.validated_data.get('direction')
+        expediteur = None
+        if direction == DirectionMessageMesh.ENTRANT and contact_node_num is not None:
+            noeud = NoeudUtilisateurMeshtastic.objects.filter(node_num=contact_node_num, actif=True).select_related('utilisateur').first()
+            expediteur = noeud.utilisateur if noeud else None
+        elif direction == DirectionMessageMesh.SORTANT:
+            expediteur = self.request.user if self.request.user.is_authenticated else None
+        equipe = expediteur.teams.first() if expediteur is not None else None
+
+        message = serializer.save(
+            environment=get_active_environment(self.request), expediteur=expediteur, equipe=equipe,
+        )
+        if message.direction == DirectionMessageMesh.ENTRANT and message.statut == StatutMessageMesh.EN_ATTENTE:
+            message.statut = StatutMessageMesh.RECU
+            message.save(update_fields=['statut'])
+
+    @action(detail=False, methods=['get'], url_path='a-envoyer')
+    def a_envoyer(self, request):
+        """Même principe que MessageMeshLogViewSet.a_envoyer — augmenté de
+        `contact_public_key_hex` (clé publique X25519 du destinataire si on l'a déjà captée,
+        voir ContactMeshtastic.public_key_hex) : c'est ce qui permet au pont de choisir un DM
+        chiffré par clé publique (PKI) plutôt que par PSK de canal quand c'est possible."""
+        compagnon_id = request.query_params.get('compagnon')
+        qs = self.get_queryset().filter(direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE)
+        if compagnon_id:
+            qs = qs.filter(compagnon_id=compagnon_id)
+        data = MessageMeshtasticLogSerializer(qs, many=True).data
+        for message in data:
+            contact = (
+                ContactMeshtastic.objects.filter(node_num=message['contact_node_num'])
+                .exclude(public_key_hex='')
+                .order_by('-date_synchronisation')
+                .first()
+            )
+            message['contact_public_key_hex'] = contact.public_key_hex if contact else None
+        return Response(data)
+
+
+class CanalMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Canaux Meshtastic (coordination générale, visibilité large) — voir docstring du modèle."""
+
+    queryset = CanalMeshtastic.objects.select_related('institution', 'crise').all()
+    serializer_class = CanalMeshtasticSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        canal = serializer.save(environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="CanalMeshtastic",
+            objet_id=canal.id,
+            commentaire=f"Création canal Meshtastic : {canal.nom}",
+        )
+
+    @action(detail=False, methods=['get'], url_path='avec-cle')
+    def avec_cle(self, request):
+        """Canaux actifs avec leur PSK EN CLAIR — le pont en a besoin pour chiffrer/déchiffrer
+        (voir meshtastic-bridge/crypto.py), contrairement à la sérialisation normale
+        (psk_hex en write_only). Même principe que CanalMeshCoreViewSet.canaux_a_provisionner :
+        réservé au compte de service du pont (IsAuthenticated suffit, pas besoin d'être
+        institutionnel), jamais exposé par la sérialisation standard."""
+        canaux = self.get_queryset().filter(actif=True)
+        return Response([
+            {"id": str(c.id), "nom": c.nom, "psk_hex": c.psk_hex, "principal": c.principal}
+            for c in canaux
+        ])
+
+
+class MessageCanalMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Messages postés sur un canal Meshtastic partagé — même principe que
+    MessageCanalMeshCoreViewSet."""
+
+    queryset = MessageCanalMeshtastic.objects.select_related('canal', 'expediteur').all()
+    serializer_class = MessageCanalMeshtasticSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        canal_id = self.request.query_params.get('canal')
+        if canal_id:
+            qs = qs.filter(canal_id=canal_id)
+        return qs
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        direction = serializer.validated_data.get('direction')
+        expediteur = self.request.user if direction == DirectionMessageMesh.SORTANT and self.request.user.is_authenticated else None
+        serializer.save(environment=get_active_environment(self.request), expediteur=expediteur)
+
+    @action(detail=False, methods=['get'], url_path='a-envoyer')
+    def a_envoyer(self, request):
+        """Même principe que MessageCanalMeshCoreViewSet.a_envoyer."""
+        canal_id = request.query_params.get('canal')
+        qs = self.get_queryset().filter(direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE)
+        if canal_id:
+            qs = qs.filter(canal_id=canal_id)
+        return Response(MessageCanalMeshtasticSerializer(qs, many=True).data)
+
+
+class ContactMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Répertoire de nœuds Meshtastic découverts passivement sur MQTT — lecture seule, voir
+    CompagnonMeshtasticViewSet.synchroniser_contacts."""
+
+    queryset = ContactMeshtastic.objects.select_related('compagnon').all()
+    serializer_class = ContactMeshtasticSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        compagnon_id = self.request.query_params.get('compagnon')
+        if compagnon_id:
+            qs = qs.filter(compagnon_id=compagnon_id)
+        return qs

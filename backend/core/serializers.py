@@ -40,6 +40,19 @@ from .models import (
     DisponibilitePointEquipe,
     MaterielPoint,
     MaterielCatalogue,
+    CompagnonMeshCore,
+    NoeudMeshUtilisateur,
+    MessageMeshLog,
+    RelaisMeshCore,
+    CanalMeshCore,
+    MessageCanalMeshCore,
+    ContactMeshCore,
+    CompagnonMeshtastic,
+    CanalMeshtastic,
+    MessageMeshtasticLog,
+    MessageCanalMeshtastic,
+    ContactMeshtastic,
+    NoeudUtilisateurMeshtastic,
     ContributionMateriel,
     StatutMateriel,
     RegistrePresence,
@@ -164,6 +177,18 @@ class UserSerializer(serializers.ModelSerializer):
     institution_id = serializers.SerializerMethodField()
     needs_institution_setup = serializers.SerializerMethodField()
     ma_zone = serializers.SerializerMethodField()
+    # `photo` reste écrivable mais jamais renvoyée telle quelle (voir extra_kwargs plus bas) —
+    # contrairement à tous les autres modèles à photo du site (Crisis/Request/Offer/
+    # Information/RecherchePersonne), elle n'était pas write_only : n'importe quel compte
+    # institutionnel listant les utilisateurs récupérait une URL /media/ publique et
+    # définitive, jamais réévaluée. `photo_url` passe désormais par une action `preview`
+    # qui vérifie les droits à chaque appel (voir UserViewSet.preview).
+    photo_url = serializers.SerializerMethodField()
+
+    def get_photo_url(self, obj):
+        if not obj.photo:
+            return None
+        return f"/api/users/{obj.id}/preview/"
 
     def _active_contact(self, obj):
         # institution_nom et institution_id faisaient chacun leur propre requête pour le même
@@ -218,7 +243,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'type', 'demo_role',
-                  'photo', 'phone_number', 'password', 'postal_code', 'enabled', 'is_active',
+                  'photo', 'photo_url', 'phone_number', 'password', 'postal_code', 'enabled', 'is_active',
                   'institution_name', 'institution_type', 'commune_name', 'commune_code',
                   'institution_nom', 'institution_id', 'needs_institution_setup', 'ma_zone']
         extra_kwargs = {
@@ -226,7 +251,7 @@ class UserSerializer(serializers.ModelSerializer):
             'first_name': {'required': False},
             'last_name': {'required': False},
             'phone_number': {'required': False},
-            'photo': {'required': False},
+            'photo': {'required': False, 'write_only': True},
             'postal_code': {'required': False},
             'enabled': {'required': False},
             'demo_role': {'required': False},
@@ -1082,9 +1107,27 @@ class TeamSerializer(serializers.ModelSerializer):
     mission_active_titre = serializers.CharField(source='mission_active.titre', read_only=True, default=None)
     mission_active_crise_id = serializers.CharField(source='mission_active.crise_id', read_only=True, default=None)
     mission_active_crise_nom = serializers.CharField(source='mission_active.crise.name', read_only=True, default=None)
+    # Permet d'afficher/déclencher le bouton "Démarrer" (EN_PREPARATION -> EN_COURS)
+    # directement depuis la fiche équipe, sans devoir passer par la page Missions séparée.
+    mission_active_statut = serializers.CharField(source='mission_active.statut', read_only=True, default=None)
     equipe_parente_nom = serializers.CharField(source='equipe_parente.name', read_only=True, default=None)
     sous_equipes_info = serializers.SerializerMethodField()
     commune_centre = serializers.SerializerMethodField()
+    # Canal MeshCore privé de l'équipe (voir TeamViewSet.provisionner_canal_meshcore) — permet
+    # à la fiche équipe d'afficher son statut sans appel API séparé.
+    canal_meshcore_id = serializers.CharField(source='canal_meshcore.id', read_only=True, default=None)
+    canal_meshcore_nom = serializers.CharField(source='canal_meshcore.nom', read_only=True, default=None)
+    canal_meshcore_provisionne = serializers.SerializerMethodField()
+    # Idem pour Meshtastic (voir TeamViewSet.provisionner_canal_meshtastic) — pas d'équivalent
+    # "provisionne" ici : contrairement à MeshCore (canal_idx tenu par le pont sur SON
+    # companion), un canal Meshtastic n'a pas d'état de configuration observable côté serveur,
+    # chaque destinataire le configure lui-même sur son propre appareil.
+    canal_meshtastic_id = serializers.CharField(source='canal_meshtastic.id', read_only=True, default=None)
+    canal_meshtastic_nom = serializers.CharField(source='canal_meshtastic.nom', read_only=True, default=None)
+
+    def get_canal_meshcore_provisionne(self, obj):
+        canal = getattr(obj, 'canal_meshcore', None)
+        return canal is not None and canal.canal_idx is not None
 
     def get_commune_centre(self, obj):
         # Centre la minimap de la fiche équipe sur la commune de son institution — repli
@@ -1113,6 +1156,7 @@ class TeamSerializer(serializers.ModelSerializer):
             'mission_active_titre',
             'mission_active_crise_id',
             'mission_active_crise_nom',
+            'mission_active_statut',
             'member_ids',
             'members_info',
             'vehicules_count',
@@ -1127,6 +1171,11 @@ class TeamSerializer(serializers.ModelSerializer):
             'communes',
             'zone_precise',
             'zone_precise_geojson',
+            'canal_meshcore_id',
+            'canal_meshcore_nom',
+            'canal_meshcore_provisionne',
+            'canal_meshtastic_id',
+            'canal_meshtastic_nom',
         ]
         # institution_delegataire/equipe_parente ne sont pas modifiables ici : elles ne doivent
         # changer que via les actions dédiées (definir_delegation/retirer_delegation,
@@ -1337,6 +1386,20 @@ class DossierSerializer(serializers.ModelSerializer):
             'important': {'read_only': True},
             'date_signalement_important': {'read_only': True},
         }
+
+    def validate(self, attrs):
+        # Empêche un Dossier.crise de diverger silencieusement de Dossier.mission.crise (doublon
+        # structurel relevé en audit : rien d'autre dans le code ne garantissait cette
+        # cohérence, un simple PATCH pouvait rattacher un dossier à une mission d'une autre
+        # crise). Tolère un `mission.crise` nul (mission pas encore rattachée à une crise
+        # précise) — seule une divergence explicite entre deux crises différentes est bloquée.
+        crise = attrs.get('crise', getattr(self.instance, 'crise', None))
+        mission = attrs.get('mission', getattr(self.instance, 'mission', None))
+        if crise and mission and mission.crise_id and mission.crise_id != crise.id:
+            raise serializers.ValidationError({
+                'mission': "Cette mission appartient à une autre crise que celle du dossier.",
+            })
+        return attrs
 
     def _origine(self, obj):
         return obj.demande or obj.information
@@ -2492,5 +2555,259 @@ class InstitutionDomaineSerializer(
         model = InstitutionDomaine
 
         fields = "__all__"
+
+
+class CompagnonMeshCoreSerializer(serializers.ModelSerializer):
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True, default=None)
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CompagnonMeshCore
+        fields = "__all__"
+        # Renseignés uniquement par le service-pont (voir docstring du modèle), jamais par un
+        # appel humain via l'API.
+        read_only_fields = ['pubkey_hex', 'derniere_connexion', 'dernier_etat', 'derniere_erreur']
+
+    def get_latitude(self, obj):
+        return obj.location.y if obj.location else None
+
+    def get_longitude(self, obj):
+        return obj.location.x if obj.location else None
+
+    # Même patron que RelaisMeshCoreSerializer._avec_position : latitude/longitude reçues à
+    # plat (pas un WKT), converties en Point ici plutôt que côté frontend.
+    def create(self, validated_data):
+        return self._avec_position(CompagnonMeshCore(), validated_data)
+
+    def update(self, instance, validated_data):
+        return self._avec_position(instance, validated_data)
+
+    def _avec_position(self, instance, validated_data):
+        from django.contrib.gis.geos import Point
+        lat = self.initial_data.get('latitude')
+        lon = self.initial_data.get('longitude')
+        for champ, valeur in validated_data.items():
+            setattr(instance, champ, valeur)
+        if lat is not None and lon is not None:
+            instance.location = Point(float(lon), float(lat), srid=4326)
+        instance.save()
+        return instance
+
+
+class NoeudMeshUtilisateurSerializer(serializers.ModelSerializer):
+    utilisateur_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NoeudMeshUtilisateur
+        fields = "__all__"
+
+    def get_utilisateur_nom(self, obj):
+        return f"{obj.utilisateur.first_name} {obj.utilisateur.last_name}".strip() or obj.utilisateur.email
+
+
+class MessageMeshLogSerializer(serializers.ModelSerializer):
+    compagnon_nom = serializers.CharField(source='compagnon.nom', read_only=True)
+    expediteur_nom = serializers.SerializerMethodField()
+    equipe_nom = serializers.CharField(source='equipe.name', read_only=True, default=None)
+
+    class Meta:
+        model = MessageMeshLog
+        fields = "__all__"
+        # equipe/expediteur sont résolus côté serveur depuis contact_pubkey_hex (voir
+        # MessageMeshLogViewSet.perform_create) — jamais posés par le client.
+        #
+        # statut/erreur/date_envoi NE DOIVENT PAS être ici : le service-pont les met à jour
+        # via PATCH après une tentative d'envoi (voir DjangoClient.marquer_message côté pont,
+        # et le commentaire de MessageMeshLogViewSet.get_permissions qui documente déjà ce
+        # comportement) — les y avoir mis par erreur rendait ce PATCH silencieusement sans
+        # effet (DRF ignore un champ read_only reçu en entrée sans lever d'erreur) : un
+        # message resté EN_ATTENTE à jamais, réessayé en boucle, jamais marqué en échec.
+        read_only_fields = ['expediteur', 'equipe']
+
+    def get_expediteur_nom(self, obj):
+        if not obj.expediteur_id:
+            return None
+        return f"{obj.expediteur.first_name} {obj.expediteur.last_name}".strip() or obj.expediteur.email
+
+
+class RelaisMeshCoreSerializer(serializers.ModelSerializer):
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True, default=None)
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RelaisMeshCore
+        fields = "__all__"
+
+    def get_latitude(self, obj):
+        return obj.location.y if obj.location else None
+
+    def get_longitude(self, obj):
+        return obj.location.x if obj.location else None
+
+    def create(self, validated_data):
+        return self._avec_position(RelaisMeshCore(), validated_data)
+
+    def update(self, instance, validated_data):
+        return self._avec_position(instance, validated_data)
+
+    def _avec_position(self, instance, validated_data):
+        from django.contrib.gis.geos import Point
+        lat = self.initial_data.get('latitude')
+        lon = self.initial_data.get('longitude')
+        for champ, valeur in validated_data.items():
+            setattr(instance, champ, valeur)
+        if lat is not None and lon is not None:
+            instance.location = Point(float(lon), float(lat), srid=4326)
+        instance.save()
+        return instance
+
+
+class CanalMeshCoreSerializer(serializers.ModelSerializer):
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True, default=None)
+    crise_nom = serializers.CharField(source='crise.name', read_only=True, default=None)
+    equipe_nom = serializers.CharField(source='equipe.name', read_only=True, default=None)
+    provisionne = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CanalMeshCore
+        fields = "__all__"
+        extra_kwargs = {'cle_partagee_hex': {'write_only': True}}
+
+    def get_provisionne(self, obj):
+        return obj.canal_idx is not None
+
+
+class ContactMeshCoreSerializer(serializers.ModelSerializer):
+    compagnon_nom = serializers.CharField(source='compagnon.nom', read_only=True)
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+    # Déjà utilisé ailleurs (NoeudMeshUtilisateur) pour indiquer qu'un contact est déjà associé
+    # à un compte — évite un aller-retour supplémentaire côté frontend pour filtrer la liste.
+    deja_associe = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContactMeshCore
+        fields = "__all__"
+
+    def get_latitude(self, obj):
+        return obj.location.y if obj.location else None
+
+    def get_longitude(self, obj):
+        return obj.location.x if obj.location else None
+
+    def get_deja_associe(self, obj):
+        return NoeudMeshUtilisateur.objects.filter(pubkey_hex=obj.pubkey_hex).exists()
+
+
+class CompagnonMeshtasticSerializer(serializers.ModelSerializer):
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True, default=None)
+    # Dérivée de x25519_private_key_hex, jamais l'inverse — à communiquer au correspondant pour
+    # qu'il puisse nous envoyer un DM chiffré par clé publique en retour (voir crypto.py).
+    x25519_public_key_hex = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = CompagnonMeshtastic
+        # x25519_private_key_hex EXCLU explicitement (pas __all__ telle quelle) : c'est la
+        # seule chose qui protège l'identité de ce companion, jamais exposée par l'API sous
+        # aucun prétexte, contrairement au reste des champs.
+        exclude = ['x25519_private_key_hex']
+
+
+class CanalMeshtasticSerializer(serializers.ModelSerializer):
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True, default=None)
+    crise_nom = serializers.CharField(source='crise.name', read_only=True, default=None)
+    equipe_nom = serializers.CharField(source='equipe.name', read_only=True, default=None)
+
+    class Meta:
+        model = CanalMeshtastic
+        fields = "__all__"
+        extra_kwargs = {'psk_hex': {'write_only': True}}
+
+
+class ContactMeshtasticSerializer(serializers.ModelSerializer):
+    compagnon_nom = serializers.CharField(source='compagnon.nom', read_only=True)
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+    deja_associe = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContactMeshtastic
+        fields = "__all__"
+
+    def get_latitude(self, obj):
+        return obj.location.y if obj.location else None
+
+    def get_longitude(self, obj):
+        return obj.location.x if obj.location else None
+
+    def get_deja_associe(self, obj):
+        return NoeudUtilisateurMeshtastic.objects.filter(node_num=obj.node_num).exists()
+
+
+class NoeudUtilisateurMeshtasticSerializer(serializers.ModelSerializer):
+    utilisateur_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NoeudUtilisateurMeshtastic
+        fields = "__all__"
+
+    def get_utilisateur_nom(self, obj):
+        return f"{obj.utilisateur.first_name} {obj.utilisateur.last_name}".strip() or obj.utilisateur.email
+
+
+class MessageMeshtasticLogSerializer(serializers.ModelSerializer):
+    compagnon_nom = serializers.CharField(source='compagnon.nom', read_only=True)
+    expediteur_nom = serializers.SerializerMethodField()
+    equipe_nom = serializers.CharField(source='equipe.name', read_only=True, default=None)
+
+    class Meta:
+        model = MessageMeshtasticLog
+        fields = "__all__"
+        read_only_fields = ['expediteur', 'equipe']
+
+    def get_expediteur_nom(self, obj):
+        if not obj.expediteur_id:
+            return None
+        return f"{obj.expediteur.first_name} {obj.expediteur.last_name}".strip() or obj.expediteur.email
+
+
+class MessageCanalMeshtasticSerializer(serializers.ModelSerializer):
+    canal_nom = serializers.CharField(source='canal.nom', read_only=True)
+    expediteur_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MessageCanalMeshtastic
+        fields = "__all__"
+        read_only_fields = ['expediteur']
+
+    def get_expediteur_nom(self, obj):
+        if not obj.expediteur_id:
+            return None
+        return f"{obj.expediteur.first_name} {obj.expediteur.last_name}".strip() or obj.expediteur.email
+
+
+class MessageCanalMeshCoreSerializer(serializers.ModelSerializer):
+    canal_nom = serializers.CharField(source='canal.nom', read_only=True)
+    # Nécessaire au pont pour appeler send_chan_msg (qui prend un index local, pas une clé) —
+    # voir CanalMeshCore.canal_idx, provisionné par CompagnonMeshCoreViewSet.
+    # rapporter_canal_provisionne.
+    canal_idx = serializers.IntegerField(source='canal.canal_idx', read_only=True)
+    expediteur_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MessageCanalMeshCore
+        fields = "__all__"
+        # Même correctif que MessageMeshLogSerializer : statut/erreur doivent rester
+        # modifiables par le PATCH que le pont envoie après une tentative d'envoi, sinon un
+        # message de canal reste EN_ATTENTE pour toujours (voir MessageCanalMeshCoreViewSet.
+        # get_permissions, qui documente déjà ce comportement attendu côté pont).
+        read_only_fields = ['expediteur']
+
+    def get_expediteur_nom(self, obj):
+        if not obj.expediteur_id:
+            return None
+        return f"{obj.expediteur.first_name} {obj.expediteur.last_name}".strip() or obj.expediteur.email
 
 
