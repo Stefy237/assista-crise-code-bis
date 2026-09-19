@@ -23,9 +23,11 @@ seul, sans redémarrage du service (demande explicite du 14/09).
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
+import socket
 import time
 
 import httpx
@@ -39,6 +41,14 @@ logger = logging.getLogger("meshtastic-bridge")
 DJANGO_API_URL = os.environ["DJANGO_API_URL"]
 DJANGO_EMAIL = os.environ["DJANGO_BRIDGE_EMAIL"]
 DJANGO_PASSWORD = os.environ["DJANGO_BRIDGE_PASSWORD"]
+
+# Bascule vers l'assista-crise LOCAL si le central devient injoignable — même mécanisme que
+# meshcore-bridge/bridge.py:DjangoClient (voir son docstring pour le détail et la limite
+# connue sur la réconciliation UUID). Tous optionnels : absents = comportement historique.
+LOCAL_API_URL = os.environ.get("LOCAL_API_URL")
+LOCAL_BRIDGE_EMAIL = os.environ.get("LOCAL_BRIDGE_EMAIL")
+LOCAL_BRIDGE_PASSWORD = os.environ.get("LOCAL_BRIDGE_PASSWORD")
+FICHIER_ETAT_CONNECTIVITE = os.environ.get("FICHIER_ETAT_CONNECTIVITE", "/var/run/satellite/etat_connectivite.json")
 
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "15"))
 CANAUX_REFRESH_INTERVAL_SECONDS = int(os.environ.get("CANAUX_REFRESH_INTERVAL_SECONDS", "60"))
@@ -80,34 +90,131 @@ def _nom_hardware(valeur: int) -> str | None:
         return None
 
 
-class DjangoClient:
-    """Même patron que meshcore-bridge/bridge.py:DjangoClient (JWT, ré-authentification
-    automatique sur 401)."""
+async def _tester_localhost_backend(port=8000, timeout=2.0):
+    """Voir meshcore-bridge/bridge.py, même fonction : cas le plus courant, ce pont et le
+    backend local sur le MÊME Pi (profil Full)."""
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+async def _decouvrir_backend_local_mdns(duree_s=5.0):
+    """Voir meshcore-bridge/bridge.py, même fonction : satellite à 2 Pi, backend local
+    annoncé par satellite/annoncer_backend_local.py (_ac-local._tcp.local.)."""
+    try:
+        from zeroconf import Zeroconf, ServiceBrowser
+    except ImportError:
+        return None
+
+    trouve = {}
+
+    class _Listener:
+        def add_service(self, zc, type_, name):
+            info = zc.get_service_info(type_, name)
+            if info and info.addresses:
+                trouve["ip"] = socket.inet_ntoa(info.addresses[0])
+                trouve["port"] = info.port
+
+        def remove_service(self, zc, type_, name):
+            pass
+
+        def update_service(self, zc, type_, name):
+            pass
+
+    zc = Zeroconf()
+    try:
+        ServiceBrowser(zc, "_ac-local._tcp.local.", _Listener())
+        await asyncio.sleep(duree_s)
+    finally:
+        zc.close()
+
+    if trouve:
+        return f"http://{trouve['ip']}:{trouve['port']}/api"
+    return None
+
+
+async def resoudre_url_locale():
+    """Voir meshcore-bridge/bridge.py, même fonction et même ordre de résolution (manuel ->
+    localhost -> mDNS -> aucun repli), résolu une seule fois au démarrage."""
+    if LOCAL_API_URL:
+        logger.info("URL locale configurée manuellement : %s", LOCAL_API_URL)
+        return LOCAL_API_URL
+    if await _tester_localhost_backend():
+        logger.info("Backend local détecté sur localhost:8000 (même machine).")
+        return "http://localhost:8000/api"
+    url_mdns = await _decouvrir_backend_local_mdns()
+    if url_mdns:
+        logger.info("Backend local découvert en mDNS : %s", url_mdns)
+        return url_mdns
+    logger.info("Aucun assista-crise local détecté au démarrage — central uniquement.")
+    return None
+
+
+class _CibleAuth:
+    """Une cible (central OU local) avec son propre token — voir meshcore-bridge/bridge.py,
+    même classe."""
 
     def __init__(self, base_url, email, password):
-        self._base_url = base_url.rstrip("/")
-        self._email = email
-        self._password = password
-        self._access_token = None
+        self.base_url = base_url.rstrip("/")
+        self.email = email
+        self.password = password
+        self.access_token = None
+
+
+class DjangoClient:
+    """Même patron que meshcore-bridge/bridge.py:DjangoClient (JWT, ré-authentification
+    automatique sur 401, bascule vers une cible LOCALE si le central est signalé hors-ligne —
+    voir son docstring pour le détail complet et la limite connue sur la réconciliation UUID)."""
+
+    def __init__(self, central_url, central_email, central_password,
+                 local_url=None, local_email=None, local_password=None,
+                 fichier_etat_connectivite=None):
+        self._central = _CibleAuth(central_url, central_email, central_password)
+        self._local = _CibleAuth(local_url, local_email, local_password) if local_url else None
+        self._fichier_etat_connectivite = fichier_etat_connectivite or FICHIER_ETAT_CONNECTIVITE
+        self._cible_precedente = None
         self._client = httpx.AsyncClient(timeout=15)
 
-    async def _authenticate(self):
+    def _cible_actuelle(self):
+        cible = self._central
+        if self._local is not None:
+            try:
+                with open(self._fichier_etat_connectivite, encoding="utf-8") as f:
+                    etat = json.load(f)
+                if etat.get("en_ligne") is False:
+                    cible = self._local
+            except (OSError, ValueError):
+                pass
+        if cible is not self._cible_precedente:
+            logger.info("Cible API : %s (%s).", cible.base_url, "local" if cible is self._local else "central")
+            self._cible_precedente = cible
+        return cible
+
+    async def _authenticate(self, cible):
         response = await self._client.post(
-            f"{self._base_url}/token/", json={"email": self._email, "password": self._password}
+            f"{cible.base_url}/token/", json={"email": cible.email, "password": cible.password}
         )
         response.raise_for_status()
-        self._access_token = response.json()["access"]
-        logger.info("Authentifié auprès de l'API assista-crise.")
+        cible.access_token = response.json()["access"]
+        logger.info("Authentifié auprès de %s.", cible.base_url)
 
     async def _request(self, method, path, **kwargs):
-        if self._access_token is None:
-            await self._authenticate()
-        headers = {"Authorization": f"Bearer {self._access_token}"}
-        response = await self._client.request(method, f"{self._base_url}{path}", headers=headers, **kwargs)
+        cible = self._cible_actuelle()
+        if cible.access_token is None:
+            await self._authenticate(cible)
+        headers = {"Authorization": f"Bearer {cible.access_token}"}
+        response = await self._client.request(method, f"{cible.base_url}{path}", headers=headers, **kwargs)
         if response.status_code == 401:
-            await self._authenticate()
-            headers = {"Authorization": f"Bearer {self._access_token}"}
-            response = await self._client.request(method, f"{self._base_url}{path}", headers=headers, **kwargs)
+            await self._authenticate(cible)
+            headers = {"Authorization": f"Bearer {cible.access_token}"}
+            response = await self._client.request(method, f"{cible.base_url}{path}", headers=headers, **kwargs)
         response.raise_for_status()
         return response
 
@@ -619,11 +726,13 @@ async def demarrer_pour_compagnon(django, compagnon):
     d'échec (broker/appareil injoignable, déconnexion...) SANS jamais laisser une exception
     remonter jusqu'au asyncio.gather() de main() — sinon un seul companion en panne ferait
     planter tout le pont, y compris les autres qui fonctionnent (demande explicite du 14/09 :
-    plusieurs companions actifs en parallèle, donc isolés les uns des autres). Deux modes
+    plusieurs companions actifs en parallèle, donc isolés les uns des autres). Trois modes
     possibles (voir CompagnonMeshtastic.connexion_type côté Django) : MQTT (broker tiers, ex:
-    Gaulix, chiffrement fait maison) ou TCP (connexion locale directe à un vrai appareil, lib
-    officielle `meshtastic`, pensé pour l'usage offline sans internet)."""
-    executer = _executer_compagnon_tcp if compagnon.get("connexion_type") == "TCP" else _executer_compagnon_mqtt
+    Gaulix, chiffrement fait maison), TCP ou SERIE (connexion locale directe à un vrai
+    appareil, lib officielle `meshtastic`, pensé pour l'usage offline sans internet — SERIE
+    pour un satellite avec le nœud branché en USB)."""
+    executeurs_locaux = {"TCP": _executer_compagnon_tcp, "SERIE": _executer_compagnon_serie}
+    executer = executeurs_locaux.get(compagnon.get("connexion_type"), _executer_compagnon_mqtt)
     while True:
         try:
             await executer(django, compagnon)
@@ -632,15 +741,16 @@ async def demarrer_pour_compagnon(django, compagnon):
         await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
 
-async def _executer_compagnon_tcp(django, compagnon):
-    """Connexion locale directe à un VRAI appareil (API TCP native du firmware, lib officielle
-    `meshtastic`) — contrairement au mode MQTT, le firmware gère lui-même le PSK/PKI, comme le
-    fait l'appli officielle en WiFi local : aucun chiffrement fait maison ici. Limité en v1 aux
-    DM (envoi/réception) et à la réception de messages de canal — pas d'envoi sur un canal
-    précis : les canaux d'un vrai appareil sont déjà configurés dessus (PSK gérées par son
-    propre firmware), pas par CanalMeshtastic (pensé pour le mode MQTT logiciel)."""
+async def _executer_compagnon_interface_locale(django, compagnon, construire_interface, libelle_connexion):
+    """Factorise TCP et SERIE (voir les deux wrappers ci-dessous) : dans les deux cas un VRAI
+    appareil est joint directement via la lib officielle `meshtastic` (TCPInterface ou
+    SerialInterface, seule la construction diffère) — le firmware gère lui-même le PSK/PKI,
+    comme le fait l'appli officielle en WiFi local ou en USB : aucun chiffrement fait maison
+    ici, contrairement au mode MQTT. Limité en v1 aux DM (envoi/réception) et à la réception de
+    messages de canal — pas d'envoi sur un canal précis : les canaux d'un vrai appareil sont
+    déjà configurés dessus (PSK gérées par son propre firmware), pas par CanalMeshtastic
+    (pensé pour le mode MQTT logiciel)."""
     from pubsub import pub
-    from meshtastic.tcp_interface import TCPInterface
 
     boucle = asyncio.get_running_loop()
     file_a_planifier = asyncio.Queue()
@@ -664,7 +774,7 @@ async def _executer_compagnon_tcp(django, compagnon):
                 return
             boucle.call_soon_threadsafe(file_a_planifier.put_nowait, coro)
         except Exception:
-            logger.exception("Échec de traitement d'un paquet TCP entrant (%s).", compagnon["nom"])
+            logger.exception("Échec de traitement d'un paquet %s entrant (%s).", libelle_connexion, compagnon["nom"])
 
     def on_connection(interface, topic=None):
         if interface.myInfo is not None:
@@ -678,29 +788,53 @@ async def _executer_compagnon_tcp(django, compagnon):
     pub.subscribe(on_connection, "meshtastic.connection.established")
     pub.subscribe(on_lost, "meshtastic.connection.lost")
 
-    logger.info("Companion Meshtastic '%s' — connexion TCP locale à %s:%s...", compagnon["nom"], compagnon["tcp_host"], compagnon["tcp_port"])
-    iface = TCPInterface(hostname=compagnon["tcp_host"], portNumber=compagnon["tcp_port"])
+    iface = construire_interface()
 
-    async def boucle_envoi_dm_tcp():
+    async def boucle_envoi_dm():
         while True:
             try:
                 for message in await django.dm_a_envoyer(compagnon["id"]):
                     iface.sendText(message["contenu"], destinationId=message["contact_node_num"])
                     await django.marquer_dm(message["id"], "ENVOYE")
             except Exception:
-                logger.exception("Échec du cycle d'envoi des DM (TCP, %s).", compagnon["nom"])
+                logger.exception("Échec du cycle d'envoi des DM (%s, %s).", libelle_connexion, compagnon["nom"])
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     try:
         await asyncio.gather(
             boucle_execution_planifiee(file_a_planifier),
-            boucle_envoi_dm_tcp(),
+            boucle_envoi_dm(),
         )
     finally:
         pub.unsubscribe(on_receive, "meshtastic.receive")
         pub.unsubscribe(on_connection, "meshtastic.connection.established")
         pub.unsubscribe(on_lost, "meshtastic.connection.lost")
         iface.close()
+
+
+async def _executer_compagnon_tcp(django, compagnon):
+    from meshtastic.tcp_interface import TCPInterface
+
+    logger.info("Companion Meshtastic '%s' — connexion TCP locale à %s:%s...", compagnon["nom"], compagnon["tcp_host"], compagnon["tcp_port"])
+    await _executer_compagnon_interface_locale(
+        django, compagnon,
+        construire_interface=lambda: TCPInterface(hostname=compagnon["tcp_host"], portNumber=compagnon["tcp_port"]),
+        libelle_connexion="TCP",
+    )
+
+
+async def _executer_compagnon_serie(django, compagnon):
+    """Appareil branché en USB directement sur l'hôte du pont — cas d'un satellite Raspberry
+    Pi (voir satellite/docker-compose.yml). Même principe que TCP, voir
+    _executer_compagnon_interface_locale."""
+    from meshtastic.serial_interface import SerialInterface
+
+    logger.info("Companion Meshtastic '%s' — connexion série locale à %s...", compagnon["nom"], compagnon["serie_device"])
+    await _executer_compagnon_interface_locale(
+        django, compagnon,
+        construire_interface=lambda: SerialInterface(devPath=compagnon["serie_device"]),
+        libelle_connexion="série",
+    )
 
 
 async def _executer_compagnon_mqtt(django, compagnon):
@@ -778,7 +912,11 @@ async def boucle_reconciliation_compagnons(django, taches):
 async def main():
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
-    django = DjangoClient(DJANGO_API_URL, DJANGO_EMAIL, DJANGO_PASSWORD)
+    url_locale = await resoudre_url_locale()
+    django = DjangoClient(
+        DJANGO_API_URL, DJANGO_EMAIL, DJANGO_PASSWORD,
+        local_url=url_locale, local_email=LOCAL_BRIDGE_EMAIL, local_password=LOCAL_BRIDGE_PASSWORD,
+    )
     await boucle_reconciliation_compagnons(django, {})
 
 

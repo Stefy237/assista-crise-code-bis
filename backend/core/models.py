@@ -388,6 +388,41 @@ class ImplicationInstitution(EnvironmentScopedModel):
         return f"{self.institution} - {self.crise} ({self.type_implication})"
 
 
+class ContributionZoneCommune(EnvironmentScopedModel):
+    """Qui a fait entrer CETTE commune dans `Crisis.zone_communes` — `zone_communes` reste un
+    simple JSONField (utilisé tel quel par tout le scoping zone existant, ex.
+    SatelliteViewSet.supervision), cette table ne fait qu'en tracer la provenance, en plus.
+    `institution` null = ajout sans propriétaire précis (ex. un admin élargissant la zone de
+    réponse sans que ce soit la commune elle-même qui se déclare) : librement retirable par
+    quiconque peut éditer la crise. `institution` renseigné = ajouté par cette commune/EPCI
+    elle-même déclarant une implication, ou par un de ses propres contacts via l'éditeur de
+    zone — voir CrisisViewSet.perform_update, seul cette institution (ou un administrateur
+    global, décision utilisateur du 2026-09-18) peut alors la retirer.
+
+    Une commune n'a qu'UN SEUL propriétaire par crise (contrainte d'unicité) : le premier
+    contributeur fait foi, un second ajout de la même commune ne change pas la provenance déjà
+    enregistrée — cohérent avec le principe "jamais un choix automatique silencieux", on ne
+    réattribue jamais la propriété d'une entrée déjà tracée."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    crise = models.ForeignKey(Crisis, on_delete=models.CASCADE, related_name="contributions_zone_communes")
+    commune_code = models.CharField(max_length=10)
+    institution = models.ForeignKey(
+        "Institution", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="contributions_zone_crises",
+    )
+    date_ajout = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["crise", "commune_code"], name="uq_contribution_zone_crise_commune"),
+        ]
+
+    def __str__(self):
+        return f"{self.commune_code} sur {self.crise} ({self.institution or 'sans propriétaire'})"
+
+
 class DureeHebergement(models.TextChoices):
     TEMPORAIRE = "TEMPORAIRE", "Temporaire"
     LONGUE_DUREE = "LONGUE_DUREE", "Longue durée"
@@ -1230,6 +1265,21 @@ class Institution(EnvironmentScopedModel):
         auto_now_add=True
     )
 
+    # Convention de sous-traitance RGPD (article 28) — voir core/convention_sous_traitance.py
+    # et frontend/.../convention-sous-traitance. Exigée une seule fois PAR INSTITUTION (pas par
+    # utilisateur : la convention lie la collectivité en tant que personne morale, un second
+    # membre qui la rejoint ensuite n'a pas à re-signer) au moment où le PREMIER compte
+    # "Autorité locale" (mairie/EPCI/SDIS) rejoint ou crée cette institution — voir
+    # UserViewSet.confirmer_institution/creer_mon_institution. `convention_version` mémorise le
+    # texte réellement accepté (voir CONVENTION_VERSION) pour ne jamais prétendre couvrir une
+    # future révision sans nouvelle acceptation explicite.
+    convention_sous_traitance_acceptee_le = models.DateTimeField(null=True, blank=True)
+    convention_sous_traitance_acceptee_par = models.ForeignKey(
+        "User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="conventions_sous_traitance_acceptees",
+    )
+    convention_sous_traitance_version = models.CharField(max_length=10, blank=True)
+
     def __str__(self):
         return self.nom
 
@@ -1568,6 +1618,12 @@ class Dossier(EnvironmentScopedModel):
     important = models.BooleanField(default=False)
     date_signalement_important = models.DateTimeField(null=True, blank=True)
 
+    # Ajouté pour la synchronisation local -> central (voir core/sync_outbox.py) : seul moyen
+    # de détecter qu'un satellite a divergé du central pendant une coupure (le central a-t-il
+    # été modifié par quelqu'un d'autre entre-temps ?) sans lui, aucune donnée de version
+    # disponible pour arbitrer un conflit plutôt que d'écraser silencieusement.
+    modifie_le = models.DateTimeField(auto_now=True)
+
     def __str__(self):
         return f"{self.numero} - {self.titre}"
 
@@ -1640,6 +1696,9 @@ class Mission(EnvironmentScopedModel):
         null=True, blank=True,
         related_name="missions_instanciees",
     )
+
+    # Voir Dossier.modifie_le — même rôle pour la synchronisation local -> central.
+    modifie_le = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.titre
@@ -3765,6 +3824,15 @@ class CompagnonMeshCore(EnvironmentScopedModel):
     principal = models.BooleanField(default=False)
     actif = models.BooleanField(default=True)
 
+    # Convention COMMUNAUTAIRE de canal régional (ex: "fr-naq" pour Nouvelle-Aquitaine) — PAS
+    # une notion imposée par le firmware/protocole MeshCore (vérifié : aucune ACL ni aucun
+    # découpage régional protocolaire n'existe côté MeshCore, l'ACL du firmware est une table de
+    # permissions par répéteur/room server, sans rapport avec la géographie). Simple étiquette
+    # texte libre, saisie par un administrateur — sert à core.routage_mesh.
+    # meilleur_compagnon_pour_contact pour repérer quel companion est réputé couvrir quelle
+    # région quand aucun contact direct n'est encore connu pour un destinataire donné.
+    region_tag = models.CharField(max_length=20, blank=True)
+
     derniere_connexion = models.DateTimeField(null=True, blank=True)
     dernier_etat = models.CharField(
         max_length=20, null=True, blank=True,
@@ -4040,6 +4108,22 @@ class ContactMeshCore(EnvironmentScopedModel):
 
     dernier_advert = models.DateTimeField(null=True, blank=True)
 
+    # Nombre de sauts (répéteurs) du chemin connu par CE companion vers ce contact — reflète
+    # `out_path_len` de la lib meshcore (voir EventType.CONTACTS/get_contacts,
+    # meshcore-bridge/bridge.py:boucle_contacts) : None si aucun chemin connu (sentinel
+    # firmware 255, "direct/flood" — pas la même chose que "0 saut", qui signifie un chemin
+    # confirmé sans répéteur). Sert à core.routage_mesh.meilleur_compagnon_pour_contact pour
+    # préférer, à recense égale, le companion le plus proche (le moins de sauts) d'un
+    # destinataire.
+    nombre_sauts = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    # Étiquette régionale (convention communautaire, ex: "fr-naq") assignée manuellement à ce
+    # contact une fois sa zone connue — aucune inférence automatique (le firmware ne fournit
+    # aucune donnée géographique fiable au-delà d'une position GPS optionnelle, souvent absente
+    # pour un simple companion de terrain). Sert de repli dans
+    # core.routage_mesh.meilleur_compagnon_pour_contact quand aucun chemin direct n'est connu.
+    region_tag = models.CharField(max_length=20, blank=True)
+
     date_synchronisation = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -4057,8 +4141,12 @@ class MeshtasticConnexionType(models.TextChoices):
     # défaut) — via la lib officielle `meshtastic` (TCPInterface), pas le chiffrement fait
     # maison de crypto.py : c'est le firmware lui-même qui gère le PSK/PKI, comme le fait
     # l'appli officielle en WiFi local. Pensé pour l'usage offline (PC sans accès internet,
-    # donc sans broker MQTT joignable) — voir meshtastic-bridge/bridge.py:demarrer_tcp.
+    # donc sans broker MQTT joignable) — voir meshtastic-bridge/bridge.py:_executer_compagnon_tcp.
     TCP = "TCP", "Connexion locale directe (réseau, sans internet)"
+    # Même principe que TCP mais l'appareil est branché en USB directement sur l'hôte du pont
+    # (cas d'un satellite Raspberry Pi, voir satellite/docker-compose.yml) — lib officielle
+    # `meshtastic` (SerialInterface), voir meshtastic-bridge/bridge.py:_executer_compagnon_serie.
+    SERIE = "SERIE", "Connexion série (USB, sans internet)"
 
 
 class CompagnonMeshtastic(EnvironmentScopedModel):
@@ -4082,6 +4170,7 @@ class CompagnonMeshtastic(EnvironmentScopedModel):
     connexion_type = models.CharField(max_length=10, choices=MeshtasticConnexionType.choices, default=MeshtasticConnexionType.MQTT)
     tcp_host = models.CharField(max_length=255, null=True, blank=True, help_text="IP/hostname du vrai appareil (mode TCP local uniquement).")
     tcp_port = models.PositiveIntegerField(null=True, blank=True, default=4403)
+    serie_device = models.CharField(max_length=255, null=True, blank=True, help_text="ex: /dev/ttyUSB0 (mode SERIE uniquement).")
 
     node_num = models.PositiveBigIntegerField(
         unique=True,
@@ -4331,4 +4420,218 @@ class MessageCanalMeshtastic(EnvironmentScopedModel):
 
     def __str__(self):
         return f"[{self.canal.nom}] {self.contenu[:40]}"
+
+
+class ProfilSatellite(models.TextChoices):
+    GW = "GW", "Passerelle uniquement"
+    FULL = "FULL", "Suite complète"
+
+
+class StatutEnrolementSatellite(models.TextChoices):
+    EN_ATTENTE = "EN_ATTENTE", "En attente de validation"
+    APPROUVE = "APPROUVE", "Approuvé"
+    REVOQUE = "REVOQUE", "Révoqué"
+
+
+class JetonEnrolementSatellite(EnvironmentScopedModel):
+    """Jeton court, à usage unique, permettant à un satellite (Raspberry Pi déployé sur site,
+    voir Satellite) de prendre contact une première fois avec le central — généré par un
+    administrateur/acteur institutionnel pour SON institution, communiqué hors-bande (affiché
+    à l'écran, saisi manuellement lors de l'installation du Pi). Ne sert qu'à créer l'entrée
+    Satellite (statut EN_ATTENTE, voir SatelliteViewSet.enroler) : les identifiants durables du
+    satellite (compte de service dédié) ne sont générés qu'après validation explicite d'un
+    administrateur, jamais à ce stade — double validation, même principe que le workflow
+    d'acceptation ACTEUR non-AUT_LOCALE (ImplicationInstitutionViewSet)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    institution = models.ForeignKey(
+        Institution, on_delete=models.CASCADE, related_name="jetons_enrolement_satellite",
+    )
+
+    jeton = models.CharField(max_length=64, unique=True)
+
+    expiration = models.DateTimeField()
+
+    utilise = models.BooleanField(default=False)
+
+    cree_par = models.ForeignKey(
+        "User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Jeton enrôlement {self.institution.nom} ({'utilisé' if self.utilise else 'en attente'})"
+
+
+class Satellite(EnvironmentScopedModel):
+    """Boîtier déployé sur site (Raspberry Pi) hébergeant, selon son profil, le pont/proxy
+    MeshCore/Meshtastic local (GW) et/ou une instance assista-crise complète utilisable même
+    sans internet (FULL) — voir le cadrage "Chantier B" (plan). Initie toujours lui-même la
+    connexion sortante vers le central (jamais l'inverse, aucun port entrant à ouvrir sur le
+    site distant).
+
+    Pas de mécanisme de heartbeat séparé : `dernier_contact` est mis à jour par tout appel
+    authentifié réussi du satellite (voir SatelliteViewSet.contact, futur point d'entrée
+    commun des endpoints de synchronisation à venir) — c'est ce même champ, comparé aux seuils
+    `SATELLITE_SEUIL_INACTIF_MINUTES`/`SATELLITE_SEUIL_PERDU_MINUTES` (settings), qui dérive
+    l'état Actif/Inactif/Perdu exposé par le serializer (jamais stocké tel quel : recalculé à
+    la lecture, pour ne jamais avoir un état figé qui ment si personne ne l'a recalculé)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    institution = models.ForeignKey(Institution, on_delete=models.CASCADE, related_name="satellites")
+
+    nom = models.CharField(max_length=100)
+
+    profil = models.CharField(max_length=4, choices=ProfilSatellite.choices)
+
+    statut_enrolement = models.CharField(
+        max_length=12, choices=StatutEnrolementSatellite.choices,
+        default=StatutEnrolementSatellite.EN_ATTENTE,
+    )
+
+    # Compte de service dédié à CE satellite (jamais partagé) — créé uniquement à
+    # l'approbation (SatelliteViewSet.valider), authentifié en JWT par le satellite exactement
+    # comme le pont MeshCore le fait déjà auprès de l'API (voir meshcore-bridge/bridge.py:
+    # DjangoClient) : aucun nouveau mécanisme d'auth introduit ici.
+    compte_service = models.OneToOneField(
+        "User", on_delete=models.SET_NULL, null=True, blank=True, related_name="satellite",
+    )
+
+    dernier_contact = models.DateTimeField(null=True, blank=True)
+
+    version_logicielle = models.CharField(max_length=50, blank=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.nom} ({self.institution.nom}) — {self.statut_enrolement}"
+
+
+class ModeleSynchronisable(models.TextChoices):
+    """Modèles couverts par la synchronisation local -> central (voir core/sync_outbox.py) —
+    périmètre v1 (2026-09-18) : le travail des acteurs institutionnels sur place pendant une
+    coupure (Dossier + son fil de commentaires/historique, DeclarationSecurite, Mission,
+    MessageMeshLog). Explicitement PAS Request/Offer/Information : alimentés par les citoyens
+    via internet, jamais via le LAN privé d'un satellite (voir le cadrage Chantier B) —
+    ajoutables plus tard sans redesign, juste une nouvelle entrée ici + un sérialiseur dédié."""
+    DOSSIER = "Dossier", "Dossier"
+    DOSSIER_COMMENTAIRE = "DossierCommentaire", "Commentaire de dossier"
+    DOSSIER_HISTORIQUE = "DossierHistorique", "Historique de dossier"
+    DECLARATION_SECURITE = "DeclarationSecurite", "Déclaration de sécurité"
+    MISSION = "Mission", "Mission"
+    MESSAGE_MESH_LOG = "MessageMeshLog", "Message mesh"
+
+
+class ActionSynchronisation(models.TextChoices):
+    CREATION = "CREATION", "Création"
+    MODIFICATION = "MODIFICATION", "Modification"
+
+
+class EtatEvenementSynchronisation(models.TextChoices):
+    EN_ATTENTE = "EN_ATTENTE", "En attente"
+    SYNCHRONISE = "SYNCHRONISE", "Synchronisé"
+    CONFLIT = "CONFLIT", "En conflit — arbitrage requis"
+    ERREUR = "ERREUR", "Erreur"
+
+
+class EvenementSynchronisation(EnvironmentScopedModel):
+    """Une écriture locale à propager vers le central — peuplé par des signaux Django
+    (post_save), UNIQUEMENT quand `settings.INSTANCE_SATELLITE_LOCALE` est vrai (jamais côté
+    central lui-même, sinon boucle). Consommé par la commande de gestion
+    `synchroniser_sortant` (tournant dans le conteneur `sync-sortant` du profil Full, voir
+    satellite/docker-compose.yml), qui pousse les événements EN_ATTENTE dans l'ordre
+    chronologique vers `SatelliteViewSet.synchroniser`.
+
+    Écriture toujours locale d'abord (le modèle métier est déjà sauvegardé quand cet
+    enregistrement est créé) ; propagation asynchrone ensuite — jamais de connexion synchrone
+    bloquante au moment de l'écriture, même principe que CommandeMeshCore/MessageMeshLog."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    modele = models.CharField(max_length=30, choices=ModeleSynchronisable.choices)
+    objet_id = models.UUIDField()
+    action = models.CharField(max_length=15, choices=ActionSynchronisation.choices)
+
+    # Snapshot des champs pertinents au moment de l'écriture locale — un dict simple (pas un
+    # sérialiseur DRF réutilisé : `author`/`id` sont read_only sur les sérialiseurs d'admin
+    # existants, voir la note du cadrage Chantier B sur ce sujet), construit par
+    # core/sync_outbox.py.
+    payload = models.JSONField()
+
+    # Valeur de `modifie_le` (côté modèles mutables uniquement, voir ModeleSynchronisable côté
+    # DOSSIER/MISSION) connue AVANT la première écriture locale hors-ligne sur cet objet — sert
+    # à détecter, côté central, si quelqu'un d'autre l'a modifié entre-temps (conflit) plutôt
+    # que d'écraser silencieusement. Null pour les modèles "append-only" (DossierCommentaire,
+    # DossierHistorique, DeclarationSecurite, MessageMeshLog) : jamais réédités après création,
+    # donc jamais de conflit possible sur eux — un simple upsert par id suffit.
+    version_de_base = models.DateTimeField(null=True, blank=True)
+
+    # Snapshot du véritable auteur local (peut n'exister QUE côté local, pas encore de compte
+    # web — voir la note du cadrage sur le compte auto-créé, non construit à ce jour). L'auteur
+    # apparent côté central reste le compte de service du satellite (décision utilisateur du
+    # 2026-09-18) ; ces deux champs permettent de retrouver qui a vraiment agi, affichés dans le
+    # commentaire d'audit posé à l'application de l'événement.
+    auteur_local_email = models.CharField(max_length=255, blank=True)
+    auteur_local_nom = models.CharField(max_length=255, blank=True)
+
+    cree_le = models.DateTimeField(auto_now_add=True)
+
+    etat = models.CharField(
+        max_length=12, choices=EtatEvenementSynchronisation.choices,
+        default=EtatEvenementSynchronisation.EN_ATTENTE,
+    )
+    synchronise_le = models.DateTimeField(null=True, blank=True)
+    erreur = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["cree_le"]
+
+    def __str__(self):
+        return f"{self.action} {self.modele} {self.objet_id} — {self.etat}"
+
+
+class StatutConflitSynchronisation(models.TextChoices):
+    EN_ATTENTE = "EN_ATTENTE", "En attente d'arbitrage"
+    RESOLU_GARDE_CENTRAL = "RESOLU_GARDE_CENTRAL", "Résolu — version centrale conservée"
+    RESOLU_GARDE_LOCAL = "RESOLU_GARDE_LOCAL", "Résolu — version locale appliquée"
+
+
+class ConflitSynchronisation(EnvironmentScopedModel):
+    """Créé côté CENTRAL quand un événement de synchronisation mutable (Dossier/Mission) arrive
+    avec une `version_de_base` qui ne correspond plus à l'état central actuel — quelqu'un
+    (central ou un autre satellite) a modifié cet objet entre-temps. Jamais résolu
+    automatiquement (principe déjà acté au cadrage Chantier B : "jamais un choix automatique
+    silencieux") : un administrateur choisit explicitement quoi garder."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    satellite = models.ForeignKey(Satellite, on_delete=models.CASCADE, related_name="conflits_synchronisation")
+
+    modele = models.CharField(max_length=30, choices=ModeleSynchronisable.choices)
+    objet_id = models.UUIDField()
+
+    payload_local = models.JSONField(help_text="Ce que le satellite tentait d'appliquer.")
+    etat_central_au_conflit = models.JSONField(
+        help_text="Instantané de l'état central au moment du conflit, pour comparaison.",
+    )
+
+    statut = models.CharField(
+        max_length=25, choices=StatutConflitSynchronisation.choices,
+        default=StatutConflitSynchronisation.EN_ATTENTE,
+    )
+
+    cree_le = models.DateTimeField(auto_now_add=True)
+    resolu_le = models.DateTimeField(null=True, blank=True)
+    resolu_par = models.ForeignKey(
+        "User", on_delete=models.SET_NULL, null=True, blank=True, related_name="conflits_synchronisation_resolus",
+    )
+
+    class Meta:
+        ordering = ["-cree_le"]
+
+    def __str__(self):
+        return f"Conflit {self.modele} {self.objet_id} ({self.statut})"
 

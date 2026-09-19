@@ -15,6 +15,28 @@ import { NoeudMeshUtilisateur } from '../../shared/models/noeud-mesh-utilisateur
 import { ContactMeshCore } from '../../shared/models/contact-meshcore.model';
 import { User } from '../../shared/models/user.model';
 
+type Direction = 'asc' | 'desc';
+
+/** Ligne unifiée pour la table "Répéteurs & infrastructure" — fusionne RelaisMeshCore (position
+ * connue, promu automatiquement dès qu'un répéteur annonce un GPS valide, voir
+ * CompagnonMeshCoreViewSet.synchroniser_contacts) et les ContactMeshCore de type non-COMPANION
+ * pas encore promus (pas de position GPS encore reçue) — sans cette fusion, un répéteur sans
+ * position restait indéfiniment mélangé aux companions personnels dans la table "à attribuer"
+ * (deja_associe n'est jamais vrai pour un répéteur, qui n'est jamais attribué à un utilisateur). */
+interface LigneInfrastructure {
+  id: string;
+  relaisId: string | null;
+  nom: string;
+  typeLabel: string;
+  pubkeyHex: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  dernierContact: string | null;
+  nombreSauts: number | null;
+  regionTag: string | null;
+  actif: boolean | null;
+}
+
 /** Page de test MeshCore : juste de quoi déclarer un companion (nom + IP/port, ou device série,
  * ou adresse BLE) sans passer par le Django admin — voir meshcore-bridge/README.md pour le
  * service qui se connecte réellement dessus. Volontairement minimal (pas de gestion
@@ -43,7 +65,14 @@ export class MeshcoreCompanionsComponent implements OnInit {
   // l'afficher sur la carte au même titre qu'un relais (voir map.component.ts).
   nouveauLat: number | null = null;
   nouveauLon: number | null = null;
+  // Convention communautaire de canal régional (ex: "fr-naq") — pas une notion protocolaire
+  // MeshCore, voir CompagnonMeshCore.region_tag.
+  nouveauRegion = '';
   creating = false;
+
+  // Édition de la région d'un companion existant — un champ texte par ligne, pas de modal.
+  regionEnCoursEdition: Record<string, string> = {};
+  savingRegion: string | null = null;
 
   // Détection automatique (usage offline, sans internet) : on donne juste IP + port d'un vrai
   // appareil, le serveur essaie une vraie connexion Meshtastic puis MeshCore et crée le
@@ -69,6 +98,16 @@ export class MeshcoreCompanionsComponent implements OnInit {
   creatingNoeud = false;
 
   contacts: ContactMeshCore[] = [];
+
+  // Recherche/tri companions — table du haut (devices physiques du pont).
+  companionRecherche = '';
+  companionTri: 'nom' | 'derniere_connexion' = 'nom';
+  companionDirection: Direction = 'asc';
+
+  // Recherche/tri répéteurs & infrastructure — voir lignesInfrastructure ci-dessous.
+  infraRecherche = '';
+  infraTri: 'nom' | 'dernierContact' | 'nombreSauts' = 'nom';
+  infraDirection: Direction = 'asc';
 
   /** Paramétrage/affectation MeshCore jamais consultable ni modifiable depuis la zone DEMO
    * (voir BlockedInDemoMixin côté serveur, CompagnonMeshCoreViewSet/NoeudMeshUtilisateurViewSet
@@ -105,12 +144,142 @@ export class MeshcoreCompanionsComponent implements OnInit {
     this.contactService.getAll().subscribe(data => { this.contacts = data; });
   }
 
-  /** Contacts de type Companion, pas encore associés à un compte — c'est ce qui alimente le
-   * sélecteur de l'étape « Associer un nœud » ci-dessous, à la place d'une saisie manuelle de
-   * clé publique. Répertoire déjà tenu par le firmware, synchronisé par le pont — voir
-   * bridge.py, boucle_contacts. */
+  /** Companions personnels pas encore associés à un compte utilisateur — RESTREINT au type
+   * COMPANION (corrigé le 2026-09-18 : un répéteur/room server/capteur n'est jamais attribuable
+   * à un utilisateur, deja_associe reste donc toujours faux pour eux, ce qui les laissait
+   * s'accumuler indéfiniment ici, mélangés aux vrais companions personnels — voir
+   * lignesInfrastructure pour leur affichage dédié). Répertoire déjà tenu par le firmware,
+   * synchronisé par le pont — voir bridge.py, boucle_contacts. */
   get contactsDisponibles(): ContactMeshCore[] {
     return this.contacts.filter(c => c.type_contact === 'COMPANION' && !c.deja_associe);
+  }
+
+  /** Compare deux valeurs pour le tri des tables ci-dessous — une valeur manquante (null/
+   * undefined) est toujours reléguée en fin de liste, quel que soit le sens du tri, plutôt que
+   * de sauter en tête en mode "desc" (ce qui serait déroutant : "aucune donnée" n'est jamais le
+   * résultat le plus pertinent). */
+  private comparer(a: string | number | null | undefined, b: string | number | null | undefined, direction: Direction): number {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    const resultat = a < b ? -1 : a > b ? 1 : 0;
+    return direction === 'asc' ? resultat : -resultat;
+  }
+
+  /** Flèche de tri affichée dans l'en-tête de colonne cliqué — vide si ce n'est pas la colonne
+   * de tri actuelle, pour ne pas encombrer les autres en-têtes. */
+  indicateurTri(colonneActuelle: string, colonneAffichee: string, direction: Direction): string {
+    if (colonneActuelle !== colonneAffichee) return '';
+    return direction === 'asc' ? '▲' : '▼';
+  }
+
+  trierCompagnons(colonne: 'nom' | 'derniere_connexion'): void {
+    if (this.companionTri === colonne) {
+      this.companionDirection = this.companionDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      this.companionTri = colonne;
+      this.companionDirection = 'asc';
+    }
+  }
+
+  get companionsAffiches(): CompagnonMeshCore[] {
+    const recherche = this.companionRecherche.trim().toLowerCase();
+    let liste = this.companions;
+    if (recherche) {
+      liste = liste.filter(c =>
+        c.nom.toLowerCase().includes(recherche) || this.adresse(c).toLowerCase().includes(recherche),
+      );
+    }
+    return [...liste].sort((a, b) => {
+      if (this.companionTri === 'nom') return this.comparer(a.nom.toLowerCase(), b.nom.toLowerCase(), this.companionDirection);
+      return this.comparer(a.derniere_connexion, b.derniere_connexion, this.companionDirection);
+    });
+  }
+
+  trierInfrastructure(colonne: 'nom' | 'dernierContact' | 'nombreSauts'): void {
+    if (this.infraTri === colonne) {
+      this.infraDirection = this.infraDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      this.infraTri = colonne;
+      this.infraDirection = 'asc';
+    }
+  }
+
+  /** Table unifiée "Répéteurs & infrastructure" — voir LigneInfrastructure. Un répéteur déjà
+   * promu en RelaisMeshCore (position GPS connue) est enrichi avec dernier contact/sauts/région
+   * depuis le ContactMeshCore de même pubkey_hex ; un répéteur/room server/capteur pas encore
+   * promu (aucune position reçue) apparaît quand même, sans position, plutôt que de rester
+   * invisible en attendant un GPS qui n'arrivera peut-être jamais (ex: room server fixe sans
+   * module GPS). */
+  get lignesInfrastructure(): LigneInfrastructure[] {
+    const parPubkey = new Map<string, ContactMeshCore>();
+    for (const c of this.contacts) {
+      if (c.type_contact !== 'COMPANION' && c.pubkey_hex) parPubkey.set(c.pubkey_hex, c);
+    }
+    const pubkeysCouverts = new Set<string>();
+    const lignes: LigneInfrastructure[] = [];
+
+    for (const r of this.relais) {
+      const contact = r.pubkey_hex ? parPubkey.get(r.pubkey_hex) : undefined;
+      if (r.pubkey_hex) pubkeysCouverts.add(r.pubkey_hex);
+      lignes.push({
+        id: r.id,
+        relaisId: r.id,
+        nom: r.nom,
+        typeLabel: contact ? this.typeContactLabel(contact.type_contact) : 'Répéteur',
+        pubkeyHex: r.pubkey_hex ?? null,
+        latitude: r.latitude ?? null,
+        longitude: r.longitude ?? null,
+        dernierContact: contact?.dernier_advert ?? null,
+        nombreSauts: contact?.nombre_sauts ?? null,
+        regionTag: contact?.region_tag ?? null,
+        actif: r.actif,
+      });
+    }
+
+    for (const c of this.contacts) {
+      if (c.type_contact === 'COMPANION') continue;
+      if (c.pubkey_hex && pubkeysCouverts.has(c.pubkey_hex)) continue;
+      lignes.push({
+        id: c.id,
+        relaisId: null,
+        nom: c.nom || '(sans nom annoncé)',
+        typeLabel: this.typeContactLabel(c.type_contact),
+        pubkeyHex: c.pubkey_hex,
+        latitude: c.latitude ?? null,
+        longitude: c.longitude ?? null,
+        dernierContact: c.dernier_advert ?? null,
+        nombreSauts: c.nombre_sauts ?? null,
+        regionTag: c.region_tag ?? null,
+        actif: null,
+      });
+    }
+
+    const recherche = this.infraRecherche.trim().toLowerCase();
+    let filtrees = lignes;
+    if (recherche) {
+      filtrees = filtrees.filter(l =>
+        l.nom.toLowerCase().includes(recherche)
+        || (l.pubkeyHex || '').toLowerCase().includes(recherche)
+        || (l.regionTag || '').toLowerCase().includes(recherche),
+      );
+    }
+    return filtrees.sort((a, b) => {
+      if (this.infraTri === 'nom') return this.comparer(a.nom.toLowerCase(), b.nom.toLowerCase(), this.infraDirection);
+      if (this.infraTri === 'nombreSauts') return this.comparer(a.nombreSauts, b.nombreSauts, this.infraDirection);
+      return this.comparer(a.dernierContact, b.dernierContact, this.infraDirection);
+    });
+  }
+
+  /** Une ligne pas encore promue en RelaisMeshCore (aucune position GPS reçue) n'a rien à
+   * supprimer côté serveur — c'est un ContactMeshCore synchronisé automatiquement par le pont,
+   * qui ne disparaît jamais tout seul même si ce contact n'est plus vu (synchroniser_contacts
+   * ne fait que créer/mettre à jour, jamais supprimer) : rien à faire ici tant que ce contact
+   * n'a pas de position, le bouton Supprimer reste donc caché pour ces lignes. */
+  supprimerLigneInfrastructure(ligne: LigneInfrastructure): void {
+    if (!ligne.relaisId) return;
+    const relais = this.relais.find(r => r.id === ligne.relaisId);
+    if (relais) this.supprimerRelais(relais);
   }
 
 
@@ -187,6 +356,14 @@ export class MeshcoreCompanionsComponent implements OnInit {
         this.attribuingContactId = null;
       },
     });
+  }
+
+  typeContactLabel(type: ContactMeshCore['type_contact']): string {
+    const libelles: Record<ContactMeshCore['type_contact'], string> = {
+      COMPANION: 'Companion', REPEATER: 'Répéteur', ROOM: 'Room server',
+      SENSOR: 'Capteur', INCONNU: 'Inconnu',
+    };
+    return libelles[type] ?? type;
   }
 
   ajouterNoeud(): void {
@@ -269,6 +446,9 @@ export class MeshcoreCompanionsComponent implements OnInit {
       payload.latitude = this.nouveauLat;
       payload.longitude = this.nouveauLon;
     }
+    if (this.nouveauRegion.trim()) {
+      payload.region_tag = this.nouveauRegion.trim();
+    }
 
     this.creating = true;
     this.service.create(payload).subscribe({
@@ -279,9 +459,32 @@ export class MeshcoreCompanionsComponent implements OnInit {
         this.nouveauBle = '';
         this.nouveauLat = null;
         this.nouveauLon = null;
+        this.nouveauRegion = '';
         this.creating = false;
       },
       error: () => { this.errorMessage = "Impossible de créer ce companion."; this.creating = false; },
+    });
+  }
+
+  /** Édition inline de la région d'un companion déjà créé — champ texte + bouton par ligne,
+   * pas de modal (cohérent avec le reste de cette page). */
+  regionEditee(companion: CompagnonMeshCore): string {
+    return this.regionEnCoursEdition[companion.id] ?? companion.region_tag ?? '';
+  }
+
+  enregistrerRegion(companion: CompagnonMeshCore): void {
+    const valeur = (this.regionEnCoursEdition[companion.id] ?? '').trim();
+    this.savingRegion = companion.id;
+    this.service.update(companion.id, { region_tag: valeur }).subscribe({
+      next: (mis_a_jour) => {
+        companion.region_tag = mis_a_jour.region_tag;
+        delete this.regionEnCoursEdition[companion.id];
+        this.savingRegion = null;
+      },
+      error: () => {
+        this.errorMessage = "Impossible d'enregistrer la région de ce companion.";
+        this.savingRegion = null;
+      },
     });
   }
 

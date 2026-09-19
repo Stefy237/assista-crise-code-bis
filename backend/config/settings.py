@@ -276,6 +276,57 @@ SERVER_URL = os.environ.get(
 # purgées par `python manage.py purge_audit_logs` (principe de minimisation RGPD).
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get('AUDIT_LOG_RETENTION_DAYS', 30))
 
+# Seuils de dérivation de l'état Actif/Inactif/Perdu d'un Satellite (voir Satellite.etat,
+# core/serializers.py) à partir de `dernier_contact` — chaque appel authentifié réussi d'un
+# satellite (pas de heartbeat séparé) met à jour ce champ. Volontairement configurables plutôt
+# qu'en dur : le bon réglage dépendra du retour terrain, comme cela a été le cas pour
+# SILENCE_FIN_REPONSE côté proxy MeshCore.
+SATELLITE_SEUIL_INACTIF_MINUTES = int(os.environ.get('SATELLITE_SEUIL_INACTIF_MINUTES', 15))
+SATELLITE_SEUIL_PERDU_MINUTES = int(os.environ.get('SATELLITE_SEUIL_PERDU_MINUTES', 120))
+
+# Rayon (km) utilisé par SatelliteViewSet.supervision pour approximer les communes
+# "limitrophes" d'une institution communale — le référentiel Commune ne conserve que des
+# centroïdes (voir Commune.__doc__), pas de géométrie précise, donc pas de vraie adjacence de
+# polygones possible ici : distance de centroïde à centroïde, candidates restreintes au même
+# département. Approximation assumée, à affiner si des géométries communales précises entrent
+# un jour en base.
+SATELLITE_SUPERVISION_RAYON_LIMITROPHE_KM = int(os.environ.get('SATELLITE_SUPERVISION_RAYON_LIMITROPHE_KM', 15))
+
+# Active la file de synchronisation local -> central (core/sync_outbox.py) : seule une
+# instance Full de satellite (backend local tournant sur le Pi) doit peupler la file à chaque
+# écriture locale — le central ne doit jamais le faire (sinon boucle : le central "synchronise
+# vers lui-même"). Réglé explicitement à True uniquement dans satellite/.env.example (profil
+# full), absent/False partout ailleurs.
+INSTANCE_SATELLITE_LOCALE = os.environ.get('INSTANCE_SATELLITE_LOCALE', 'False') == 'True'
+
+# Intervalle (secondes) entre deux tentatives de la commande synchroniser_sortant côté
+# satellite Full — voir satellite/docker-compose.yml, service sync-sortant. Toujours tentée,
+# que le central soit vu en ligne ou non par etat_connectivite.py (décision utilisateur du
+# 2026-09-18) : ce paramètre n'a de sens que côté satellite, mais vit ici pour rester cohérent
+# avec les autres seuils SATELLITE_* déjà en settings plutôt que dans un fichier à part.
+SATELLITE_SYNC_SORTANT_INTERVALLE_S = int(os.environ.get('SATELLITE_SYNC_SORTANT_INTERVALLE_S', 300))
+
+# Identifiants du compte de service de CE satellite auprès du central, utilisés par la
+# commande de gestion `synchroniser_sortant` (voir satellite/docker-compose.yml, service
+# sync-sortant) — mêmes valeurs que le pont MeshCore/Meshtastic utilise déjà pour s'authentifier
+# (DJANGO_EMAIL/DJANGO_PASSWORD côté bridge), mais nommées ici SATELLITE_* pour ne pas laisser
+# penser qu'elles configurent CE backend lui-même (elles configurent ce qu'il appelle).
+# SATELLITE_ID : uuid renvoyé par l'API à l'enrôlement (voir installer.sh, phase "enroler").
+SATELLITE_CENTRAL_URL = os.environ.get('SATELLITE_CENTRAL_URL', '')
+SATELLITE_ID = os.environ.get('SATELLITE_ID', '')
+SATELLITE_EMAIL = os.environ.get('SATELLITE_EMAIL', '')
+SATELLITE_PASSWORD = os.environ.get('SATELLITE_PASSWORD', '')
+
+# Identité du sous-traitant pour le corps de l'email envoyé à l'acceptation de la convention de
+# sous-traitance RGPD (voir core/convention_sous_traitance.py) — mêmes coordonnées que /rgpd et
+# /mentions-legales côté frontend (protégées d'une lecture directe côté client, mais un email
+# adressé nommément à son destinataire n'a pas cette contrainte : le contenu doit être lisible).
+CONVENTION_SOUS_TRAITANT_NOM = os.environ.get('CONVENTION_SOUS_TRAITANT_NOM', 'Sylvain HAZERA')
+CONVENTION_SOUS_TRAITANT_ADRESSE = os.environ.get(
+    'CONVENTION_SOUS_TRAITANT_ADRESSE', '5 place Gabriel Fauré, 33200 Bordeaux',
+)
+CONVENTION_SOUS_TRAITANT_EMAIL = os.environ.get('CONVENTION_SOUS_TRAITANT_EMAIL', 'contact@assista-crise.fr')
+
 USE_X_FORWARDED_HOST = True
 
 SECURE_PROXY_SSL_HEADER = (

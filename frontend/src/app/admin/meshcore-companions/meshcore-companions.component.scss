@@ -65,6 +65,14 @@
 }
 .form-input-sm { flex: 0 0 100px; min-width: 80px; }
 
+.region-cell {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+
+  .form-input-sm { flex: 0 0 90px; min-width: 70px; }
+}
+
 .btn-primary {
   padding: .55rem 1.1rem;
   border-radius: 6px;
@@ -114,6 +122,13 @@
   &:hover:not(:disabled) { border-color: #2563eb; color: #2563eb; }
 }
 
+.table-toolbar {
+  margin-bottom: .6rem;
+  max-width: 360px;
+
+  .form-input { width: 100%; }
+}
+
 .table-wrapper { overflow-x: auto; }
 
 .data-table {
@@ -131,6 +146,13 @@
     font-size: .74rem;
     text-transform: uppercase;
     letter-spacing: .04em;
+  }
+  th.sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+
+    &:hover { color: #2563eb; }
   }
   .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .85em; }
   .id-cell { cursor: pointer; color: #6b7280; }

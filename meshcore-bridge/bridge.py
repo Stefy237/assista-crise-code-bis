@@ -16,8 +16,10 @@ dossier et la branche git dédiée.
 """
 
 import asyncio
+import json
 import logging
 import os
+import socket
 import sys
 
 import httpx
@@ -29,6 +31,15 @@ DJANGO_API_URL = os.environ["DJANGO_API_URL"]
 DJANGO_EMAIL = os.environ["DJANGO_BRIDGE_EMAIL"]
 DJANGO_PASSWORD = os.environ["DJANGO_BRIDGE_PASSWORD"]
 COMPAGNON_ID = os.environ["COMPAGNON_ID"]
+
+# Bascule vers l'assista-crise LOCAL (profil Full colocalisé, voir satellite/docker-compose.yml)
+# quand le central devient injoignable — tous optionnels : absents = comportement historique
+# (central uniquement), rien ne change pour .113/.114 ni pour un satellite GW seul sans Full
+# local. Voir DjangoClient._cible_actuelle.
+LOCAL_API_URL = os.environ.get("LOCAL_API_URL")
+LOCAL_BRIDGE_EMAIL = os.environ.get("LOCAL_BRIDGE_EMAIL")
+LOCAL_BRIDGE_PASSWORD = os.environ.get("LOCAL_BRIDGE_PASSWORD")
+FICHIER_ETAT_CONNECTIVITE = os.environ.get("FICHIER_ETAT_CONNECTIVITE", "/var/run/satellite/etat_connectivite.json")
 
 CONNEXION_TYPE = os.environ.get("MESHCORE_CONNEXION_TYPE", "TCP").upper()
 TCP_HOST = os.environ.get("MESHCORE_TCP_HOST")
@@ -70,37 +81,158 @@ TYPE_CONTACT_PAR_ADV_TYPE = {
 }
 
 
+async def _tester_localhost_backend(port=8000, timeout=2.0):
+    """Cas le plus courant : ce pont et le backend local tournent sur le MÊME Pi (profil Full,
+    voir satellite/docker-compose.yml) — pas besoin de mDNS, un simple test de port suffit."""
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+async def _decouvrir_backend_local_mdns(duree_s=5.0):
+    """Satellite à 2 Pi (GW séparé du Pi Full sur le même site, voir le cadrage "Chantier B") :
+    le backend local s'annonce lui-même (satellite/annoncer_backend_local.py, service
+    _ac-local._tcp.local.) — renvoie son URL API si trouvé dans le délai, None sinon.
+    Best-effort : zeroconf absent -> None, jamais une exception qui remonte."""
+    try:
+        from zeroconf import Zeroconf, ServiceBrowser
+    except ImportError:
+        return None
+
+    trouve = {}
+
+    class _Listener:
+        def add_service(self, zc, type_, name):
+            info = zc.get_service_info(type_, name)
+            if info and info.addresses:
+                trouve["ip"] = socket.inet_ntoa(info.addresses[0])
+                trouve["port"] = info.port
+
+        def remove_service(self, zc, type_, name):
+            pass
+
+        def update_service(self, zc, type_, name):
+            pass
+
+    zc = Zeroconf()
+    try:
+        ServiceBrowser(zc, "_ac-local._tcp.local.", _Listener())
+        await asyncio.sleep(duree_s)
+    finally:
+        zc.close()
+
+    if trouve:
+        return f"http://{trouve['ip']}:{trouve['port']}/api"
+    return None
+
+
+async def resoudre_url_locale():
+    """Ordre de résolution, une seule fois au démarrage (pas re-sondé en boucle — voir
+    DjangoClient, qui bascule ensuite central/local via etat_connectivite.py sans jamais
+    revérifier CETTE résolution) :
+      1. LOCAL_API_URL renseignée à la main -> utilisée telle quelle, AUCUNE détection (voir
+         satellite/README.md : c'est la voie "je sais déjà, ne cherche pas", prioritaire sur
+         tout le reste par construction).
+      2. localhost:8000 répond -> même machine (profil Full colocalisé), cas le plus courant.
+      3. mDNS -> satellite à 2 Pi, GW et Full séparés sur le même site.
+      4. Rien -> pas de repli local, comportement historique (central uniquement)."""
+    if LOCAL_API_URL:
+        logger.info("URL locale configurée manuellement : %s", LOCAL_API_URL)
+        return LOCAL_API_URL
+    if await _tester_localhost_backend():
+        logger.info("Backend local détecté sur localhost:8000 (même machine).")
+        return "http://localhost:8000/api"
+    url_mdns = await _decouvrir_backend_local_mdns()
+    if url_mdns:
+        logger.info("Backend local découvert en mDNS : %s", url_mdns)
+        return url_mdns
+    logger.info("Aucun assista-crise local détecté au démarrage — central uniquement.")
+    return None
+
+
+class _CibleAuth:
+    """Une cible (central OU local) avec son propre token — deux bases distinctes, deux comptes
+    de service distincts, un JWT obtenu sur l'une n'est jamais valide sur l'autre."""
+
+    def __init__(self, base_url, email, password):
+        self.base_url = base_url.rstrip("/")
+        self.email = email
+        self.password = password
+        self.access_token = None
+
+
 class DjangoClient:
     """Client HTTP vers l'API assista-crise — authentification JWT avec ré-obtention
     automatique du token d'accès (durée de vie 1h côté serveur, voir SIMPLE_JWT dans
     backend/config/settings.py). Le compte utilisé doit être un compte de service dédié,
-    authentifié (IsAuthenticated suffit pour les actions que ce pont appelle)."""
+    authentifié (IsAuthenticated suffit pour les actions que ce pont appelle).
 
-    def __init__(self, base_url, email, password):
-        self._base_url = base_url.rstrip("/")
-        self._email = email
-        self._password = password
-        self._access_token = None
+    Bascule vers une cible LOCALE (profil Full colocalisé, voir satellite/docker-compose.yml)
+    quand le central est signalé hors-ligne — lit l'état déjà calculé par satellite/
+    etat_connectivite.py (un seul processus vérifie, celui-ci ne refait jamais sa propre
+    requête réseau, voir _cible_actuelle) plutôt que de dupliquer sa propre détection.
+    `cible_locale=None` (aucun LOCAL_API_URL configuré) = comportement historique, toujours le
+    central, satellite GW seul ou déploiement .113/.114 inchangés.
+
+    ATTENTION (limite connue, 2026-09-17) : un CompagnonMeshCore/message n'a de sens des deux
+    côtés que s'il existe avec le MÊME UUID dans les deux bases — pas garanti tant que la
+    synchro locale -> centrale (cadrage "Chantier B") n'est pas construite. Cette bascule évite
+    au pont de rester bloqué sur un central injoignable, elle ne résout pas encore la
+    réconciliation des données écrites pendant la coupure."""
+
+    def __init__(self, central_url, central_email, central_password,
+                 local_url=None, local_email=None, local_password=None,
+                 fichier_etat_connectivite=None):
+        self._central = _CibleAuth(central_url, central_email, central_password)
+        self._local = _CibleAuth(local_url, local_email, local_password) if local_url else None
+        self._fichier_etat_connectivite = fichier_etat_connectivite or FICHIER_ETAT_CONNECTIVITE
+        self._cible_precedente = None
         self._client = httpx.AsyncClient(timeout=15)
 
-    async def _authenticate(self):
+    def _cible_actuelle(self):
+        """Fichier absent/illisible/corrompu, ou aucune cible locale configurée -> central par
+        défaut (fail-safe : ne jamais basculer sur une supposition, seulement sur un signal
+        explicite `en_ligne: false` déjà vérifié par etat_connectivite.py)."""
+        cible = self._central
+        if self._local is not None:
+            try:
+                with open(self._fichier_etat_connectivite, encoding="utf-8") as f:
+                    etat = json.load(f)
+                if etat.get("en_ligne") is False:
+                    cible = self._local
+            except (OSError, ValueError):
+                pass
+        if cible is not self._cible_precedente:
+            logger.info("Cible API : %s (%s).", cible.base_url, "local" if cible is self._local else "central")
+            self._cible_precedente = cible
+        return cible
+
+    async def _authenticate(self, cible):
         response = await self._client.post(
-            f"{self._base_url}/token/", json={"email": self._email, "password": self._password}
+            f"{cible.base_url}/token/", json={"email": cible.email, "password": cible.password}
         )
         response.raise_for_status()
-        self._access_token = response.json()["access"]
-        logger.info("Authentifié auprès de l'API assista-crise.")
+        cible.access_token = response.json()["access"]
+        logger.info("Authentifié auprès de %s.", cible.base_url)
 
     async def _request(self, method, path, **kwargs):
-        if self._access_token is None:
-            await self._authenticate()
-        headers = {"Authorization": f"Bearer {self._access_token}"}
-        response = await self._client.request(method, f"{self._base_url}{path}", headers=headers, **kwargs)
+        cible = self._cible_actuelle()
+        if cible.access_token is None:
+            await self._authenticate(cible)
+        headers = {"Authorization": f"Bearer {cible.access_token}"}
+        response = await self._client.request(method, f"{cible.base_url}{path}", headers=headers, **kwargs)
         if response.status_code == 401:
             # Token expiré entre-temps : une ré-authentification, puis on rejoue une fois.
-            await self._authenticate()
-            headers = {"Authorization": f"Bearer {self._access_token}"}
-            response = await self._client.request(method, f"{self._base_url}{path}", headers=headers, **kwargs)
+            await self._authenticate(cible)
+            headers = {"Authorization": f"Bearer {cible.access_token}"}
+            response = await self._client.request(method, f"{cible.base_url}{path}", headers=headers, **kwargs)
         response.raise_for_status()
         return response
 
@@ -348,6 +480,13 @@ async def boucle_contacts(meshcore, django, compagnon_id):
                         contact["latitude"], contact["longitude"] = lat, lon
                     if c.get("last_advert"):
                         contact["dernier_advert"] = c["last_advert"]
+                    # out_path_len : nombre de sauts du chemin connu par CE companion vers ce
+                    # contact (voir meshcore/commands/contact.py) — 255 est un sentinel firmware
+                    # ("direct/flood, aucun chemin confirmé"), PAS "255 sauts" : transmis comme
+                    # None dans ce cas pour ne jamais laisser croire à un chemin très long.
+                    out_path_len = c.get("out_path_len")
+                    if out_path_len is not None:
+                        contact["nombre_sauts"] = None if out_path_len == 255 else out_path_len
                     contacts.append(contact)
                 if contacts:
                     await django.synchroniser_contacts(compagnon_id, contacts)
@@ -552,7 +691,11 @@ async def executer_une_session(django):
 
 
 async def main():
-    django = DjangoClient(DJANGO_API_URL, DJANGO_EMAIL, DJANGO_PASSWORD)
+    url_locale = await resoudre_url_locale()
+    django = DjangoClient(
+        DJANGO_API_URL, DJANGO_EMAIL, DJANGO_PASSWORD,
+        local_url=url_locale, local_email=LOCAL_BRIDGE_EMAIL, local_password=LOCAL_BRIDGE_PASSWORD,
+    )
     logger.info(
         "Démarrage du service-pont MeshCore — companion %s, connexion %s.",
         COMPAGNON_ID, CONNEXION_TYPE,

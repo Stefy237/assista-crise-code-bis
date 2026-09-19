@@ -1,3 +1,6 @@
+import logging
+
+from django.apps import apps
 from django.shortcuts import render
 from django.http import FileResponse, StreamingHttpResponse, HttpResponse
 from rest_framework.decorators import action
@@ -19,7 +22,7 @@ from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from urllib.parse import quote
 from django_filters import rest_framework as filters
 from django.db import IntegrityError, transaction
-from django.db.models import Q, F, Prefetch, Count
+from django.db.models import Q, F, Prefetch, Count, Max
 from django.db.models.functions import TruncDate
 from dateutil.relativedelta import relativedelta
 from django.contrib.gis.db.models.functions import Distance
@@ -32,6 +35,7 @@ import io
 import datetime
 import os
 import secrets
+import math
 import uuid
 import hashlib
 from django.core.files.base import ContentFile
@@ -76,7 +80,7 @@ from .zone_scoping import (
     viewer_zone_code,
     widen_zone_from_request,
 )
-from django.contrib.gis.geos import Point
+from django.contrib.gis.geos import GEOSGeometry, Point
 
 
 GPS_IFD_TAG = 0x8825  # PIL.ExifTags.IFD.GPSInfo
@@ -137,6 +141,7 @@ from .models import (
     PointType,
     PointOperationnel,
     ImplicationInstitution,
+    ContributionZoneCommune,
     TypeImplication,
     StatutImplication,
     User, Crisis, TypeCrise, Request, RequestPhoto, Offer, OfferPhoto, OfferMessage, Information, DisponibiliteOffre, DisponibilitePointEquipe, MaterielPoint,
@@ -147,6 +152,9 @@ from .models import (
     MeshCoreConnexionType, MeshtasticConnexionType,
     CompagnonMeshtastic, NoeudUtilisateurMeshtastic, MessageMeshtasticLog,
     CanalMeshtastic, MessageCanalMeshtastic, ContactMeshtastic,
+    Satellite, JetonEnrolementSatellite, ProfilSatellite, StatutEnrolementSatellite,
+    EvenementSynchronisation, EtatEvenementSynchronisation, ConflitSynchronisation,
+    StatutConflitSynchronisation, ModeleSynchronisable,
     AffectationPointBenevole, StatutAffectation,
     RecherchePersonne, RecherchePersonneCommentaire, Besoin, Notification, DossierParticipant,
     RecherchePersonneCommentairePhoto, RecherchePersonneLecture, RecherchePersonneLectureHistorique,
@@ -232,6 +240,50 @@ def send_institution_account_email(request, user):
     )
 
 
+def _traiter_acceptation_convention(request, institution, user):
+    """Appelée APRÈS avoir résolu/créé l'institution mais AVANT le rattachement effectif de
+    l'utilisateur (attach_user_with_role) — voir UserViewSet.confirmer_institution/
+    creer_mon_institution (ce dernier dans un bloc transaction.atomic() : lève une
+    ValidationError plutôt que de renvoyer une Response, pour que Django annule aussi la
+    création de l'institution qui vient d'avoir lieu si la convention est refusée — jamais
+    d'institution "orpheline" créée sans qu'aucune convention n'ait été acceptée pour elle)."""
+    from .convention_sous_traitance import CONVENTION_VERSION, construire_texte_convention, institution_necessite_convention
+
+    if not institution_necessite_convention(institution):
+        return
+    if request.data.get('convention_acceptee') is not True:
+        raise ValidationError({
+            "convention_acceptee": "Vous devez accepter la convention de sous-traitance (RGPD, "
+                                    "article 28) pour activer un compte mairie/EPCI/service de "
+                                    "secours — voir /convention-sous-traitance.",
+        })
+
+    maintenant = timezone.now()
+    institution.convention_sous_traitance_acceptee_le = maintenant
+    institution.convention_sous_traitance_acceptee_par = user
+    institution.convention_sous_traitance_version = CONVENTION_VERSION
+    institution.save(update_fields=[
+        'convention_sous_traitance_acceptee_le', 'convention_sous_traitance_acceptee_par',
+        'convention_sous_traitance_version',
+    ])
+    audit_log(
+        request=request, action_code="MODIFICATION", objet_type="Institution", objet_id=institution.id,
+        commentaire=f"Convention de sous-traitance RGPD (v{CONVENTION_VERSION}) acceptée par "
+                    f"{user.email} au nom de {institution.nom}.",
+    )
+
+    texte = construire_texte_convention(institution, user, maintenant, settings.SERVER_URL)
+    send_mail_logged(
+        request,
+        subject=f"Convention de sous-traitance RGPD — {institution.nom}",
+        message=texte,
+        from_email=None,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+    return None
+
+
 def send_crisis_regulateur_invite_email(request, user, crisis, institution):
     activation_link = build_magic_link(request, user, "activate-account")
     login_link = build_magic_link(request, user, "magic-login")
@@ -304,6 +356,9 @@ from .serializers import (
     MessageMeshLogSerializer,
     CommandeMeshCoreSerializer,
     RelaisMeshCoreSerializer,
+    SatelliteSerializer,
+    JetonEnrolementSatelliteSerializer,
+    ConflitSynchronisationSerializer,
     CanalMeshCoreSerializer,
     MessageCanalMeshCoreSerializer,
     ContactMeshCoreSerializer,
@@ -1238,8 +1293,14 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         institution = find_institution_for_pending_user(user, request)
+        from .convention_sous_traitance import institution_necessite_convention
         return Response({
             "institution": InstitutionSerializer(institution, context=self.get_serializer_context()).data if institution else None,
+            # True si cette institution doit encore accepter la convention de sous-traitance
+            # RGPD (voir _traiter_acceptation_convention) — permet au frontend de n'afficher la
+            # case à cocher que quand elle est réellement requise (jamais si déjà acceptée par
+            # un membre précédent de la même institution).
+            "convention_requise": institution_necessite_convention(institution),
             # Pour préremplir le formulaire de création si rien n'est trouvé (voir
             # creer_mon_institution) — ces champs sont write_only sur UserSerializer, donc pas
             # récupérables autrement par le frontend une fois soumis à l'inscription.
@@ -1269,6 +1330,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 {"error": "Aucune institution trouvée — utilisez creer_mon_institution pour la créer."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        _traiter_acceptation_convention(request, institution, user)
         try:
             attach_user_with_role(user, institution, role_code, request)
         except ValueError as exc:
@@ -1291,22 +1353,29 @@ class UserViewSet(viewsets.ModelViewSet):
         if not role_code:
             return Response({"error": "role_code est requis."}, status=status.HTTP_400_BAD_REQUEST)
 
-        institution_serializer = InstitutionSerializer(data=request.data, context=self.get_serializer_context())
-        institution_serializer.is_valid(raise_exception=True)
-        institution = institution_serializer.save(environment=get_active_environment(request))
-        audit_log(
-            request=request,
-            action_code="CREATION",
-            objet_type="Institution",
-            objet_id=institution.id,
-            commentaire=f"Création institution par {user.email} lors de la finalisation d'inscription : {institution.nom}",
-        )
-
+        # transaction.atomic() : si la convention de sous-traitance est refusée (ValidationError
+        # levée par _traiter_acceptation_convention) ou que le rattachement échoue, la création
+        # de l'institution ci-dessous est annulée elle aussi — jamais d'institution "orpheline"
+        # créée (nom unique déjà "consommé") sans qu'aucun membre n'ait pu s'y rattacher.
         try:
-            attach_user_with_role(
-                user, institution, role_code, request,
-                fonction='Créateur', contact_principal=True,
-            )
+            with transaction.atomic():
+                institution_serializer = InstitutionSerializer(data=request.data, context=self.get_serializer_context())
+                institution_serializer.is_valid(raise_exception=True)
+                institution = institution_serializer.save(environment=get_active_environment(request))
+                audit_log(
+                    request=request,
+                    action_code="CREATION",
+                    objet_type="Institution",
+                    objet_id=institution.id,
+                    commentaire=f"Création institution par {user.email} lors de la finalisation d'inscription : {institution.nom}",
+                )
+
+                _traiter_acceptation_convention(request, institution, user)
+
+                attach_user_with_role(
+                    user, institution, role_code, request,
+                    fonction='Créateur', contact_principal=True,
+                )
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1954,7 +2023,7 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         # posées sur un @action ne s'appliquent jamais d'elles-mêmes — chaque action custom
         # doit être explicitement listée ici, sinon elle retombe sur AllowAny (cf. cloturer/
         # reouvrir, découvert en corrigeant ce bug).
-        if self.action in ("create", "update", "partial_update"):
+        if self.action in ("create", "update", "partial_update", "fusionner_zone"):
             return [IsInstitutionalActor()]
         if self.action == "destroy":
             return [IsAdministrator()]
@@ -1986,6 +2055,40 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         code = commune_code_from_point(crise.location)
         return Response({"commune_code": code})
 
+    @action(detail=True, methods=["post"], url_path="fusionner-zone")
+    def fusionner_zone(self, request, pk=None):
+        """Le tracé à main levée (`zone`) via saveZone() classique REMPLACE toujours
+        l'existant — cette action alternative FUSIONNE (union géométrique) un nouveau tracé
+        avec la zone déjà enregistrée plutôt que de l'écraser (décision utilisateur du
+        2026-09-18 : proposer explicitement le choix avant d'enregistrer, voir
+        crises.component.ts:saveZone). `zone` reste un PolygonField strict (pas Multi, voir
+        Crisis.zone) : si le nouveau tracé ne touche ni ne recouvre l'existant, leur union
+        produirait un MultiPolygon impossible à stocker ici — refusé explicitement (400) plutôt
+        que de corrompre silencieusement la donnée ou de la tronquer."""
+        crise = self.get_object()
+        wkt = request.data.get('wkt')
+        if not wkt:
+            return Response({'detail': "wkt requis."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            nouvelle_geometrie = GEOSGeometry(wkt, srid=4326)
+        except Exception:
+            return Response({'detail': "Tracé invalide."}, status=status.HTTP_400_BAD_REQUEST)
+
+        fusion = nouvelle_geometrie if crise.zone is None else crise.zone.union(nouvelle_geometrie)
+        if fusion.geom_type == 'MultiPolygon':
+            return Response({
+                'detail': "Ce tracé ne touche pas la zone existante — impossible de les "
+                          "fusionner en une seule zone continue. Utilisez « remplacer » à la place.",
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        crise.zone = fusion
+        crise.save(update_fields=['zone'])
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="Crisis", objet_id=crise.id,
+            crise=crise, commentaire=f"Zone fusionnée avec un nouveau tracé sur la crise {crise.name}.",
+        )
+        return Response(self.get_serializer(crise).data)
+
     def perform_create(self, serializer):
         # Une mairie couvre un territoire bien plus resserré qu'une intercommunalité/préfecture
         # : 1 km de rayon par défaut pour la zone composée (zone_secteurs) plutôt que les 10 km
@@ -2005,6 +2108,66 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_id=crise.id,
             crise=crise,
             commentaire=f"Création crise : {crise.name}",
+        )
+
+    def perform_update(self, serializer):
+        """Décision utilisateur du 2026-09-18 : un utilisateur d'une collectivité ne peut pas
+        effacer, dans `zone_communes`, la contribution d'une AUTRE collectivité — seule
+        l'institution qui a fait entrer une commune dans la zone (voir
+        ContributionZoneCommune/_etendre_zone_crise_pour_implication) peut ensuite la retirer,
+        sauf un administrateur global. Une commune jamais tracée (ajoutée sans institution
+        précise, ex. un admin élargissant la zone de réponse) reste librement retirable —
+        aucune protection à réinventer pour ce cas, il n'y a juste personne à protéger."""
+        crise = serializer.instance
+        anciens_codes = set(crise.zone_communes)
+        nouveaux_codes = serializer.validated_data.get('zone_communes')
+
+        if nouveaux_codes is not None and get_effective_role(self.request) != UserRole.ADMINISTRATOR:
+            codes_retires = anciens_codes - set(nouveaux_codes)
+            if codes_retires:
+                contributions_protegees = ContributionZoneCommune.objects.filter(
+                    crise=crise, commune_code__in=codes_retires, institution__isnull=False,
+                ).exclude(
+                    institution__in=ContactInstitution.objects.filter(
+                        utilisateur=self.request.user, actif=True,
+                    ).values_list('institution_id', flat=True)
+                ).select_related('institution')
+                if contributions_protegees.exists():
+                    noms = ", ".join(sorted({c.institution.nom for c in contributions_protegees}))
+                    raise PermissionDenied(
+                        f"Vous ne pouvez pas retirer de la zone la contribution d'une autre "
+                        f"collectivité ({noms}) — seule cette collectivité ou un administrateur "
+                        f"peut le faire."
+                    )
+
+        crise = serializer.save()
+
+        if nouveaux_codes is not None:
+            institution_appelant_id = ContactInstitution.objects.filter(
+                utilisateur=self.request.user, actif=True,
+            ).values_list('institution_id', flat=True).first()
+            codes_ajoutes = set(nouveaux_codes) - anciens_codes
+            for code in codes_ajoutes:
+                institution_proprietaire = None
+                if institution_appelant_id:
+                    institution = Institution.objects.filter(pk=institution_appelant_id).first()
+                    if institution and institution.commune_code == code:
+                        institution_proprietaire = institution
+                ContributionZoneCommune.objects.get_or_create(
+                    crise=crise, commune_code=code,
+                    defaults={'institution': institution_proprietaire, 'environment': crise.environment},
+                )
+            codes_retires_effectifs = anciens_codes - set(nouveaux_codes)
+            if codes_retires_effectifs:
+                ContributionZoneCommune.objects.filter(crise=crise, commune_code__in=codes_retires_effectifs).delete()
+
+        audit_log(
+            request=self.request,
+            action_code="MODIFICATION",
+            objet_type="Crisis",
+            objet_id=crise.id,
+            crise=crise,
+            commentaire=f"Modification crise : {crise.name}",
         )
 
     @action(detail=True, methods=["get"])
@@ -6977,6 +7140,18 @@ class NotificationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             utilisateur=self.request.user, environment=get_active_environment(self.request)
         ).order_by('-date_creation')
 
+    @action(detail=False, methods=['get'])
+    def resume(self, request):
+        """Endpoint léger destiné à un polling fréquent (voir shared/utils/polling.util.ts
+        côté frontend) : juste de quoi détecter un changement, sans rapatrier toute la liste à
+        chaque appel — le frontend ne redemande la liste complète (get_all) que si ce résumé a
+        changé depuis le dernier poll."""
+        agg = self.get_queryset().aggregate(
+            count_non_lues=Count('id', filter=Q(lu=False)),
+            derniere_notification_le=Max('date_creation'),
+        )
+        return Response(agg)
+
 def _notifier_lecteurs_et_createur_recherche(request, recherche, titre, message):
     """Notifie le créateur de la fiche et toute personne l'ayant consultée
     (RecherchePersonneLecture), sauf l'auteur de l'action — utilisé par retrouver/archiver
@@ -7011,8 +7186,14 @@ class RecherchePersonneViewSet(
         RecherchePersonneSerializer
     )
 
+    # Avant ce correctif : IsAuthenticated seul, contrairement à ce que la page RGPD (/rgpd,
+    # section 1) prétendait déjà ("réservé aux comptes institutionnels") — écart trouvé en
+    # vérifiant cette page, corrigé le 2026-09-18. Traite des données concernant une personne
+    # qui n'a pas pu consentir elle-même (photographie, description physique) : un compte
+    # authentifié quelconque n'a pas vocation à y accéder, seuls les comptes institutionnels
+    # agissant par délégation du maire (voir la finalité décrite dans la page RGPD).
     permission_classes = [
-        permissions.IsAuthenticated
+        IsInstitutionalActor
     ]
     def get_queryset(self):
         # Depuis self.queryset (pas RecherchePersonne.objects.* directement) pour conserver le
@@ -7272,6 +7453,12 @@ class RecherchePersonneCommentaireViewSet(
         RecherchePersonneCommentaireSerializer
     )
 
+    # Voir la même correction sur RecherchePersonneViewSet (2026-09-18) : retombait sinon sur
+    # IsAuthenticated (défaut global), pas cohérent avec "réservé aux comptes institutionnels".
+    permission_classes = [
+        IsInstitutionalActor
+    ]
+
     def perform_create(self, serializer):
 
         commentaire = serializer.save(
@@ -7328,6 +7515,11 @@ class RecherchePersonneHistoriqueViewSet(
         RecherchePersonneHistoriqueSerializer
     )
 
+    # Voir la même correction sur RecherchePersonneViewSet (2026-09-18).
+    permission_classes = [
+        IsInstitutionalActor
+    ]
+
 class RecherchePersonnePhotoViewSet(
     EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
 ):
@@ -7342,8 +7534,9 @@ class RecherchePersonnePhotoViewSet(
         RecherchePersonnePhotoSerializer
     )
 
+    # Voir la même correction sur RecherchePersonneViewSet (2026-09-18).
     permission_classes = [
-        permissions.IsAuthenticated
+        IsInstitutionalActor
     ]
 
     def perform_create(
@@ -7394,8 +7587,9 @@ class RecherchePersonneCommentairePhotoViewSet(
         RecherchePersonneCommentairePhotoSerializer
     )
 
+    # Voir la même correction sur RecherchePersonneViewSet (2026-09-18).
     permission_classes = [
-        permissions.IsAuthenticated
+        IsInstitutionalActor
     ]
 
     @action(
@@ -9158,6 +9352,39 @@ def _notifier_verdict_implication(request, implication, valide: bool):
                 print(f"Erreur envoi email verdict implication : {e}")
 
 
+def _etendre_zone_crise_pour_implication(implication):
+    """Décision utilisateur du 2026-09-18 : une commune/EPCI qui se raccroche à une crise
+    (IMPLIQUE ou ACTEUR, quel que soit le sens du changement — se déclarer directement, ou
+    passer d'ACTEUR à IMPLIQUE) doit voir la zone de la crise s'étirer automatiquement sur son
+    propre territoire, sans geste manuel supplémentaire côté régulateur.
+
+    Ne fait qu'étendre `Crisis.zone_communes` (le champ réellement utilisé par le scoping zone
+    ailleurs dans l'app, ex. SatelliteViewSet.supervision) — ne recalcule PAS `zone_secteurs`
+    (le polygone affiché sur la carte, composé côté frontend depuis les contours officiels
+    geo.api.gouv.fr, voir la docstring de Crisis.zone_departements) : porter ce calcul
+    géométrique en Python aurait dupliqué une logique déjà éprouvée côté client pour un gain
+    incertain. Le prochain geste de recalcul de zone côté frontend (crises.component.ts)
+    reprendra automatiquement ce commune_code, déjà présent dans la liste. Idempotent — appelée
+    depuis perform_create/valider/perform_update, ne fait rien si déjà à jour."""
+    if implication.statut != StatutImplication.VALIDEE:
+        return
+    commune_code = implication.institution.commune_code
+    if not commune_code:
+        return
+
+    crise = implication.crise
+    if commune_code not in crise.zone_communes:
+        crise.zone_communes = [*crise.zone_communes, commune_code]
+        crise.save(update_fields=['zone_communes'])
+
+    # get_or_create, pas update_or_create : le premier contributeur fait foi, voir la docstring
+    # de ContributionZoneCommune — jamais réattribuer une provenance déjà tracée.
+    ContributionZoneCommune.objects.get_or_create(
+        crise=crise, commune_code=commune_code,
+        defaults={'institution': implication.institution, 'environment': implication.environment},
+    )
+
+
 class ImplicationInstitutionViewSet(
     EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
 ):
@@ -9211,6 +9438,7 @@ class ImplicationInstitutionViewSet(
             utilisateur=self.request.user, responsable=resolved_responsable,
             environment=get_active_environment(self.request), statut=statut,
         )
+        _etendre_zone_crise_pour_implication(implication)
 
         if invited:
             send_crisis_regulateur_invite_email(self.request, resolved_responsable, implication.crise, institution)
@@ -9243,6 +9471,7 @@ class ImplicationInstitutionViewSet(
 
         implication.statut = StatutImplication.VALIDEE
         implication.save(update_fields=['statut'])
+        _etendre_zone_crise_pour_implication(implication)
         audit_log(
             request=request,
             action_code="MODIFICATION",
@@ -9289,6 +9518,10 @@ class ImplicationInstitutionViewSet(
         if not self._can_manage(serializer.instance):
             raise PermissionDenied("Seul l'auteur de cette déclaration, un contact de l'institution ou un administrateur peut la modifier.")
         implication = serializer.save()
+        # Couvre le cas d'une institution ACTEUR modifiée en IMPLIQUE (ou l'inverse) via un
+        # simple PATCH de type_implication — décision utilisateur du 2026-09-18, voir la
+        # docstring de _etendre_zone_crise_pour_implication.
+        _etendre_zone_crise_pour_implication(implication)
         audit_log(
             request=self.request,
             action_code="MODIFICATION",
@@ -9505,6 +9738,22 @@ class MeshLocalDetecterView(APIView):
         )
 
 
+def _satellite_appelant_ou_403(request):
+    """Résout le Satellite dont le compte de service authentifie CETTE requête — utilisé par
+    les actions d'auto-enregistrement de companion (CompagnonMeshCoreViewSet/
+    CompagnonMeshtasticViewSet.enregistrer_depuis_satellite, voir satellite/
+    detecter_noeud_serie.py) : seul le compte de service d'un satellite APPROUVE peut
+    s'auto-enregistrer un companion pour SA PROPRE institution, jamais un acteur institutionnel
+    humain (qui utilise déjà le POST générique, IsInstitutionalActor) ni un satellite pas
+    encore validé."""
+    satellite = Satellite.objects.filter(
+        compte_service=request.user, statut_enrolement=StatutEnrolementSatellite.APPROUVE,
+    ).select_related('institution').first()
+    if satellite is None:
+        raise PermissionDenied("Cette action est réservée au compte de service d'un satellite approuvé.")
+    return satellite
+
+
 class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     """Nœuds MeshCore en rôle Companion utilisés comme passerelle radio (voir le service-pont
     externe `meshcore-bridge/`, non hébergé dans ce dépôt Django). Phase de test (voir doc de
@@ -9556,6 +9805,38 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
         )
         return Response(CommandeMeshCoreSerializer(commande).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=False, methods=['post'], url_path='enregistrer-depuis-satellite')
+    def enregistrer_depuis_satellite(self, request):
+        """Auto-enregistrement idempotent d'un companion détecté par un satellite (voir
+        satellite/detecter_noeud_serie.py) — identifié par sa clé publique (unique par appareil
+        physique, contrairement à tcp_host/serie_device qui peuvent changer, ex: le device
+        Linux se renomme /dev/ttyUSB1 après un redémarrage) : rappelé à chaque
+        démarrage/redécouverte, met à jour la même fiche plutôt que d'en créer une nouvelle."""
+        satellite = _satellite_appelant_ou_403(request)
+        pubkey_hex = (request.data.get('pubkey_hex') or '').strip()
+        if not pubkey_hex:
+            return Response({"error": "pubkey_hex requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        defaults = {
+            "nom": request.data.get('nom') or f"Satellite {satellite.nom}",
+            "connexion_type": request.data.get('connexion_type', MeshCoreConnexionType.SERIE),
+            "serie_device": request.data.get('serie_device'),
+            "tcp_host": request.data.get('tcp_host'),
+            "tcp_port": request.data.get('tcp_port'),
+        }
+        compagnon, cree = CompagnonMeshCore.objects.update_or_create(
+            institution=satellite.institution, pubkey_hex=pubkey_hex, defaults=defaults,
+        )
+        audit_log(
+            request=request, action_code="CREATION" if cree else "MODIFICATION", objet_type="CompagnonMeshCore",
+            objet_id=compagnon.id,
+            commentaire=f"Companion MeshCore {'créé' if cree else 'mis à jour'} automatiquement par le satellite {satellite.nom}.",
+        )
+        return Response(
+            {"id": str(compagnon.id), "cree": cree},
+            status=status.HTTP_201_CREATED if cree else status.HTTP_200_OK,
+        )
+
     @action(detail=False, methods=['get'])
     def envoyables(self, request):
         """Résumé minimal des companions actifs — id/nom/principal seulement, jamais la config
@@ -9567,6 +9848,32 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
             {"id": str(c.id), "nom": c.nom, "principal": c.principal}
             for c in compagnons
         ])
+
+    @action(detail=False, methods=['get'], url_path='meilleur-pour-contact')
+    def meilleur_pour_contact(self, request):
+        """Suggère le meilleur companion pour joindre un contact — voir core/routage_mesh.py
+        pour la logique (contact déjà entendu, au plus court en sauts ; sinon région ; sinon
+        principal). `?pubkey_hex=...` et/ou `?region_tag=...`, au moins un des deux requis.
+        Restreint à l'institution de l'appelant (jamais suggérer un companion d'une autre
+        institution) sauf pour un administrateur, qui voit tout le parc."""
+        from .routage_mesh import meilleur_compagnon_pour_contact
+
+        pubkey_hex = request.query_params.get('pubkey_hex')
+        region_tag = request.query_params.get('region_tag')
+        if not pubkey_hex and not region_tag:
+            return Response({'detail': "pubkey_hex ou region_tag requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        institution = None
+        if get_effective_role(request) != UserRole.ADMINISTRATOR:
+            institution_id = ContactInstitution.objects.filter(
+                utilisateur=request.user, actif=True
+            ).values_list('institution_id', flat=True).first()
+            institution = Institution.objects.filter(pk=institution_id).first() if institution_id else None
+        resultat = meilleur_compagnon_pour_contact(
+            pubkey_hex=pubkey_hex, region_tag=region_tag,
+            institution=institution, environment=get_active_environment(request),
+        )
+        return Response(resultat.as_dict())
 
     def perform_create(self, serializer):
         compagnon = serializer.save(environment=get_active_environment(self.request))
@@ -9637,6 +9944,12 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
             if dernier_advert:
                 from datetime import datetime, timezone as dt_timezone
                 defaults['dernier_advert'] = datetime.fromtimestamp(dernier_advert, tz=dt_timezone.utc)
+            # Présent (même à None — voir meshcore-bridge/bridge.py:boucle_contacts, sentinel
+            # firmware 255 = "aucun chemin confirmé") dès que le pont a une info à jour ; absent
+            # pour un rafraîchissement de position seule (jamais écraser une valeur connue par
+            # un silence).
+            if 'nombre_sauts' in contact:
+                defaults['nombre_sauts'] = contact.get('nombre_sauts')
 
             ContactMeshCore.objects.update_or_create(
                 compagnon=compagnon, pubkey_hex=pubkey_hex,
@@ -10001,6 +10314,23 @@ class MessageMeshLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
         if direction == DirectionMessageMesh.SORTANT and environment == Environment.DEMO:
             save_kwargs['contenu'] = _contenu_message_mesh_demo(serializer.validated_data.get('contenu'))
 
+        if 'compagnon' not in serializer.validated_data:
+            # Client parti sans préciser — sélection automatique du meilleur companion pour ce
+            # destinataire (voir core/routage_mesh.py). Uniquement pertinent en SORTANT : un
+            # message ENTRANT vient toujours du service-pont, qui connaît déjà son propre
+            # companion et le fournit systématiquement.
+            from .routage_mesh import meilleur_compagnon_pour_contact
+            institution_id = ContactInstitution.objects.filter(
+                utilisateur=self.request.user, actif=True
+            ).values_list('institution_id', flat=True).first()
+            institution = Institution.objects.filter(pk=institution_id).first() if institution_id else None
+            resultat = meilleur_compagnon_pour_contact(
+                pubkey_hex=contact_pubkey_hex, institution=institution, environment=environment,
+            )
+            if resultat.compagnon is None:
+                raise ValidationError("Aucun companion MeshCore disponible pour envoyer ce message.")
+            save_kwargs['compagnon'] = resultat.compagnon
+
         message = serializer.save(**save_kwargs)
         if message.direction == DirectionMessageMesh.ENTRANT and message.statut == StatutMessageMesh.EN_ATTENTE:
             # Un message entrant est par définition déjà reçu, pas "en attente d'envoi" —
@@ -10176,6 +10506,39 @@ class CompagnonMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
             return [IsInstitutionalActor()]
         return [permissions.IsAuthenticated()]
 
+    @action(detail=False, methods=['post'], url_path='enregistrer-depuis-satellite')
+    def enregistrer_depuis_satellite(self, request):
+        """Auto-enregistrement idempotent d'un companion détecté par un satellite (voir
+        satellite/detecter_noeud_serie.py et CompagnonMeshCoreViewSet.enregistrer_depuis_satellite,
+        même principe) — identifié par node_num (unique en base, contrairement à serie_device
+        qui peut changer). node_num n'est connu qu'APRÈS une première connexion réussie au vrai
+        appareil (assigné par son firmware, pas choisi par nous comme en mode MQTT) : le
+        satellite doit se connecter une fois avant de pouvoir appeler cette action."""
+        satellite = _satellite_appelant_ou_403(request)
+        try:
+            node_num = int(request.data.get('node_num'))
+        except (TypeError, ValueError):
+            return Response({"error": "node_num (entier) requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        defaults = {
+            "institution": satellite.institution,
+            "nom": request.data.get('nom') or f"Satellite {satellite.nom}",
+            "connexion_type": request.data.get('connexion_type', MeshtasticConnexionType.SERIE),
+            "serie_device": request.data.get('serie_device'),
+            "tcp_host": request.data.get('tcp_host'),
+            "tcp_port": request.data.get('tcp_port'),
+        }
+        compagnon, cree = CompagnonMeshtastic.objects.update_or_create(node_num=node_num, defaults=defaults)
+        audit_log(
+            request=request, action_code="CREATION" if cree else "MODIFICATION", objet_type="CompagnonMeshtastic",
+            objet_id=compagnon.id,
+            commentaire=f"Companion Meshtastic {'créé' if cree else 'mis à jour'} automatiquement par le satellite {satellite.nom}.",
+        )
+        return Response(
+            {"id": str(compagnon.id), "cree": cree},
+            status=status.HTTP_201_CREATED if cree else status.HTTP_200_OK,
+        )
+
     @action(detail=False, methods=['get'], url_path='envoyables')
     def envoyables(self, request):
         """Résumé minimal (id/nom/broker_host, jamais mqtt_username/mqtt_password) des brokers
@@ -10245,6 +10608,7 @@ class CompagnonMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
                 'mqtt_username': c.mqtt_username, 'mqtt_password': c.mqtt_password,
                 'mqtt_use_tls': c.mqtt_use_tls,
                 'tcp_host': c.tcp_host, 'tcp_port': c.tcp_port,
+                'serie_device': c.serie_device,
                 'chiffrement_supporte': c.chiffrement_supporte,
                 'x25519_private_key_hex': c.x25519_private_key_hex,
                 'x25519_public_key_hex': c.x25519_public_key_hex,
@@ -10631,3 +10995,538 @@ class ContactMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyM
         if compagnon_id:
             qs = qs.filter(compagnon_id=compagnon_id)
         return qs
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    rayon_terre_km = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * rayon_terre_km * math.asin(math.sqrt(a))
+
+
+def _communes_visibles_supervision(request):
+    """Codes commune INSEE visibles par l'appelant pour la vue de supervision inter-
+    collectivités (voir SatelliteViewSet.supervision et le cadrage "Chantier B" section 5) —
+    plus large que filter_queryset_to_viewer_zone (limité à SA PROPRE zone) : une institution
+    EPCI/département/région voit automatiquement toutes ses communes membres (mêmes champs
+    dénormalisés que zone_scoping.py), une institution communale voit en plus les communes
+    proches (approximation par distance de centroïde — le référentiel Commune ne conserve pas
+    de géométrie précise, voir son docstring et SATELLITE_SUPERVISION_RAYON_LIMITROPHE_KM).
+    None = pas de filtre (administrateur, voit tout) ; ensemble vide = rien de visible (institution
+    sans commune connue) — jamais None par défaut faute de zone résolvable."""
+    if get_effective_role(request) == UserRole.ADMINISTRATOR:
+        return None
+    institution = getattr(request.user, 'institution', None)
+    if institution is None or not institution.commune_code:
+        return set()
+
+    niveau = institution.secteur_niveau_effectif
+    if niveau == 'epci' and institution.epci_code:
+        return set(Commune.objects.filter(epci_code=institution.epci_code).values_list('code', flat=True))
+    if niveau == 'departement' and institution.departement_code:
+        return set(Commune.objects.filter(departement_code=institution.departement_code).values_list('code', flat=True))
+    if niveau == 'region' and institution.region_code:
+        return set(Commune.objects.filter(region_code=institution.region_code).values_list('code', flat=True))
+    if niveau == 'commune':
+        propre = Commune.objects.filter(code=institution.commune_code).first()
+        visibles = {institution.commune_code}
+        if propre and propre.centre_latitude is not None and propre.centre_longitude is not None:
+            candidates = Commune.objects.filter(departement_code=propre.departement_code).exclude(
+                code=propre.code
+            ).exclude(centre_latitude__isnull=True).exclude(centre_longitude__isnull=True)
+            rayon = settings.SATELLITE_SUPERVISION_RAYON_LIMITROPHE_KM
+            for commune in candidates:
+                if _haversine_km(
+                    propre.centre_latitude, propre.centre_longitude, commune.centre_latitude, commune.centre_longitude
+                ) <= rayon:
+                    visibles.add(commune.code)
+        return visibles
+    return set()
+
+
+_logger_sync = logging.getLogger(__name__)
+
+
+def _payload_donnees_mutable(obj, nom_modele):
+    """Payload d'un objet MUTABLE (Dossier/Mission) pour le pull central -> local
+    (SatelliteViewSet.donnees) — même extraction de champs que sync_outbox.construire_payload
+    (payload sortant), plus `id`/`modifie_le` que le sens sortant n'a jamais besoin d'envoyer
+    (gérés par le central côté sortant) mais dont le satellite a explicitement besoin ici pour
+    poser une `version_de_base` correcte sur ses prochaines écritures locales."""
+    from .sync_outbox import construire_payload
+    payload = construire_payload(obj, nom_modele)
+    payload["id"] = str(obj.id)
+    payload["modifie_le"] = obj.modifie_le.isoformat()
+    payload["environment"] = obj.environment
+    return payload
+
+
+def _notifier_conflit_synchronisation(satellite, nom_modele, objet_id):
+    """Prévient les contacts actifs de l'institution du satellite — jamais résolu tout seul,
+    voir ConflitSynchronisation.__doc__ : quelqu'un doit trancher explicitement."""
+    destinataires = ContactInstitution.objects.filter(
+        institution=satellite.institution, actif=True,
+    ).select_related('utilisateur')
+    for contact in destinataires:
+        Notification.objects.create(
+            utilisateur=contact.utilisateur,
+            titre="Conflit de synchronisation satellite",
+            message=(
+                f"Le satellite {satellite.nom} a tenté de synchroniser un {nom_modele} "
+                f"({objet_id}) déjà modifié côté central depuis sa dernière prise de contact. "
+                f"Un arbitrage est nécessaire avant que cette modification ne soit appliquée."
+            ),
+            environment=satellite.environment,
+        )
+
+
+def _appliquer_evenement_synchronisation(satellite, evenement, request):
+    """Applique (ou met en conflit) un événement de synchronisation local -> central — voir
+    SatelliteViewSet.synchroniser et core/sync_outbox.py pour le contexte complet. Ne lève
+    jamais : toute erreur devient un résultat "erreur" pour ne pas bloquer les événements
+    suivants du même lot."""
+    from .sync_outbox import APPEND_ONLY, MUTABLE, construire_payload
+
+    evenement_id = evenement.get('id')
+    nom_modele = evenement.get('modele')
+    try:
+        objet_id = evenement['objet_id']
+        payload = dict(evenement['payload'])
+    except (KeyError, TypeError):
+        return {"id": evenement_id, "resultat": "erreur", "detail": "Événement incomplet."}
+
+    if nom_modele not in ModeleSynchronisable.values:
+        return {"id": evenement_id, "resultat": "erreur", "detail": f"Modèle non synchronisable : {nom_modele}."}
+    ModeleClasse = apps.get_model('core', nom_modele)
+
+    auteur_local = evenement.get('auteur_local_email') or 'auteur local inconnu'
+
+    try:
+        with transaction.atomic():
+            if nom_modele in APPEND_ONLY:
+                _, cree = ModeleClasse.objects.get_or_create(
+                    id=objet_id, defaults={**payload, "environment": satellite.environment},
+                )
+                resultat = "applique" if cree else "deja_applique"
+                if cree:
+                    audit_log(
+                        request=request, action_code="CREATION", objet_type=nom_modele, objet_id=objet_id,
+                        commentaire=f"Reçu par synchronisation du satellite {satellite.nom} (auteur local : {auteur_local}).",
+                    )
+                return {"id": evenement_id, "resultat": resultat}
+
+            # MUTABLE (Dossier, Mission) : conflit possible, voir la docstring du module sync_outbox.
+            objet_existant = ModeleClasse.objects.filter(pk=objet_id).first()
+            if objet_existant is None:
+                ModeleClasse.objects.create(id=objet_id, environment=satellite.environment, **payload)
+                audit_log(
+                    request=request, action_code="CREATION", objet_type=nom_modele, objet_id=objet_id,
+                    commentaire=f"Créé par synchronisation du satellite {satellite.nom} (auteur local : {auteur_local}).",
+                )
+                return {"id": evenement_id, "resultat": "applique", "detail": "créé côté central"}
+
+            version_centrale = objet_existant.modifie_le.isoformat() if objet_existant.modifie_le else None
+            if evenement.get('version_de_base') != version_centrale:
+                ConflitSynchronisation.objects.create(
+                    satellite=satellite, modele=nom_modele, objet_id=objet_id,
+                    payload_local=payload,
+                    etat_central_au_conflit=construire_payload(objet_existant, nom_modele),
+                    environment=satellite.environment,
+                )
+                _notifier_conflit_synchronisation(satellite, nom_modele, objet_id)
+                return {"id": evenement_id, "resultat": "conflit", "detail": "version centrale différente"}
+
+            for champ, valeur in payload.items():
+                setattr(objet_existant, champ, valeur)
+            objet_existant.save()
+            audit_log(
+                request=request, action_code="MODIFICATION", objet_type=nom_modele, objet_id=objet_id,
+                commentaire=f"Modifié par synchronisation du satellite {satellite.nom} (auteur local : {auteur_local}).",
+            )
+            return {"id": evenement_id, "resultat": "applique"}
+    except Exception as exc:
+        _logger_sync.exception("Échec application événement de synchronisation %s (%s)", evenement_id, nom_modele)
+        return {"id": evenement_id, "resultat": "erreur", "detail": str(exc)}
+
+
+class SatelliteViewSet(
+    EnvironmentScopedViewSetMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Boîtiers déployés sur site (Raspberry Pi) — voir docstring du modèle Satellite et le
+    cadrage "Chantier B" (plan). Aucun create/update/destroy générique exposé (ListModelMixin/
+    RetrieveModelMixin seulement) : l'enrôlement se fait en 3 temps par les actions dédiées
+    ci-dessous — un acteur institutionnel génère un jeton pour son institution
+    (generer_jeton), le satellite le consomme pour créer sa propre entrée (enroler, AllowAny —
+    il n'a par définition aucun identifiant à ce stade), puis un acteur institutionnel valide
+    explicitement (valider) avant que le satellite reçoive un compte de service durable —
+    jamais de compte actif sans cette double validation, même principe que le workflow
+    d'acceptation ACTEUR non-AUT_LOCALE (ImplicationInstitutionViewSet)."""
+
+    queryset = Satellite.objects.select_related('institution', 'compte_service').all()
+    serializer_class = SatelliteSerializer
+
+    def get_permissions(self):
+        if self.action == 'enroler':
+            return [AllowAny()]
+        if self.action in ('contact', 'donnees', 'synchroniser'):
+            return [permissions.IsAuthenticated()]
+        if self.action in ('generer_jeton', 'valider', 'revoquer'):
+            return [IsInstitutionalActor(), DenyInDemo()]
+        return [IsInstitutionalActor()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action in ('contact', 'donnees', 'synchroniser'):
+            # Le contrôle d'identité se fait dans l'action elle-même (compte_service ==
+            # request.user) — le compte de service d'un satellite n'a volontairement aucun
+            # ContactInstitution (voir SatelliteViewSet.valider), donc le filtrage par
+            # institution ci-dessous l'exclurait à tort de sa PROPRE fiche.
+            return qs
+        if get_effective_role(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        mes_institutions = ContactInstitution.objects.filter(
+            utilisateur=self.request.user, actif=True
+        ).values_list('institution_id', flat=True)
+        return qs.filter(institution_id__in=mes_institutions)
+
+    @action(detail=False, methods=['post'], url_path='generer-jeton')
+    def generer_jeton(self, request):
+        institution = _resolve_institution_or_400(request)
+        if isinstance(institution, Response):
+            return institution
+        jeton = JetonEnrolementSatellite.objects.create(
+            institution=institution,
+            jeton=secrets.token_urlsafe(32),
+            expiration=timezone.now() + datetime.timedelta(hours=24),
+            cree_par=request.user,
+            environment=get_active_environment(request),
+        )
+        audit_log(
+            request=request, action_code="CREATION", objet_type="JetonEnrolementSatellite",
+            objet_id=jeton.id,
+            commentaire=f"Jeton d'enrôlement satellite généré pour {institution.nom}.",
+        )
+        return Response(JetonEnrolementSatelliteSerializer(jeton).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='enroler')
+    def enroler(self, request):
+        """Le satellite consomme le jeton reçu hors-bande pour créer sa propre entrée — AllowAny
+        car il n'a par définition aucun identifiant à ce stade (voir docstring de la classe)."""
+        jeton_valeur = request.data.get('jeton')
+        nom = request.data.get('nom')
+        profil = request.data.get('profil')
+        if not jeton_valeur or not nom or profil not in ProfilSatellite.values:
+            return Response(
+                {"error": "jeton, nom et profil (GW/FULL) sont requis."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        jeton = JetonEnrolementSatellite.objects.filter(jeton=jeton_valeur, utilise=False).first()
+        if not jeton or jeton.expiration < timezone.now():
+            return Response({"error": "Jeton invalide, déjà utilisé ou expiré."}, status=status.HTTP_400_BAD_REQUEST)
+
+        satellite = Satellite.objects.create(
+            institution=jeton.institution, nom=nom, profil=profil,
+            version_logicielle=request.data.get('version_logicielle', ''),
+            environment=jeton.environment,
+        )
+        jeton.utilise = True
+        jeton.save(update_fields=['utilise'])
+
+        return Response(
+            {"satellite_id": str(satellite.id), "statut_enrolement": satellite.statut_enrolement},
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['post'], url_path='valider')
+    def valider(self, request, pk=None):
+        satellite = self.get_object()
+        if satellite.statut_enrolement != StatutEnrolementSatellite.EN_ATTENTE:
+            return Response(
+                {"error": "Ce satellite n'est pas en attente de validation."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Compte de service dédié, jamais partagé — authentifié en JWT par le satellite
+        # exactement comme le pont MeshCore le fait déjà (meshcore-bridge/bridge.py:
+        # DjangoClient), aucun ContactInstitution créé (ce n'est pas un membre humain de
+        # l'institution, voir get_queryset ci-dessus).
+        mot_de_passe = secrets.token_urlsafe(24)
+        email_service = f"satellite-{satellite.id}@service.assista-crise.local"
+        compte_service = User.objects.create_user(
+            username=email_service, email=email_service, password=mot_de_passe,
+            type=UserRole.SIMPLE_USER, institution=satellite.institution,
+            enabled=True, is_active=True,
+        )
+        satellite.compte_service = compte_service
+        satellite.statut_enrolement = StatutEnrolementSatellite.APPROUVE
+        satellite.save(update_fields=['compte_service', 'statut_enrolement'])
+
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="Satellite", objet_id=satellite.id,
+            commentaire=f"Satellite {satellite.nom} ({satellite.institution.nom}) approuvé — compte de service créé.",
+        )
+
+        return Response({
+            **SatelliteSerializer(satellite).data,
+            # Identifiants renvoyés UNE SEULE FOIS ici — le mot de passe n'est jamais stocké en
+            # clair (User.set_password via create_user) et n'est plus jamais relisible ensuite.
+            "identifiants_compte_service": {"email": email_service, "password": mot_de_passe},
+        })
+
+    @action(detail=True, methods=['post'], url_path='revoquer')
+    def revoquer(self, request, pk=None):
+        satellite = self.get_object()
+        if satellite.statut_enrolement == StatutEnrolementSatellite.REVOQUE:
+            return Response({"error": "Ce satellite est déjà révoqué."}, status=status.HTTP_400_BAD_REQUEST)
+
+        satellite.statut_enrolement = StatutEnrolementSatellite.REVOQUE
+        if satellite.compte_service:
+            satellite.compte_service.enabled = False
+            satellite.compte_service.is_active = False
+            satellite.compte_service.save(update_fields=['enabled', 'is_active'])
+        satellite.save(update_fields=['statut_enrolement'])
+
+        audit_log(
+            request=request, action_code="DESACTIVATION", objet_type="Satellite", objet_id=satellite.id,
+            commentaire=f"Satellite {satellite.nom} ({satellite.institution.nom}) révoqué.",
+        )
+        return Response(SatelliteSerializer(satellite).data)
+
+    @action(detail=True, methods=['post'], url_path='contact')
+    def contact(self, request, pk=None):
+        """Appelé périodiquement par le satellite lui-même (compte de service authentifié) —
+        met à jour dernier_contact, base de l'état Actif/Inactif/Perdu (voir
+        SatelliteSerializer.get_etat). Pas de heartbeat séparé : tout futur endpoint de
+        synchronisation de données devra faire de même (voir docstring du modèle, et donnees()
+        ci-dessous)."""
+        satellite = self.get_object()
+        self._exiger_compte_service(request, satellite)
+
+        satellite.dernier_contact = timezone.now()
+        update_fields = ['dernier_contact']
+        version = request.data.get('version_logicielle')
+        if version:
+            satellite.version_logicielle = version
+            update_fields.append('version_logicielle')
+        satellite.save(update_fields=update_fields)
+
+        return Response(SatelliteSerializer(satellite).data)
+
+    def _exiger_compte_service(self, request, satellite):
+        """Garde commune à contact()/donnees() : seul le compte de service DE CE satellite,
+        approuvé, peut appeler ces actions — voir docstring de contact()."""
+        if satellite.compte_service_id != request.user.id:
+            raise PermissionDenied("Ce compte n'est pas le compte de service de ce satellite.")
+        if satellite.statut_enrolement != StatutEnrolementSatellite.APPROUVE:
+            raise PermissionDenied("Ce satellite n'est pas (ou plus) approuvé.")
+
+    @action(detail=True, methods=['get'], url_path='donnees')
+    def donnees(self, request, pk=None):
+        """Rafraîchissement périodique central -> local (voir cadrage "Chantier B" section 4) :
+        renvoie, scopées à la zone de l'institution du satellite via filter_queryset_to_viewer_
+        zone (le compte de service a bien `institution` renseignée, donc ce même mécanisme déjà
+        utilisé par les vues admin s'applique tel quel — aucune logique de zone dupliquée ici),
+        les crises actives et ce qui les concerne : demandes d'aide, offres et signalements —
+        y compris ceux soumis par un citoyen directement au site public, qui n'atteindraient
+        sinon jamais un satellite resté hors-ligne au moment de leur arrivée. Limité aux données
+        rattachées à une crise active (`crisis__isnull=True` inclus : pas encore triées) — pas
+        les données de référence (équipes, catalogue), à ajouter dans un futur endpoint dédié.
+        Même mise à jour de dernier_contact que contact() : cet appel EST un contact."""
+        satellite = self.get_object()
+        self._exiger_compte_service(request, satellite)
+
+        satellite.dernier_contact = timezone.now()
+        satellite.save(update_fields=['dernier_contact'])
+
+        env = get_active_environment(request)
+        crises_qs = filter_queryset_to_viewer_zone(
+            request, Crisis.objects.filter(environment=env, end_date__isnull=True),
+            resolver=_crisis_zone_resolver,
+        )
+        crise_ids = list(crises_qs.values_list('id', flat=True))
+        filtre_crise = Q(crisis_id__in=crise_ids) | Q(crisis__isnull=True)
+
+        demandes_qs = filter_queryset_to_viewer_zone(
+            request, Request.objects.filter(environment=env, actif=True).filter(filtre_crise)
+        )
+        offres_qs = filter_queryset_to_viewer_zone(
+            request, Offer.objects.filter(environment=env, actif=True).filter(filtre_crise).prefetch_related('competences')
+        )
+        signalements_qs = filter_queryset_to_viewer_zone(
+            request, Information.objects.filter(environment=env).filter(filtre_crise),
+            resolver=_information_zone_resolver,
+        )
+        # Dossier/Mission (mutables, voir core/sync_outbox.py) : déjà scopés via crise_ids
+        # (lui-même déjà passé par filter_queryset_to_viewer_zone ci-dessus) — pas besoin de
+        # ré-appliquer filter_queryset_to_viewer_zone, ces modèles n'ont pas de champ de zone
+        # propre. `modifie_le` inclus explicitement : le satellite en a besoin pour poser la
+        # bonne `version_de_base` sur ses PROCHAINES écritures locales (voir
+        # synchroniser_entrant côté satellite) — un payload de sync sortant ne l'inclut jamais
+        # (géré par le central), mais un payload de PULL entrant le doit.
+        dossiers_qs = Dossier.objects.filter(environment=env, crise_id__in=crise_ids)
+        missions_qs = Mission.objects.filter(environment=env).filter(Q(crise_id__in=crise_ids) | Q(crise__isnull=True))
+
+        from .sync_outbox import construire_payload_pull
+        return Response({
+            "crises": [construire_payload_pull(c, "Crisis") for c in crises_qs],
+            "demandes": [construire_payload_pull(d, "Request") for d in demandes_qs],
+            "dossiers": [_payload_donnees_mutable(d, "Dossier") for d in dossiers_qs],
+            "missions": [_payload_donnees_mutable(m, "Mission") for m in missions_qs],
+            "offres": [construire_payload_pull(o, "Offer") for o in offres_qs],
+            "signalements": [construire_payload_pull(s, "Information") for s in signalements_qs],
+        })
+
+    @action(detail=True, methods=['post'], url_path='synchroniser')
+    def synchroniser(self, request, pk=None):
+        """Synchronisation local -> central (cadrage "Chantier B", décisions du 2026-09-18) :
+        reçoit un lot d'EvenementSynchronisation accumulés côté satellite
+        (core/sync_outbox.py) dans l'ordre chronologique et les applique un par un — jamais
+        tout ou rien, l'échec ou le conflit d'un événement ne bloque pas les suivants. Payload
+        attendu : {"evenements": [{"id", "modele", "objet_id", "action", "payload",
+        "version_de_base", "auteur_local_email", "auteur_local_nom"}, ...]}. Renvoie le
+        résultat par événement — la commande synchroniser_sortant côté satellite ne marque
+        comme synchronisé QUE ce qui revient "applique"/"deja_applique" (jamais un conflit ou
+        une erreur, qui doivent être retentés ou arbitrés, pas oubliés silencieusement)."""
+        satellite = self.get_object()
+        self._exiger_compte_service(request, satellite)
+
+        satellite.dernier_contact = timezone.now()
+        satellite.save(update_fields=['dernier_contact'])
+
+        resultats = [
+            _appliquer_evenement_synchronisation(satellite, evenement, request)
+            for evenement in request.data.get('evenements', [])
+        ]
+        return Response({"resultats": resultats})
+
+    @action(detail=False, methods=['get'], url_path='supervision')
+    def supervision(self, request):
+        """Vue de supervision inter-collectivités (communes voisines -> préfecture) : pour
+        chaque crise active dans le périmètre du viewer (voir _communes_visibles_supervision),
+        l'état du/des PC Crise (satellite) de(s) institution(s) mairie/EPCI actrice(s), et les
+        contacts de secours de l'institution dès que ce PC Crise n'est pas Actif — cadrage
+        "Chantier B" section 5."""
+        communes_visibles = _communes_visibles_supervision(request)
+        crises_qs = Crisis.objects.filter(environment=get_active_environment(request), end_date__isnull=True)
+        if communes_visibles is None:
+            crises = list(crises_qs)
+        elif not communes_visibles:
+            crises = []
+        else:
+            crises = [c for c in crises_qs if any(code in communes_visibles for code in c.zone_communes)]
+
+        resultats = []
+        # Dernière activité HUMAINE (distincte du dernier contact SATELLITE ci-dessus, qui n'est
+        # qu'une synchronisation machine) : dernière ligne de main courante (AuditLog) posée par
+        # n'importe quel utilisateur de cette institution, tous objets confondus — pas restreint
+        # à CETTE crise précise, car la quasi-totalité des requêtes de consultation (LECTURE,
+        # voir AuditTraceMiddleware) ne portent pas de `crise` explicite ; ça resterait un
+        # indicateur honnête de "quelqu'un de cette collectivité utilise la plateforme en ce
+        # moment", ce qui est le besoin exprimé, plutôt qu'un traçage précis par crise. Mis en
+        # cache par institution le temps de la requête : plusieurs crises peuvent partager la
+        # même institution actrice.
+        cache_derniere_activite = {}
+
+        def derniere_activite_humaine(institution):
+            if institution.id not in cache_derniere_activite:
+                dernier_log = AuditLog.objects.filter(institution=institution).order_by('-date_action').first()
+                cache_derniere_activite[institution.id] = dernier_log.date_action if dernier_log else None
+            return cache_derniere_activite[institution.id]
+
+        for crise in crises:
+            implications = ImplicationInstitution.objects.filter(
+                crise=crise, type_implication=TypeImplication.ACTEUR, statut=StatutImplication.VALIDEE,
+            ).select_related('institution', 'institution__type')
+            for implication in implications:
+                institution = implication.institution
+                if (institution.type.code or '').upper() not in ('MAIRIE', 'EPCI'):
+                    continue
+                satellite = Satellite.objects.filter(
+                    institution=institution, statut_enrolement=StatutEnrolementSatellite.APPROUVE,
+                ).order_by('-dernier_contact').first()
+                etat = SatelliteSerializer(satellite).data['etat'] if satellite else None
+                contacts = []
+                if etat != 'ACTIF':
+                    contacts = [
+                        {
+                            "nom": f"{c.utilisateur.first_name} {c.utilisateur.last_name}".strip() or c.utilisateur.email,
+                            "fonction": c.fonction,
+                            "telephone": c.utilisateur.phone_number,
+                            "email": c.utilisateur.email,
+                        }
+                        for c in ContactInstitution.objects.filter(institution=institution, actif=True)
+                        .select_related('utilisateur').order_by('-contact_principal')
+                    ]
+                resultats.append({
+                    "crise_id": str(crise.id), "crise_nom": crise.name,
+                    "institution_id": str(institution.id), "institution_nom": institution.nom,
+                    "satellite_id": str(satellite.id) if satellite else None,
+                    "satellite_etat": etat,
+                    "satellite_dernier_contact": satellite.dernier_contact if satellite else None,
+                    "derniere_activite_humaine": derniere_activite_humaine(institution),
+                    "contacts_secours": contacts,
+                })
+        return Response(resultats)
+
+
+class ConflitSynchronisationViewSet(
+    EnvironmentScopedViewSetMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Conflits levés par SatelliteViewSet.synchroniser quand un événement mutable (Dossier/
+    Mission) arrive avec une version_de_base périmée — jamais résolus automatiquement, voir
+    ConflitSynchronisation.__doc__. Pas encore de page frontend dédiée à ce jour (2026-09-18) :
+    endpoint consommable directement (Django admin ou un futur écran) en attendant."""
+
+    queryset = ConflitSynchronisation.objects.select_related('satellite', 'satellite__institution', 'resolu_par').all()
+    serializer_class = ConflitSynchronisationSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if get_effective_role(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        mes_institutions = ContactInstitution.objects.filter(
+            utilisateur=self.request.user, actif=True
+        ).values_list('institution_id', flat=True)
+        return qs.filter(satellite__institution_id__in=mes_institutions)
+
+    @action(detail=True, methods=['post'], url_path='resoudre')
+    def resoudre(self, request, pk=None):
+        """Body : {"choix": "GARDE_CENTRAL"|"GARDE_LOCAL"}. GARDE_LOCAL applique
+        `payload_local` sur l'objet central (le satellite avait raison) ; GARDE_CENTRAL ne
+        touche à rien (l'état central actuel est conservé tel quel). Dans les deux cas, la
+        copie locale du satellite reste divergente tant qu'un futur mécanisme de rafraîchissement
+        Dossier/Mission (SatelliteViewSet.donnees ne couvre aujourd'hui que Crisis/Request/
+        Offer/Information) ne la corrige pas — limite connue, non résolue à ce jour."""
+        conflit = self.get_object()
+        if conflit.statut != StatutConflitSynchronisation.EN_ATTENTE:
+            raise ValidationError("Ce conflit a déjà été résolu.")
+        # Vocabulaire d'API volontairement plus court que les valeurs stockées
+        # (RESOLU_GARDE_CENTRAL/RESOLU_GARDE_LOCAL) : le client choisit une action
+        # ("GARDE_CENTRAL"/"GARDE_LOCAL"), pas un état déjà résolu.
+        choix_vers_statut = {
+            "GARDE_CENTRAL": StatutConflitSynchronisation.RESOLU_GARDE_CENTRAL,
+            "GARDE_LOCAL": StatutConflitSynchronisation.RESOLU_GARDE_LOCAL,
+        }
+        choix = choix_vers_statut.get(request.data.get('choix'))
+        if choix is None:
+            raise ValidationError("choix doit être GARDE_CENTRAL ou GARDE_LOCAL.")
+
+        if choix == StatutConflitSynchronisation.RESOLU_GARDE_LOCAL:
+            ModeleClasse = apps.get_model('core', conflit.modele)
+            objet = ModeleClasse.objects.filter(pk=conflit.objet_id).first()
+            if objet is not None:
+                for champ, valeur in conflit.payload_local.items():
+                    setattr(objet, champ, valeur)
+                objet.save()
+
+        conflit.statut = choix
+        conflit.resolu_le = timezone.now()
+        conflit.resolu_par = request.user
+        conflit.save(update_fields=['statut', 'resolu_le', 'resolu_par'])
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="ConflitSynchronisation", objet_id=conflit.id,
+            commentaire=f"Conflit de synchronisation résolu : {choix}.",
+        )
+        return Response(ConflitSynchronisationSerializer(conflit).data)

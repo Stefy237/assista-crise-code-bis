@@ -2,7 +2,9 @@
 import json
 import os
 import re
+from django.conf import settings
 from django.db.models import Sum
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .auth_validation import InstitutionEmailValidator
@@ -45,6 +47,9 @@ from .models import (
     MessageMeshLog,
     CommandeMeshCore,
     RelaisMeshCore,
+    Satellite,
+    JetonEnrolementSatellite,
+    ConflitSynchronisation,
     CanalMeshCore,
     MessageCanalMeshCore,
     ContactMeshCore,
@@ -2116,6 +2121,16 @@ class InstitutionSerializer(
         model = Institution
 
         fields = "__all__"
+        # Jamais assignables directement par le payload entrant (create/update) : ces 3 champs ne
+        # doivent être posés que par _traiter_acceptation_convention (backend/core/views.py), pour
+        # qu'un payload de création/édition d'institution ne puisse pas se déclarer lui-même
+        # "convention déjà acceptée" et contourner ainsi la case à cocher obligatoire — voir
+        # core/convention_sous_traitance.py.
+        read_only_fields = [
+            "convention_sous_traitance_acceptee_le",
+            "convention_sous_traitance_acceptee_par",
+            "convention_sous_traitance_version",
+        ]
 
     def to_representation(self, instance):
         # Une VRAIE institution (email/téléphone réels) reste visible en DEMO (voir
@@ -2662,6 +2677,12 @@ class MessageMeshLogSerializer(serializers.ModelSerializer):
         # effet (DRF ignore un champ read_only reçu en entrée sans lever d'erreur) : un
         # message resté EN_ATTENTE à jamais, réessayé en boucle, jamais marqué en échec.
         read_only_fields = ['expediteur', 'equipe']
+        # `compagnon` optionnel côté API (contrairement au modèle, où il reste requis) :
+        # laisser vide déclenche la sélection automatique du meilleur companion pour ce
+        # destinataire (voir MessageMeshLogViewSet.perform_create, core/routage_mesh.py) — un
+        # client qui SAIT déjà quel companion utiliser peut toujours le poser explicitement,
+        # ce qui garde la priorité (jamais écrasé par la sélection auto).
+        extra_kwargs = {'compagnon': {'required': False}}
 
     def get_expediteur_nom(self, obj):
         if not obj.expediteur_id:
@@ -2862,5 +2883,57 @@ class MessageCanalMeshCoreSerializer(serializers.ModelSerializer):
         if not obj.expediteur_id:
             return None
         return f"{obj.expediteur.first_name} {obj.expediteur.last_name}".strip() or obj.expediteur.email
+
+
+class SatelliteSerializer(serializers.ModelSerializer):
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True)
+    profil_libelle = serializers.CharField(source='get_profil_display', read_only=True)
+    statut_enrolement_libelle = serializers.CharField(source='get_statut_enrolement_display', read_only=True)
+    etat = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Satellite
+        fields = "__all__"
+        # compte_service n'est jamais écrivable depuis ce serializer : posé uniquement par
+        # SatelliteViewSet.valider (qui génère le compte de service et renvoie ses identifiants
+        # une seule fois dans sa propre réponse, jamais relisible ensuite) — jamais via un
+        # create/update générique sur ce endpoint.
+        read_only_fields = ['statut_enrolement', 'compte_service', 'dernier_contact']
+
+    def get_etat(self, obj):
+        # Actif/Inactif/Perdu dérivé de dernier_contact à la lecture (jamais stocké) — voir
+        # Satellite.__doc__ et les seuils SATELLITE_SEUIL_INACTIF_MINUTES/
+        # SATELLITE_SEUIL_PERDU_MINUTES (settings). None tant qu'aucun contact n'a encore eu
+        # lieu (satellite tout juste enrôlé, ou pas encore approuvé).
+        if obj.dernier_contact is None:
+            return None
+        silence_minutes = (timezone.now() - obj.dernier_contact).total_seconds() / 60
+        if silence_minutes > settings.SATELLITE_SEUIL_PERDU_MINUTES:
+            return "PERDU"
+        if silence_minutes > settings.SATELLITE_SEUIL_INACTIF_MINUTES:
+            return "INACTIF"
+        return "ACTIF"
+
+
+class JetonEnrolementSatelliteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = JetonEnrolementSatellite
+        fields = ['id', 'institution', 'jeton', 'expiration', 'utilise', 'date_creation']
+        read_only_fields = fields
+
+
+class ConflitSynchronisationSerializer(serializers.ModelSerializer):
+    satellite_nom = serializers.CharField(source='satellite.nom', read_only=True)
+    modele_libelle = serializers.CharField(source='get_modele_display', read_only=True)
+
+    class Meta:
+        model = ConflitSynchronisation
+        fields = "__all__"
+        # Jamais écrit directement — uniquement créé par SatelliteViewSet.synchroniser et
+        # tranché via ConflitSynchronisationViewSet.resoudre (voir leurs docstrings).
+        read_only_fields = [
+            'satellite', 'modele', 'objet_id', 'payload_local', 'etat_central_au_conflit',
+            'statut', 'resolu_le', 'resolu_par',
+        ]
 
 

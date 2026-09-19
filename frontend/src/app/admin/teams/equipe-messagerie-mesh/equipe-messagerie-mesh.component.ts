@@ -1,6 +1,7 @@
 import { Component, Input, OnChanges, OnDestroy, SimpleChanges } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { of, Subscription } from 'rxjs';
 
 import { NoeudMeshUtilisateurService } from '../../../services/noeud-mesh-utilisateur.service';
 import { CompagnonMeshCoreService } from '../../../services/compagnon-meshcore.service';
@@ -9,6 +10,9 @@ import { CanalMeshCoreService } from '../../../services/canal-meshcore.service';
 import { NoeudMeshUtilisateur } from '../../../shared/models/noeud-mesh-utilisateur.model';
 import { CompagnonMeshCore } from '../../../shared/models/compagnon-meshcore.model';
 import { MessageMeshLog, MessageCanalMeshCore } from '../../../shared/models/canal-meshcore.model';
+import { pollWhileVisible } from '../../../shared/utils/polling.util';
+
+const INTERVALLE_POLLING_MESSAGES_MS = 8_000;
 
 /** DM privés régulateur <-> équipe, uniquement si au moins un membre de l'équipe a un
  * companion MeshCore personnel associé (voir /admin/meshcore-companions, section « Nœuds »).
@@ -42,7 +46,12 @@ export class EquipeMessagerieMeshComponent implements OnChanges, OnDestroy {
   nouveauMessage = '';
   envoiEnCours = false;
 
-  private intervalRafraichissement: ReturnType<typeof setInterval> | null = null;
+  /** Raison de la suggestion automatique du companion "Via" (voir core/routage_mesh.py côté
+   * backend) — affichée pour que l'utilisateur comprenne le choix fait à sa place, et puisse
+   * le changer explicitement (le sélecteur "Via" reste toujours modifiable). */
+  suggestionCompagnonRaison = '';
+
+  private pollingSub?: Subscription;
 
   constructor(
     private noeudService: NoeudMeshUtilisateurService,
@@ -54,13 +63,21 @@ export class EquipeMessagerieMeshComponent implements OnChanges, OnDestroy {
   ngOnChanges(changes: SimpleChanges): void {
     if (changes['equipeId'] && this.equipeId) {
       this.charger();
-      if (this.intervalRafraichissement) clearInterval(this.intervalRafraichissement);
-      this.intervalRafraichissement = setInterval(() => this.chargerMessages(false), 8000);
+      this.pollingSub?.unsubscribe();
+      // pollWhileVisible (au lieu d'un setInterval nu) : suspend le rafraîchissement quand
+      // l'onglet est en arrière-plan, et rattrape immédiatement au retour au premier plan
+      // plutôt que d'attendre jusqu'à 8s de plus — le premier tick (immédiat) est ignoré ici,
+      // charger() vient déjà de le faire via chargerMessages(true).
+      let premierTick = true;
+      this.pollingSub = pollWhileVisible(() => of(null), INTERVALLE_POLLING_MESSAGES_MS).subscribe(() => {
+        if (premierTick) { premierTick = false; return; }
+        this.chargerMessages(false);
+      });
     }
   }
 
   ngOnDestroy(): void {
-    if (this.intervalRafraichissement) clearInterval(this.intervalRafraichissement);
+    this.pollingSub?.unsubscribe();
   }
 
   private charger(): void {
@@ -77,6 +94,7 @@ export class EquipeMessagerieMeshComponent implements OnChanges, OnDestroy {
           this.compagnonService.envoyables().subscribe(compagnons => {
             this.compagnons = compagnons as CompagnonMeshCore[];
             this.compagnonId = this.compagnons.find(c => c.principal)?.id || this.compagnons[0]?.id || '';
+            this.suggererCompagnon();
           });
         }
         // Le canal d'équipe reste affiché même sans membre équipé d'un nœud personnel —
@@ -103,6 +121,28 @@ export class EquipeMessagerieMeshComponent implements OnChanges, OnDestroy {
 
   get destinatairePubkey(): string | null {
     return this.noeudsEquipe.find(n => n.id === this.destinataireId)?.pubkey_hex || null;
+  }
+
+  onDestinataireChange(): void {
+    this.suggererCompagnon();
+  }
+
+  /** Interroge core/routage_mesh.py (via l'endpoint meilleur-pour-contact) pour pré-sélectionner
+   * le companion le plus adapté à CE destinataire — contact déjà entendu au plus court en
+   * sauts, sinon sa région, sinon le principal. Le sélecteur "Via" reste modifiable ensuite :
+   * ce n'est qu'une suggestion, jamais imposée. */
+  private suggererCompagnon(): void {
+    this.suggestionCompagnonRaison = '';
+    if (!this.destinatairePubkey || this.compagnons.length < 2) return;
+    this.compagnonService.meilleurPourContact(this.destinatairePubkey).subscribe({
+      next: (suggestion) => {
+        if (suggestion.compagnon_id && this.compagnons.some(c => c.id === suggestion.compagnon_id)) {
+          this.compagnonId = suggestion.compagnon_id;
+          this.suggestionCompagnonRaison = suggestion.raison;
+        }
+      },
+      error: () => {},
+    });
   }
 
   /** Nom lisible de la personne de terrain associée à ce nœud — utilisé pour afficher
