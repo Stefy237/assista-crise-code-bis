@@ -42,7 +42,7 @@ from django.core.files.base import ContentFile
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 
-from .audit import audit_log, get_client_ip, send_mail_logged
+from .audit import audit_log, get_client_ip, send_mail_logged, send_mail_with_attachment_logged
 from .export import build_crisis_export_zip
 from .institution_attachment import (
     find_institution_for_pending_user, attach_user_with_role,
@@ -142,6 +142,7 @@ from .models import (
     PointOperationnel,
     ImplicationInstitution,
     ContributionZoneCommune,
+    DemandeMobilisation, TypeDemandeMobilisation, StatutDemandeMobilisation,
     TypeImplication,
     StatutImplication,
     User, Crisis, TypeCrise, Request, RequestPhoto, Offer, OfferPhoto, OfferMessage, Information, DisponibiliteOffre, DisponibilitePointEquipe, MaterielPoint,
@@ -336,6 +337,7 @@ from .serializers import (
     DossierCommentaireSerializer,
     DossierHistoriqueSerializer,
     NotificationSerializer,
+    DemandeMobilisationSerializer,
     UserSerializer,
     RecherchePersonneLectureSerializer,
     RecherchePersonneLectureHistoriqueSerializer,
@@ -7199,6 +7201,197 @@ class NotificationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             derniere_notification_le=Max('date_creation'),
         )
         return Response(agg)
+
+
+def _peut_emettre_demande_mobilisation(request, institution) -> bool:
+    """Restreint aux rôles responsable/régulateur de l'institution émettrice (décision du
+    2026-09-19, plus étroit que IsInstitutionalActor seul) — une demande formelle adressée à
+    une autre personne/institution n'est pas un geste anodin, contrairement à la plupart des
+    actions courantes de ce projet."""
+    if get_effective_role(request) == UserRole.ADMINISTRATOR:
+        return True
+    if institution is None:
+        return False
+    return AffectationRoleOperationnel.objects.filter(
+        utilisateur=request.user, institution=institution,
+        role__code__in=["RESPONSABLE", "REGULATEUR"], actif=True,
+    ).exists()
+
+
+class DemandeMobilisationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Voir DemandeMobilisation.__doc__. Émission restreinte aux rôles responsable/régulateur de
+    l'institution émettrice (_peut_emettre_demande_mobilisation) ; visible par l'institution
+    émettrice, l'institution cible, l'utilisateur cible lui-même, ou un administrateur — jamais
+    par une institution tierce sans lien avec cette demande."""
+
+    queryset = DemandeMobilisation.objects.select_related(
+        'crise', 'institution_emettrice', 'emetteur', 'cible_utilisateur', 'cible_institution',
+        'cible_offre', 'point_operationnel',
+    ).order_by('-date_creation')
+    serializer_class = DemandeMobilisationSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if get_effective_role(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        mes_institutions_ids = ContactInstitution.objects.filter(
+            utilisateur=self.request.user, actif=True,
+        ).values_list('institution_id', flat=True)
+        return qs.filter(
+            Q(institution_emettrice_id__in=mes_institutions_ids)
+            | Q(cible_institution_id__in=mes_institutions_ids)
+            | Q(cible_utilisateur=self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        institution = serializer.validated_data.get('institution_emettrice')
+        if not _peut_emettre_demande_mobilisation(self.request, institution):
+            raise PermissionDenied(
+                "Seul un responsable ou un régulateur de l'institution émettrice peut créer "
+                "une demande de mobilisation."
+            )
+        demande = serializer.save(
+            emetteur=self.request.user,
+            jeton_verification=secrets.token_urlsafe(32),
+            environment=get_active_environment(self.request),
+        )
+        cible_nom = self.get_serializer(demande).data.get('cible_nom') or '(cible non identifiée)'
+        audit_log(
+            request=self.request, action_code="CREATION", objet_type="DemandeMobilisation",
+            objet_id=demande.id, crise=demande.crise,
+            commentaire=f"{institution.nom} demande à {cible_nom} de "
+                        f"{demande.get_type_demande_display().lower()} (crise : {demande.crise.name}).",
+        )
+        if demande.cible_utilisateur_id:
+            message = f"{institution.nom} vous demande de {demande.get_type_demande_display().lower()}"
+            if demande.lieu_texte:
+                message += f" — {demande.lieu_texte}"
+            if demande.motif:
+                message += f" ({demande.motif})"
+            Notification.objects.create(
+                utilisateur=demande.cible_utilisateur, crise=demande.crise,
+                titre="Demande de mobilisation", message=message,
+                environment=get_active_environment(self.request),
+            )
+
+    @action(detail=True, methods=['post'])
+    def revoquer(self, request, pk=None):
+        """Une demande révoquée n'est jamais supprimée (trace conservée pour la main courante),
+        seul son statut change — idempotent, une révocation répétée ne réécrit pas
+        date_revocation."""
+        demande = self.get_object()
+        if not _peut_emettre_demande_mobilisation(request, demande.institution_emettrice):
+            return Response(
+                {"error": "Seul un responsable ou un régulateur de l'institution émettrice peut révoquer cette demande."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if demande.statut != StatutDemandeMobilisation.REVOQUEE:
+            demande.statut = StatutDemandeMobilisation.REVOQUEE
+            demande.date_revocation = timezone.now()
+            demande.save(update_fields=['statut', 'date_revocation'])
+            audit_log(
+                request=request, action_code="MODIFICATION", objet_type="DemandeMobilisation",
+                objet_id=demande.id, crise=demande.crise, commentaire="Demande de mobilisation révoquée.",
+            )
+        return Response(self.get_serializer(demande).data)
+
+    @action(detail=True, methods=['post'], url_path='envoyer-attestation')
+    def envoyer_attestation(self, request, pk=None):
+        """Génère l'attestation PDF (avec QR code de vérification, voir
+        core/attestation_mobilisation.py) et l'envoie par email à l'adresse connue de la cible.
+        `base_url` dérivée de la requête elle-même (request.build_absolute_uri), jamais d'un
+        settings.SERVER_URL fixe — le QR doit pointer vers l'hôte réellement utilisé pour
+        appeler cette action (.113/.114/futur domaine public), pas une valeur qui pourrait ne
+        pas encore résoudre publiquement."""
+        from .attestation_mobilisation import email_cible, generer_pdf_demande_mobilisation
+
+        demande = self.get_object()
+        if not _peut_emettre_demande_mobilisation(request, demande.institution_emettrice):
+            return Response(
+                {"error": "Seul un responsable ou un régulateur de l'institution émettrice peut envoyer cette attestation."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        destinataire = email_cible(demande)
+        if not destinataire:
+            return Response(
+                {"error": "Aucune adresse email connue pour le destinataire de cette demande."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        base_url = request.build_absolute_uri('/')
+        pdf_bytes = generer_pdf_demande_mobilisation(demande, base_url)
+        message = (
+            f"Bonjour,\n\n"
+            f"{demande.institution_emettrice.nom} vous adresse une demande de mobilisation "
+            f"dans le cadre de la crise « {demande.crise.name} » — voir l'attestation ci-jointe.\n\n"
+            f"Cordialement,\n{demande.institution_emettrice.nom}"
+        )
+        send_mail_with_attachment_logged(
+            request, subject=f"Attestation de mobilisation — {demande.crise.name}", message=message,
+            from_email=None, recipient_list=[destinataire],
+            attachment_filename="attestation_mobilisation.pdf", attachment_content=pdf_bytes,
+            attachment_mimetype="application/pdf",
+        )
+        return Response({"envoye_a": destinataire})
+
+
+class VerifierDemandeMobilisationView(APIView):
+    """Page de vérification publique (pointée par le QR code de l'attestation, voir
+    core/attestation_mobilisation.py) — AUCUNE authentification requise, c'est justement le
+    point : un gendarme qui scanne le QR n'a pas de compte sur la plateforme. Retourne une page
+    HTML minimale plutôt que du JSON brut (lisible directement sur l'écran d'un téléphone après
+    scan) et volontairement peu de données (jamais l'email/téléphone de la cible sur une page
+    publique sans authentification) — juste de quoi confirmer l'authenticité et le statut à
+    jour (une révocation survenue après l'émission du PDF doit être visible ici immédiatement,
+    contrairement au PDF lui-même qui reste figé une fois envoyé)."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, jeton):
+        from .attestation_mobilisation import nom_cible
+
+        demande = DemandeMobilisation.objects.select_related(
+            'crise', 'institution_emettrice', 'point_operationnel',
+        ).filter(jeton_verification=jeton).first()
+
+        if demande is None:
+            html = (
+                "<!doctype html><html lang='fr'><meta charset='utf-8'>"
+                "<title>Vérification — introuvable</title>"
+                "<body style='font-family:sans-serif;max-width:480px;margin:3rem auto;padding:0 1rem'>"
+                "<h1 style='color:#b91c1c'>Jeton inconnu</h1>"
+                "<p>Aucune attestation ne correspond à ce QR code.</p>"
+                "</body></html>"
+            )
+            return HttpResponse(html, content_type="text/html; charset=utf-8", status=404)
+
+        valide = demande.statut == StatutDemandeMobilisation.ACTIVE
+        couleur = "#15803d" if valide else "#b91c1c"
+        libelle_statut = "ATTESTATION VALIDE" if valide else "ATTESTATION RÉVOQUÉE"
+        lieu = demande.point_operationnel.nom if demande.point_operationnel_id else (demande.lieu_texte or "—")
+
+        html = f"""<!doctype html><html lang='fr'><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Vérification d'attestation</title>
+<body style='font-family:sans-serif;max-width:480px;margin:2rem auto;padding:0 1rem;color:#1f2937'>
+  <h1 style='color:{couleur};font-size:1.3rem'>{libelle_statut}</h1>
+  <table style='width:100%;border-collapse:collapse;font-size:.95rem'>
+    <tr><td style='padding:.4rem 0;color:#6b7280'>Autorité émettrice</td><td><strong>{demande.institution_emettrice.nom}</strong></td></tr>
+    <tr><td style='padding:.4rem 0;color:#6b7280'>Destinataire</td><td>{nom_cible(demande)}</td></tr>
+    <tr><td style='padding:.4rem 0;color:#6b7280'>Crise</td><td>{demande.crise.name}</td></tr>
+    <tr><td style='padding:.4rem 0;color:#6b7280'>Nature</td><td>{demande.get_type_demande_display()}</td></tr>
+    <tr><td style='padding:.4rem 0;color:#6b7280'>Lieu</td><td>{lieu}</td></tr>
+    <tr><td style='padding:.4rem 0;color:#6b7280'>Émise le</td><td>{demande.date_creation.strftime('%d/%m/%Y à %H:%M')}</td></tr>
+  </table>
+  <p style='color:#9ca3af;font-size:.78rem;margin-top:2rem'>
+    Ceci n'est pas une réquisition légale au sens strict (article L. 2215-1 du CGCT) — une
+    demande formelle tracée sur la plateforme Assista Crise.
+  </p>
+</body></html>"""
+        return HttpResponse(html, content_type="text/html; charset=utf-8")
+
 
 def _notifier_lecteurs_et_createur_recherche(request, recherche, titre, message):
     """Notifie le créateur de la fiche et toute personne l'ayant consultée

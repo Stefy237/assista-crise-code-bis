@@ -15,6 +15,7 @@ from .views import (
     OfferReponsePublicView,
     RecherchePersonneHistoriqueViewSet, AffectationCompetenceViewSet,
     DossierViewSet, MissionViewSet, DocumentViewSet, DossierCommentaireViewSet, DossierHistoriqueViewSet, NotificationViewSet, TeamViewSet,
+    DemandeMobilisationViewSet, VerifierDemandeMobilisationView,
     AuditLogViewSet,
     JournalCollectiviteViewSet,
     InstitutionTypeViewSet,
@@ -166,6 +167,7 @@ router.register(r'dossier-historique', DossierHistoriqueViewSet)
 router.register(r'audit-logs', AuditLogViewSet)
 router.register(r'journal-collectivite', JournalCollectiviteViewSet, basename='journal-collectivite')
 router.register(r'notifications', NotificationViewSet, basename='notification')
+router.register(r'demandes-mobilisation', DemandeMobilisationViewSet, basename='demandemobilisation')
 router.register(r'recherches-personnes', RecherchePersonneViewSet)
 router.register(r'recherches-personnes-commentaires', RecherchePersonneCommentaireViewSet)
 router.register(r'recherches-personnes-historique', RecherchePersonneHistoriqueViewSet),
@@ -189,6 +191,7 @@ urlpatterns = [
     path('activate-account/<str:uidb64>/<str:token>/', AccountActivationView.as_view(), name='activate_account'),
     path('magic-login/<str:uidb64>/<str:token>/', MagicLoginView.as_view(), name='magic_login'),
     path('me/', UserMeView.as_view(), name='auth_me'),
+    path('verifier-mobilisation/<str:jeton>/', VerifierDemandeMobilisationView.as_view(), name='verifier_demande_mobilisation'),
     path('change-password/', ChangePasswordView.as_view(), name='auth_change_password'),
     path('reset-password/<str:uidb64>/<str:token>/', PasswordResetConfirmView.as_view(), name='reset_password_confirm'),
     path('stats/dashboard/', DashboardStatsView.as_view(), name='dashboard_stats'),
