@@ -4,6 +4,8 @@ import { FormsModule } from '@angular/forms';
 
 import { TeamService } from '../../services/team.service';
 import { RessourceMobilisee } from '../../shared/models/ressource-mobilisee.model';
+import { AffecterLogementResultat } from '../../shared/models/logement-intervenant.model';
+import { LogementPickerModalComponent } from '../../shared/components/common/logement-picker-modal/logement-picker-modal.component';
 
 type TypeFilter = 'ALL' | 'personne' | 'materiel';
 
@@ -39,7 +41,7 @@ interface GroupeEquipe {
 @Component({
   selector: 'app-ressources-mobilisees',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, LogementPickerModalComponent],
   templateUrl: './ressources-mobilisees.component.html',
   styleUrl: './ressources-mobilisees.component.scss',
 })
@@ -51,6 +53,12 @@ export class RessourcesMobiliseesComponent implements OnInit {
   typeFilter: TypeFilter = 'ALL';
   searchQuery = '';
   triNomAsc = true;
+
+  // ── "Besoin hébergement" (24/09) : sélection groupée + affectation ─────────────────────
+  selection = new Set<string>();
+  pickerOuvert = false;
+  pickerIntervenantIds: string[] = [];
+  pickerCriseId: string | null = null;
 
   constructor(private teamService: TeamService) {}
 
@@ -65,6 +73,71 @@ export class RessourcesMobiliseesComponent implements OnInit {
       next: (rows) => { this.rows = rows; this.loading = false; },
       error: () => { this.errorMessage = 'Impossible de charger les ressources mobilisées.'; this.loading = false; },
     });
+  }
+
+  estSelectionne(userId: string | undefined): boolean {
+    return !!userId && this.selection.has(userId);
+  }
+
+  basculerSelection(userId: string | undefined): void {
+    if (!userId) return;
+    if (this.selection.has(userId)) this.selection.delete(userId);
+    else this.selection.add(userId);
+  }
+
+  /** "Sélectionner toute l'équipe" — demande explicite de Sylvain le 24/09 (une asso qui
+   * arrive avec 50 intervenants d'un coup). Bascule sur l'état actuel : tous sélectionnés ->
+   * tous désélectionnés, sinon tous sélectionnés. */
+  basculerSelectionEquipe(groupe: GroupeEquipe): void {
+    const ids = groupe.unites.map(u => u.personne?.user_id).filter((id): id is string => !!id);
+    const toutSelectionne = ids.length > 0 && ids.every(id => this.selection.has(id));
+    for (const id of ids) {
+      if (toutSelectionne) this.selection.delete(id);
+      else this.selection.add(id);
+    }
+  }
+
+  equipeEntierementSelectionnee(groupe: GroupeEquipe): boolean {
+    const ids = groupe.unites.map(u => u.personne?.user_id).filter((id): id is string => !!id);
+    return ids.length > 0 && ids.every(id => this.selection.has(id));
+  }
+
+  get nombreSelectionnes(): number {
+    return this.selection.size;
+  }
+
+  /** Ouvre le sélecteur de logement pour UNE personne (bouton "Besoin hébergement" sur sa
+   * ligne) — n'affecte que si la personne a au moins une crise (voir crise_ids). */
+  ouvrirPickerPourPersonne(personne: RessourceMobilisee): void {
+    if (!personne.user_id || !personne.crise_ids.length) return;
+    this.pickerIntervenantIds = [personne.user_id];
+    this.pickerCriseId = personne.crise_ids[0];
+    this.pickerOuvert = true;
+  }
+
+  /** Ouvre le sélecteur de logement pour toute la sélection groupée — la crise de recherche
+   * est celle de la première personne sélectionnée (cas d'usage visé : une seule crise à la
+   * fois, sélection groupée d'une même équipe/asso). */
+  ouvrirPickerPourSelection(): void {
+    const personnes = this.filteredRows.filter(
+      r => r.type === 'personne' && r.user_id && this.selection.has(r.user_id)
+    );
+    if (!personnes.length) return;
+    const premiereAvecCrise = personnes.find(p => p.crise_ids.length > 0);
+    if (!premiereAvecCrise) return;
+    this.pickerIntervenantIds = personnes.map(p => p.user_id!).filter(Boolean);
+    this.pickerCriseId = premiereAvecCrise.crise_ids[0];
+    this.pickerOuvert = true;
+  }
+
+  fermerPicker(): void {
+    this.pickerOuvert = false;
+  }
+
+  onLogementAffecte(_resultat: AffecterLogementResultat): void {
+    this.pickerOuvert = false;
+    this.selection.clear();
+    this.load();
   }
 
   /** Respecte la recherche/le filtre de type — base commune à l'export CSV (toujours à plat)

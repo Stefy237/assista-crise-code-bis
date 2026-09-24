@@ -1,0 +1,45 @@
+<div class="modal-overlay" (click)="closed.emit()">
+  <div class="modal" (click)="$event.stopPropagation()">
+    <div class="modal-header">
+      <h2>
+        <span class="material-icons">night_shelter</span>
+        Affecter un logement — {{ intervenantIds.length }} personne{{ intervenantIds.length > 1 ? 's' : '' }}
+      </h2>
+      <button class="icon-btn" (click)="closed.emit()"><span class="material-icons">close</span></button>
+    </div>
+
+    <div class="modal-body">
+      @if (chargement) {
+        <p class="hint">Recherche des logements disponibles…</p>
+      } @else if (erreur) {
+        <p class="erreur">{{ erreur }}</p>
+      } @else if (logements.length === 0) {
+        <p class="hint">Aucun logement disponible pour l'instant (centre d'hébergement ou offre de particulier validée) — voir "Logement intervenants".</p>
+      } @else {
+        <div class="logements-liste">
+          @for (logement of logements; track logement.type + logement.id) {
+            <div class="logement-carte">
+              <div class="logement-infos">
+                <span class="type-badge" [class.type-point]="logement.type === 'point'" [class.type-offre]="logement.type === 'offre'">
+                  <span class="material-icons">{{ logement.type === 'point' ? 'home_work' : 'home' }}</span>
+                  {{ logement.type === 'point' ? 'Centre' : 'Particulier' }}
+                </span>
+                <span class="logement-nom">{{ logement.nom }}</span>
+                @if (logement.commune) { <span class="logement-detail">{{ logement.commune }}</span> }
+                @if (logement.capacite_adultes || logement.capacite_enfants) {
+                  <span class="logement-detail">{{ logement.capacite_adultes ?? '—' }} adulte(s), {{ logement.capacite_enfants ?? 0 }} enfant(s)</span>
+                }
+                @if (logement.distance_km !== null) {
+                  <span class="logement-distance">{{ logement.distance_km }} km</span>
+                }
+              </div>
+              <button type="button" class="btn-primary sm" [disabled]="affectationEnCours" (click)="choisir(logement)">
+                Choisir
+              </button>
+            </div>
+          }
+        </div>
+      }
+    </div>
+  </div>
+</div>

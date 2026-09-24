@@ -8,6 +8,12 @@ export interface RessourceMobilisee {
   centres: string[];
   detail: string | null;
   statut: string | null;
+  /** Ids des crises de l'équipe (même ordre que `crises`) — "Besoin hébergement" (24/09) s'en
+   * sert pour chercher les logements disponibles autour de la première crise de l'équipe. */
+  crise_ids: string[];
+  /** type === 'personne' uniquement. Logement actuellement réservé pour cette personne sur la
+   * première crise de son équipe, null si aucun. */
+  logement?: { type: 'point' | 'offre'; id: string; nom: string } | null;
 
   // type === 'personne' uniquement — corrèle avec proprietaire_id d'une ligne "materiel" pour
   // détecter qu'un membre d'équipe a lui-même apporté du matériel (couple indissociable).

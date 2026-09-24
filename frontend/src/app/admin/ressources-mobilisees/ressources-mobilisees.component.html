@@ -32,6 +32,16 @@
   </div>
 </div>
 
+@if (nombreSelectionnes > 0) {
+  <div class="selection-toolbar">
+    <span>{{ nombreSelectionnes }} personne(s) sélectionnée(s)</span>
+    <button type="button" class="btn-primary" (click)="ouvrirPickerPourSelection()">
+      <span class="material-icons">night_shelter</span> Affecter un logement à la sélection
+    </button>
+    <button type="button" class="btn-secondary" (click)="selection.clear()">Annuler la sélection</button>
+  </div>
+}
+
 @if (loading) {
   <p>Chargement…</p>
 } @else if (errorMessage) {
@@ -42,6 +52,9 @@
   @for (groupe of groupes; track groupe.equipe_id) {
     <div class="equipe-groupe" [class]="'equipe-couleur-' + groupe.couleurIndex">
       <div class="equipe-entete">
+        <label class="select-equipe" title="Sélectionner toute l'équipe">
+          <input type="checkbox" [checked]="equipeEntierementSelectionnee(groupe)" (change)="basculerSelectionEquipe(groupe)">
+        </label>
         <span class="material-icons">groups</span>
         <strong>{{ groupe.equipe_nom }}</strong>
         @if (groupe.institution) { <span class="equipe-institution">— {{ groupe.institution }}</span> }
@@ -53,11 +66,22 @@
           <div class="unite-carte" [class.unite-liee]="unite.personne && unite.materiels.length > 0">
             @if (unite.personne) {
               <div class="unite-personne">
+                <input type="checkbox" class="select-personne" [checked]="estSelectionne(unite.personne.user_id)" (change)="basculerSelection(unite.personne.user_id)">
                 <span class="type-badge type-personne">
                   <span class="material-icons">person</span> Personne
                 </span>
                 <span class="unite-nom">{{ unite.personne.nom }}</span>
                 @if (unite.personne.detail) { <span class="unite-detail">{{ unite.personne.detail }}</span> }
+
+                @if (unite.personne.logement) {
+                  <span class="logement-badge logement-ok" [title]="unite.personne.logement.nom">
+                    <span class="material-icons">night_shelter</span> {{ unite.personne.logement.nom }}
+                  </span>
+                } @else if (unite.personne.crise_ids.length > 0) {
+                  <button type="button" class="logement-badge logement-besoin" (click)="ouvrirPickerPourPersonne(unite.personne)">
+                    <span class="material-icons">night_shelter</span> Besoin d'hébergement
+                  </button>
+                }
               </div>
             }
 
@@ -102,4 +126,13 @@
       </div>
     </div>
   }
+}
+
+@if (pickerOuvert && pickerCriseId) {
+  <app-logement-picker-modal
+    [criseId]="pickerCriseId"
+    [intervenantIds]="pickerIntervenantIds"
+    (affecte)="onLogementAffecte($event)"
+    (closed)="fermerPicker()">
+  </app-logement-picker-modal>
 }

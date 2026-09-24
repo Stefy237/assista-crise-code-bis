@@ -150,6 +150,7 @@ from .models import (
     StatutImplication,
     User, Crisis, TypeCrise, Request, RequestPhoto, Offer, OfferPhoto, OfferMessage, Information, DisponibiliteOffre, DisponibilitePointEquipe, MaterielPoint,
     MaterielCatalogue, ContributionMateriel, StatutMateriel, TypeMateriel, NiveauStock, RegistrePresence, TypePersonneAccueillie, DeclarationSecurite, SituationDeclarant,
+    AffectationLogementIntervenant,
     CompagnonMeshCore, NoeudMeshUtilisateur, MessageMeshLog, DirectionMessageMesh, StatutMessageMesh,
     CommandeMeshCore, TypeCommandeMeshCore, StatutCommandeMeshCore,
     RelaisMeshCore, CanalMeshCore, MessageCanalMeshCore, ContactMeshCore, TypeContactMeshCore,
@@ -4889,10 +4890,39 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 Q(institution_id__in=mes_institutions_ids) | Q(institution_delegataire_id__in=mes_institutions_ids)
             )
 
+        teams = list(teams)
+
+        # "Besoin hébergement" (24/09) : logement actuel de chaque personne, s'il y en a un,
+        # sur la première crise de son équipe -- une seule requête groupée pour toute la page
+        # plutôt qu'une par personne (même souci que le N+1 salon_matrix corrigé ce soir).
+        # DISTINCT ON (Postgres) prend la ligne la plus récente par couple, cohérent avec
+        # Meta.ordering = ["-date_creation"] sur AffectationLogementIntervenant.
+        crise_ids = {str(c.id) for team in teams for c in team.assigned_crises.all()}
+        membre_ids = {str(m.id) for team in teams for m in team.members.all()}
+        logements_par_cle = {}
+        if crise_ids and membre_ids:
+            affectations = (
+                AffectationLogementIntervenant.objects
+                .filter(crise_id__in=crise_ids, intervenant_id__in=membre_ids)
+                .select_related('point', 'offre')
+                .order_by('intervenant_id', 'crise_id', '-date_creation')
+                .distinct('intervenant_id', 'crise_id')
+            )
+            for aff in affectations:
+                nom_cible = aff.point.nom if aff.point_id else (aff.offre.title if aff.offre_id else None)
+                logements_par_cle[(str(aff.intervenant_id), str(aff.crise_id))] = {
+                    "type": "point" if aff.point_id else "offre",
+                    "id": str(aff.point_id or aff.offre_id),
+                    "nom": nom_cible,
+                }
+
         rows = []
         for team in teams:
             centres = [p.nom for p in team.points_operationnels.all()]
-            crises = [c.name for c in team.assigned_crises.all()]
+            equipe_crises = list(team.assigned_crises.all())
+            crises = [c.name for c in equipe_crises]
+            crise_ids_equipe = [str(c.id) for c in equipe_crises]
+            premiere_crise_id = crise_ids_equipe[0] if crise_ids_equipe else None
             institution_nom = team.institution.nom if team.institution_id else None
 
             for membre in team.members.all():
@@ -4907,6 +4937,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     "equipe_nom": team.name,
                     "institution": institution_nom,
                     "crises": crises,
+                    "crise_ids": crise_ids_equipe,
                     "centres": centres,
                     "detail": ", ".join(competences) if competences else None,
                     "statut": None,
@@ -4915,6 +4946,12 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     # matériel indissociable, voir Offer.presence_physique) — voir la page
                     # frontend pour le regroupement visuel.
                     "user_id": str(membre.id),
+                    # Logement actuel (sur la première crise de l'équipe) -- null = personne
+                    # n'a encore aucun logement réservé, voir "Besoin hébergement" côté frontend.
+                    "logement": (
+                        logements_par_cle.get((str(membre.id), premiere_crise_id))
+                        if premiere_crise_id else None
+                    ),
                 })
 
             for offre in team.assigned_offers.all():
@@ -9940,6 +9977,124 @@ class MaterielPointViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet)
                 "peut modifier son stock."
             )
         instance.delete()
+
+
+class LogementsDisponiblesView(generics.GenericAPIView):
+    """"Besoin hébergement" (vue Ressources mobilisées, 24/09) : centres d'hébergement et
+    offres de particuliers validées, triés par distance à la crise -- réunit deux sources
+    distinctes (PointOperationnel type Hébergement / Offer.accueil_intervenants validée) dans
+    une seule liste, même idée que candidats_benevoles pour le tri par distance."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request):
+        crise_id = request.query_params.get('crise')
+        if not crise_id:
+            return Response({"error": "crise est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        crise = get_object_or_404(Crisis, pk=crise_id)
+
+        environment = get_active_environment(request)
+        resultats = []
+
+        points = PointOperationnel.objects.filter(
+            environment=environment, type__code='HEBERGEMENT',
+        )
+        offres = Offer.objects.filter(
+            environment=environment, actif=True, accueil_intervenants=True,
+            accueil_intervenants_valide_par__isnull=False,
+        )
+        if crise.location is not None:
+            points = points.annotate(distance=Distance('location', crise.location)).order_by('distance')
+            offres = offres.annotate(distance=Distance('location', crise.location)).order_by('distance')
+
+        for point in points:
+            # `distance` peut être NULL même quand crise.location est renseignée : ce point-là
+            # (colonie/centre saisi sans adresse géocodée) n'a lui-même pas de `location`, et
+            # Distance() vaut NULL dès que l'une des deux géométries manque -- vérifier ligne
+            # par ligne, pas juste une fois sur crise.location (constaté en testant, un point
+            # fraîchement créé sans coordonnées faisait planter la vue).
+            has_distance = crise.location is not None and getattr(point, 'distance', None) is not None
+            resultats.append({
+                "type": "point",
+                "id": str(point.id),
+                "nom": point.nom,
+                "commune": point.adresse,
+                "capacite_adultes": point.capacite_accueil,
+                "capacite_enfants": None,
+                "distance_km": round(point.distance.km, 1) if has_distance else None,
+            })
+        for offre in offres:
+            has_distance = crise.location is not None and getattr(offre, 'distance', None) is not None
+            resultats.append({
+                "type": "offre",
+                "id": str(offre.id),
+                "nom": offre.title,
+                "commune": offre.commune_code,
+                "capacite_adultes": offre.capacite_adultes,
+                "capacite_enfants": offre.capacite_enfants,
+                "distance_km": round(offre.distance.km, 1) if has_distance else None,
+            })
+
+        if crise.location is not None:
+            resultats.sort(key=lambda r: r["distance_km"] if r["distance_km"] is not None else float('inf'))
+
+        return Response(resultats)
+
+
+class AffecterLogementView(generics.GenericAPIView):
+    """Affecte un logement (centre ou offre) à un ou plusieurs intervenants pour une crise --
+    sélection groupée (24/09, "1 asso avec 50 intervenants, tous au même endroit") : une ligne
+    AffectationLogementIntervenant créée par intervenant_id, jamais un update en place (garde
+    l'historique des réaffectations, voir docstring du modèle)."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def post(self, request):
+        intervenant_ids = request.data.get('intervenant_ids') or []
+        crise_id = request.data.get('crise_id')
+        point_id = request.data.get('point_id')
+        offre_id = request.data.get('offre_id')
+
+        if not intervenant_ids or not crise_id:
+            return Response(
+                {"error": "intervenant_ids et crise_id sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if bool(point_id) == bool(offre_id):
+            return Response(
+                {"error": "Exactement un logement (point_id OU offre_id) est requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        crise = get_object_or_404(Crisis, pk=crise_id)
+        point = get_object_or_404(PointOperationnel, pk=point_id) if point_id else None
+        offre = get_object_or_404(Offer, pk=offre_id) if offre_id else None
+
+        crees = []
+        for intervenant_id in intervenant_ids:
+            intervenant = get_object_or_404(User, pk=intervenant_id)
+            affectation = AffectationLogementIntervenant.objects.create(
+                intervenant=intervenant, crise=crise, point=point, offre=offre,
+                affecte_par=request.user, environment=get_active_environment(request),
+            )
+            crees.append(affectation)
+
+        audit_log(
+            request=request,
+            action_code="CREATION",
+            objet_type="AffectationLogementIntervenant",
+            objet_id=crees[0].id if crees else None,
+            crise=crise,
+            commentaire=f"Logement affecté à {len(crees)} intervenant(s) : {point.nom if point else offre.title}",
+        )
+
+        nom_cible = point.nom if point else offre.title
+        return Response({
+            "type": "point" if point else "offre",
+            "id": str(point_id or offre_id),
+            "nom": nom_cible,
+            "nombre_affectes": len(crees),
+        })
 
 
 class RegistrePresenceViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):

@@ -3670,6 +3670,59 @@ class RegistrePresence(EnvironmentScopedModel):
         return f"{self.get_type_personne_display()} ({self.point.nom})"
 
 
+class AffectationLogementIntervenant(EnvironmentScopedModel):
+    """Réservation d'un logement (centre OU offre de particulier validée -- exactement l'un
+    des deux, jamais les deux ni aucun) pour un intervenant sur une crise donnée -- vue
+    "Ressources mobilisées" (24/09, réflexion avec Sylvain). Distinct de RegistrePresence (le
+    "secrétariat" d'un point, qui constate une arrivée effective sur place) : ceci est la
+    décision/planification prise depuis le bureau, avant même que la personne parte. Une
+    nouvelle ligne à chaque réaffectation plutôt qu'un update -- garde l'historique, "le
+    logement actuel" = la ligne la plus récente pour ce couple (intervenant, crise), voir
+    TeamViewSet.ressources_mobilisees."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    intervenant = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="affectations_logement",
+    )
+    crise = models.ForeignKey(
+        "Crisis", on_delete=models.CASCADE, related_name="affectations_logement",
+    )
+    # CASCADE (pas SET_NULL) sur les deux : la contrainte XOR ci-dessous exige TOUJOURS
+    # exactement une cible -- un SET_NULL déclenché par la suppression du point/de l'offre
+    # violerait cette contrainte (constaté en testant : IntegrityError à la suppression d'un
+    # point ayant des affectations). Supprimer un logement supprime donc ses réservations,
+    # jamais une ligne orpheline sans cible.
+    point = models.ForeignKey(
+        PointOperationnel, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="affectations_logement",
+        help_text="Centre d'hébergement -- exclusif avec `offre`.",
+    )
+    offre = models.ForeignKey(
+        "Offer", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="affectations_logement",
+        help_text="Offre de particulier validée pour l'accueil d'intervenants -- exclusif avec `point`.",
+    )
+    affecte_par = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="+")
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date_creation"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(point__isnull=False, offre__isnull=True)
+                    | models.Q(point__isnull=True, offre__isnull=False)
+                ),
+                name="affectation_logement_point_xor_offre",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        cible = self.point.nom if self.point_id else (self.offre.title if self.offre_id else "?")
+        return f"Logement de {self.intervenant} pour {self.crise.name} : {cible}"
+
+
 class TypeDeclarant(models.TextChoices):
     PERSONNE_SEULE = "PERSONNE_SEULE", "Personne seule"
     FAMILLE = "FAMILLE", "Famille"
