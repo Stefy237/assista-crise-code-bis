@@ -123,3 +123,26 @@
   padding: 0 .4rem;
   margin-left: .3rem;
 }
+
+.badge-present {
+  font-size: .68rem;
+  color: #15803d;
+  background: #dcfce7;
+  border-radius: 999px;
+  padding: 0 .4rem;
+  margin-left: .3rem;
+}
+
+.badge-echec {
+  font-size: .68rem;
+  color: #b91c1c;
+  background: #fef2f2;
+  border-radius: 999px;
+  padding: 0 .4rem;
+  margin-left: .3rem;
+}
+
+.liste-activite {
+  max-height: 260px;
+  overflow-y: auto;
+}

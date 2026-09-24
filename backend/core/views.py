@@ -10103,16 +10103,22 @@ class AffecterLogementView(generics.GenericAPIView):
 
 class FicheIntervenantView(generics.GenericAPIView):
     """Fiche d'une personne mobilisée, ouverte depuis Ressources mobilisées (24/09, demande
-    explicite : nom/coordonnées, provenance, compétences, créneaux/lieux travaillés,
-    affectations sur des points, logement, durée d'engagement). L'historique (audit) n'est PAS
-    ici : le frontend rappelle directement AuditLogService.forObject('User'|'Team', <id>), déjà
-    prévu pour ça ("widget d'historique par fiche", voir AuditLogSerializer) -- pas la peine de
-    le dupliquer côté serveur.
+    explicite précisée le même jour : DEUX historiques distincts, pas un seul --
+    "historique_compte" = sécurité/compte (création, IP, reset mot de passe...), voir
+    AuditLog objet_type=User ; "historique_activite" = tout ce que CETTE PERSONNE a fait sur la
+    plateforme (AuditLog.utilisateur=personne), consultations comprises -- AuditTraceMiddleware
+    journalise déjà générique­ment CHAQUE requête /api/ (LECTURE/CREATION/MODIFICATION/
+    SUPPRESSION, voir middleware.py) quand aucun appel audit_log() plus riche ne l'a déjà fait,
+    donc "a consulté telle fiche" / "posté tel commentaire" y sont déjà, sans rien construire
+    de nouveau. Complété par les événements structurés (créneaux, affectations, présence en
+    centre, logement) qui restent plus lisibles qu'une ligne d'audit générique.
 
     Team.members est un M2M simple, sans date d'ajout (confirmé en creusant) : "depuis quand"
     est donc une approximation best-effort (le plus ancien signal disponible -- créneau, rôle,
     affectation point --, jamais une vraie date d'entrée dans l'équipe), assumée comme telle
-    plutôt que présentée à tort comme une donnée exacte."""
+    plutôt que présentée à tort comme une donnée exacte. Même réserve pour le rapprochement
+    RegistrePresence (texte libre `nom`, pas de FK vers User -- correspondance par nom,
+    approximative par nature)."""
 
     permission_classes = [IsInstitutionalActor]
 
@@ -10176,6 +10182,22 @@ class FicheIntervenantView(generics.GenericAPIView):
             for a in AffectationPointBenevole.objects.filter(benevole=personne).select_related('point').order_by('-date_attendue')
         ]
 
+        # Présence en centre ("arrivé en centre à telle heure", demande explicite) --
+        # RegistrePresence.nom est un texte libre saisi au secrétariat, jamais un FK vers
+        # User : rapprochement par nom complet, best-effort (voir docstring).
+        nom_complet = f"{personne.first_name} {personne.last_name}".strip()
+        presences = (
+            RegistrePresence.objects.filter(nom__icontains=nom_complet).select_related('point').order_by('-date_arrivee')
+            if nom_complet else RegistrePresence.objects.none()
+        )
+        presences_centre = [
+            {
+                "point_nom": p.point.nom,
+                "date_arrivee": p.date_arrivee, "date_depart": p.date_depart,
+            }
+            for p in presences[:20]
+        ]
+
         logement = None
         if crise_id:
             derniere = (
@@ -10198,6 +10220,48 @@ class FicheIntervenantView(generics.GenericAPIView):
         depuis = min(dates_connues) if dates_connues else None
         duree_jours = (aujourdhui - depuis).days if depuis else None
 
+        def _serialiser_audit(qs):
+            return [
+                {
+                    "date": a.date_action,
+                    "action_code": a.action.code, "action_libelle": a.action.libelle,
+                    "objet_type": a.objet_type, "objet_id": str(a.objet_id) if a.objet_id else None,
+                    "commentaire": a.commentaire,
+                    "adresse_ip": a.adresse_ip,
+                    "succes": a.succes,
+                }
+                for a in qs.select_related('action')[:100]
+            ]
+
+        # Historique du compte : ce qui est arrivé À ce compte (création, activation, reset mot
+        # de passe...) -- objet_type=User ciblant CETTE personne.
+        historique_compte = _serialiser_audit(
+            AuditLog.objects.filter(objet_type='User', objet_id=personne.id).order_by('-date_action')
+        )
+        # Historique d'activité : tout ce que CETTE personne a fait sur la plateforme (voir
+        # docstring -- inclut les simples consultations, générées automatiquement par
+        # AuditTraceMiddleware). Volontairement pas filtré sur `crise` : la plupart des
+        # consultations génériques n'en portent pas (seuls certains audit_log() métier
+        # explicites le renseignent), filtrer perdrait l'essentiel de ce fil.
+        # notification-resume : polling de la cloche de notifications (toutes les 20s côté
+        # frontend, voir admin-layout.component.ts) -- pur bruit de fond, jamais une action
+        # significative, exclu pour que le fil reste lisible.
+        historique_activite = _serialiser_audit(
+            AuditLog.objects.filter(utilisateur=personne)
+            .exclude(objet_type='notification-resume')
+            .order_by('-date_action')
+        )
+        # "Affecté à telle équipe" (ajout/retrait) : c'est quelqu'un D'AUTRE (le régulateur) qui
+        # agit, donc absent de historique_activite (qui ne trace QUE les actions de la personne
+        # elle-même) -- seul rapprochement possible, texte libre sur le nom complet dans le
+        # commentaire de l'AuditLog de l'équipe (voir docstring, views.py TeamViewSet.
+        # perform_update : "Membres — ajouté(s) : Prénom Nom / retiré(s) : ...").
+        historique_equipe_evenements = (
+            _serialiser_audit(
+                AuditLog.objects.filter(objet_type='Team', objet_id=equipe_id, commentaire__icontains=nom_complet).order_by('-date_action')
+            ) if equipe_id and nom_complet else []
+        )
+
         return Response({
             "identite": {
                 "id": str(personne.id),
@@ -10213,8 +10277,12 @@ class FicheIntervenantView(generics.GenericAPIView):
             "creneaux": creneaux,
             "creneaux_aujourdhui": creneaux_aujourdhui,
             "affectations_points": affectations_points,
+            "presences_centre": presences_centre,
             "logement": logement,
             "engagement": {"depuis": depuis, "duree_jours": duree_jours},
+            "historique_compte": historique_compte,
+            "historique_activite": historique_activite,
+            "historique_equipe_evenements": historique_equipe_evenements,
         })
 
 

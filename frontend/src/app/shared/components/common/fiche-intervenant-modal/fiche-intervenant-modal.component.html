@@ -100,27 +100,68 @@
           </section>
         }
 
-        @if (historiqueCompte.length > 0) {
+        @if (fiche.presences_centre.length > 0) {
           <section class="fiche-section">
-            <h4><span class="material-icons">history</span> Historique du compte</h4>
+            <h4><span class="material-icons">login</span> Présence en centre</h4>
+            <p class="hint-petit">Rapprochement par nom (le registre de présence ne lie pas directement au compte) — à vérifier en cas d'homonymie.</p>
             <ul class="liste-simple">
-              @for (h of historiqueCompte; track h.id) {
-                <li>{{ h.date_action | date:'dd/MM/yyyy HH:mm' }} — {{ h.action_libelle }} <span class="hint-petit">{{ h.commentaire }}</span></li>
+              @for (p of fiche.presences_centre; track $index) {
+                <li>
+                  {{ p.point_nom }} — arrivé le {{ p.date_arrivee | date:'dd/MM/yyyy HH:mm' }}
+                  @if (p.date_depart) { , parti le {{ p.date_depart | date:'dd/MM/yyyy HH:mm' }} } @else { <span class="badge-present">présent</span> }
+                </li>
               }
             </ul>
           </section>
         }
 
-        @if (historiqueEquipe.length > 0) {
+        @if (fiche.historique_equipe_evenements.length > 0) {
           <section class="fiche-section">
-            <h4><span class="material-icons">history</span> Historique de l'équipe</h4>
+            <h4><span class="material-icons">groups</span> Changements dans l'équipe</h4>
+            <p class="hint-petit">Rapprochement par nom dans l'historique de l'équipe (affectations, retraits...).</p>
             <ul class="liste-simple">
-              @for (h of historiqueEquipe; track h.id) {
-                <li>{{ h.date_action | date:'dd/MM/yyyy HH:mm' }} — {{ h.action_libelle }} <span class="hint-petit">{{ h.commentaire }}</span></li>
+              @for (h of fiche.historique_equipe_evenements; track $index) {
+                <li>{{ h.date | date:'dd/MM/yyyy HH:mm' }} — {{ h.commentaire || h.action_libelle }}</li>
               }
             </ul>
           </section>
         }
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">history</span> Historique du compte</h4>
+          <p class="hint-petit">Sécurité du compte : création, connexions, réinitialisations de mot de passe...</p>
+          @if (fiche.historique_compte.length > 0) {
+            <ul class="liste-simple">
+              @for (h of fiche.historique_compte; track $index) {
+                <li>
+                  {{ h.date | date:'dd/MM/yyyy HH:mm' }} — {{ h.action_libelle }}
+                  @if (h.adresse_ip) { <span class="hint-petit">({{ h.adresse_ip }})</span> }
+                  @if (!h.succes) { <span class="badge-echec">échec</span> }
+                  @if (h.commentaire) { <span class="hint-petit"> — {{ h.commentaire }}</span> }
+                </li>
+              }
+            </ul>
+          } @else {
+            <p class="hint">Aucun événement de compte enregistré.</p>
+          }
+        </section>
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">history</span> Activité sur la plateforme</h4>
+          <p class="hint-petit">Tout ce que cette personne a fait elle-même (consultations comprises) — les 100 dernières actions.</p>
+          @if (fiche.historique_activite.length > 0) {
+            <ul class="liste-simple liste-activite">
+              @for (h of fiche.historique_activite; track $index) {
+                <li>
+                  {{ h.date | date:'dd/MM/yyyy HH:mm' }} — {{ h.commentaire || h.action_libelle }}
+                  @if (!h.succes) { <span class="badge-echec">échec</span> }
+                </li>
+              }
+            </ul>
+          } @else {
+            <p class="hint">Aucune activité enregistrée.</p>
+          }
+        </section>
 
       }
     </div>

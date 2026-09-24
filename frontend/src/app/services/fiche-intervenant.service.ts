@@ -8,11 +8,13 @@ import { FicheIntervenant } from '../shared/models/fiche-intervenant.model';
 export class FicheIntervenantService {
   constructor(private http: HttpClient) {}
 
-  /** GET /api/fiche-intervenant/?user=<id>&crise=<id> — voir FicheIntervenantView. `crise` est
-   * optionnel (nécessaire seulement pour résoudre le logement actuel de la personne). */
-  get(userId: string, criseId?: string | null): Observable<FicheIntervenant> {
+  /** GET /api/fiche-intervenant/?user=<id>&crise=<id>&equipe=<id> — voir FicheIntervenantView.
+   * `crise`/`equipe` sont optionnels (nécessaires pour résoudre le logement actuel et les
+   * événements d'équipe mentionnant cette personne). */
+  get(userId: string, criseId?: string | null, equipeId?: string | null): Observable<FicheIntervenant> {
     const params: Record<string, string> = { user: userId };
     if (criseId) params['crise'] = criseId;
+    if (equipeId) params['equipe'] = equipeId;
     return this.http.get<FicheIntervenant>(`${environment.apiUrl}/fiche-intervenant/`, { params });
   }
 }

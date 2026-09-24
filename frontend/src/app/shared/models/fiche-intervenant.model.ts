@@ -38,6 +38,31 @@ export interface FicheIntervenant {
     date_attendue: string | null;
     date_reponse: string | null;
   }[];
+  presences_centre: {
+    point_nom: string;
+    date_arrivee: string;
+    date_depart: string | null;
+  }[];
   logement: { type: 'point' | 'offre'; nom: string; depuis: string } | null;
   engagement: { depuis: string | null; duree_jours: number | null };
+  /** Voir FicheIntervenantView : "événements de sécurité" (création, IP, reset mot de passe). */
+  historique_compte: HistoriqueEntry[];
+  /** Tout ce que CETTE personne a fait sur la plateforme (consultations comprises, via
+   * AuditTraceMiddleware) — pas filtré par crise, volontairement (voir docstring backend). */
+  historique_activite: HistoriqueEntry[];
+  /** Best-effort : événements de l'équipe mentionnant cette personne par son nom complet (ex:
+   * "ajouté(e)"/"retiré(e)") — l'action est faite par quelqu'un d'autre, absente de
+   * historique_activite qui ne trace que les actions de la personne elle-même. */
+  historique_equipe_evenements: HistoriqueEntry[];
+}
+
+export interface HistoriqueEntry {
+  date: string;
+  action_code: string;
+  action_libelle: string | null;
+  objet_type: string;
+  objet_id: string | null;
+  commentaire: string | null;
+  adresse_ip: string | null;
+  succes: boolean;
 }
