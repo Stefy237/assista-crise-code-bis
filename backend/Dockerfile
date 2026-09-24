@@ -34,4 +34,10 @@ USER appuser
 
 ENTRYPOINT ["/entrypoint.sh"]
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "6", "--timeout", "60"]
+# GUNICORN_WORKERS : l'image est partagée entre .113 (dev, machine modeste) et .114 (prod, 12
+# coeurs/15 Go) -- un nombre de workers figé dans l'image a fait grimper le temps système à
+# 90-96% sur .113 le 24/09 (6 workers taillés pour .114 tournant en même temps qu'un ng build,
+# constaté par vmstat). Forme shell (pas exec) pour que ${...} soit interprété au démarrage du
+# conteneur, pas gelé au build -- valeur par défaut prudente, à relever explicitement via
+# l'env du conteneur sur une machine qui peut l'encaisser (.114 : GUNICORN_WORKERS=6).
+CMD ["sh", "-c", "exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 60"]
