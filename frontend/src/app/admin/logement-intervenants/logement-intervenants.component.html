@@ -20,6 +20,9 @@
 
   @if (!isLoading) {
 
+    <!-- Colonnes alignées avec le tableau "Offres de particuliers" ci-dessous : NOM | COMMUNE
+         | RESPONSABLE/COORDONNÉES | PRÉSENTS | CAPACITÉ | DISTANCE — même ordre dans les deux
+         tableaux pour comparer d'un coup d'œil (demande explicite, 24/09). -->
     <section class="section">
       <h2><span class="material-icons">home_work</span> Centres / points d'accueil ({{ points.length }})</h2>
       <table class="data-table">
@@ -29,6 +32,8 @@
             <th>Commune</th>
             <th>Responsable</th>
             <th>Présents</th>
+            <th>Capacité</th>
+            <th>Distance</th>
             <th></th>
           </tr>
         </thead>
@@ -37,12 +42,21 @@
             <tr (click)="openPointModal(point)">
               <td>{{ point.nom }}</td>
               <td>{{ point.commune_nom || '—' }}</td>
-              <td>{{ point.responsable_nom || '—' }}</td>
+              <td>
+                @if (point.responsables_contacts?.length) {
+                  {{ point.responsables_contacts![0].nom }}
+                  <span class="sous-detail">{{ point.responsables_contacts![0].email || point.responsables_contacts![0].telephone || '' }}</span>
+                } @else {
+                  —
+                }
+              </td>
               <td>{{ point.personnes_presentes ?? 0 }}</td>
+              <td>{{ point.capacite_accueil ?? '—' }}</td>
+              <td>{{ point.distance_from_crisis_km !== null && point.distance_from_crisis_km !== undefined ? (point.distance_from_crisis_km + ' km') : '—' }}</td>
               <td class="actions"><span class="material-icons">chevron_right</span></td>
             </tr>
           } @empty {
-            <tr><td colspan="5" class="empty">Aucun centre d'hébergement déclaré.</td></tr>
+            <tr><td colspan="7" class="empty">Aucun centre d'hébergement déclaré.</td></tr>
           }
         </tbody>
       </table>
@@ -56,9 +70,11 @@
           <thead>
             <tr>
               <th>Offre</th>
-              <th>Coordonnées</th>
               <th>Commune</th>
+              <th>Coordonnées</th>
+              <th>Présents</th>
               <th>Capacité</th>
+              <th>Distance</th>
               <th></th>
             </tr>
           </thead>
@@ -66,9 +82,14 @@
             @for (offre of offresEnAttente; track offre.id) {
               <tr>
                 <td>{{ offre.title }}</td>
-                <td>{{ offre.first_name_offer }} {{ offre.last_name_offer }} · {{ offre.email_offer }}</td>
                 <td>{{ offre.commune || '—' }}</td>
+                <td>
+                  {{ offre.first_name_offer }} {{ offre.last_name_offer }}
+                  <span class="sous-detail">{{ offre.email_offer }}</span>
+                </td>
+                <td>—</td>
                 <td>{{ offre.capacite_adultes ?? '—' }} adulte(s), {{ offre.capacite_enfants ?? 0 }} enfant(s)</td>
+                <td>{{ offre.distance_from_crisis_km !== null && offre.distance_from_crisis_km !== undefined ? (offre.distance_from_crisis_km + ' km') : '—' }}</td>
                 <td class="actions">
                   <button type="button" class="btn-secondary sm" [disabled]="validationEnCours === offre.id" (click)="valider(offre)">
                     <span class="material-icons">check</span> Valider
@@ -87,21 +108,28 @@
         <thead>
           <tr>
             <th>Offre</th>
-            <th>Coordonnées</th>
             <th>Commune</th>
+            <th>Coordonnées</th>
+            <th>Présents</th>
             <th>Capacité</th>
+            <th>Distance</th>
           </tr>
         </thead>
         <tbody>
           @for (offre of offresValidees; track offre.id) {
             <tr>
               <td>{{ offre.title }}</td>
-              <td>{{ offre.first_name_offer }} {{ offre.last_name_offer }} · {{ offre.email_offer }}</td>
               <td>{{ offre.commune || '—' }}</td>
+              <td>
+                {{ offre.first_name_offer }} {{ offre.last_name_offer }}
+                <span class="sous-detail">{{ offre.email_offer }}</span>
+              </td>
+              <td>—</td>
               <td>{{ offre.capacite_adultes ?? '—' }} adulte(s), {{ offre.capacite_enfants ?? 0 }} enfant(s)</td>
+              <td>{{ offre.distance_from_crisis_km !== null && offre.distance_from_crisis_km !== undefined ? (offre.distance_from_crisis_km + ' km') : '—' }}</td>
             </tr>
           } @empty {
-            <tr><td colspan="4" class="empty">Aucune offre validée pour l'instant.</td></tr>
+            <tr><td colspan="6" class="empty">Aucune offre validée pour l'instant.</td></tr>
           }
         </tbody>
       </table>

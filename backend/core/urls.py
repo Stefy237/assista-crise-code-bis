@@ -63,6 +63,7 @@ from .views import (
     PositionMatrixView,
     LogementsDisponiblesView,
     AffecterLogementView,
+    FicheIntervenantView,
 )
 
 router = DefaultRouter()
@@ -226,6 +227,7 @@ urlpatterns = [
     path('matrix/positions/', PositionMatrixView.as_view(), name='matrix_positions'),
     path('logements-disponibles/', LogementsDisponiblesView.as_view(), name='logements_disponibles'),
     path('affecter-logement/', AffecterLogementView.as_view(), name='affecter_logement'),
+    path('fiche-intervenant/', FicheIntervenantView.as_view(), name='fiche_intervenant'),
     
     # URLs pour la suppression via token
     path('delete-request/<str:token>/', DeleteRequestView.as_view(), name='delete_request'),

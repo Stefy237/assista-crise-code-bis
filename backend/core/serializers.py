@@ -2428,6 +2428,10 @@ class PointOperationnelSerializer(
     civils_accueillis = serializers.SerializerMethodField()
     peut_gerer = serializers.SerializerMethodField()
     commune_nom = serializers.SerializerMethodField()
+    # "Logement intervenants" (24/09) : distance à SA propre crise liée, voir l'annotation
+    # posée sur PointOperationnelViewSet.queryset (même idiome que OfferSerializer, FK `crise`
+    # au lieu de `crisis`). None si le point ou sa crise n'a pas de coordonnées.
+    distance_from_crisis_km = serializers.SerializerMethodField()
 
     class Meta:
 
@@ -2439,6 +2443,10 @@ class PointOperationnelSerializer(
         # Même mécanisme de reverse-géocodage que le scoping zone (_filter_points_to_viewer_zone) —
         # PointOperationnel n'a pas de commune_code dénormalisé, seulement un point GPS.
         return commune_from_point(obj.location)
+
+    def get_distance_from_crisis_km(self, obj):
+        distance = getattr(obj, 'distance_from_crisis', None)
+        return round(distance.km, 1) if distance is not None else None
 
     def get_peut_gerer(self, obj):
         # Reflète exactement la règle déjà appliquée côté API (RegistrePresenceViewSet.

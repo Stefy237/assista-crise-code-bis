@@ -9109,6 +9109,10 @@ class PointOperationnelViewSet(
             'equipes_gestion', 'equipes_gestion__leader',
             'equipes_ravitaillement',
         )
+        # Même idée que annotate_distance_from_crisis (Offer), mais la FK s'appelle `crise`
+        # ici, pas `crisis` -- distance_from_crisis_km ("Logement intervenants", 24/09) en a
+        # besoin pour afficher la distance d'un centre à sa crise, comme pour une offre.
+        .annotate(distance_from_crisis=Distance('location', F('crise__location')))
     )
 
     serializer_class = (
@@ -10094,6 +10098,123 @@ class AffecterLogementView(generics.GenericAPIView):
             "id": str(point_id or offre_id),
             "nom": nom_cible,
             "nombre_affectes": len(crees),
+        })
+
+
+class FicheIntervenantView(generics.GenericAPIView):
+    """Fiche d'une personne mobilisée, ouverte depuis Ressources mobilisées (24/09, demande
+    explicite : nom/coordonnées, provenance, compétences, créneaux/lieux travaillés,
+    affectations sur des points, logement, durée d'engagement). L'historique (audit) n'est PAS
+    ici : le frontend rappelle directement AuditLogService.forObject('User'|'Team', <id>), déjà
+    prévu pour ça ("widget d'historique par fiche", voir AuditLogSerializer) -- pas la peine de
+    le dupliquer côté serveur.
+
+    Team.members est un M2M simple, sans date d'ajout (confirmé en creusant) : "depuis quand"
+    est donc une approximation best-effort (le plus ancien signal disponible -- créneau, rôle,
+    affectation point --, jamais une vraie date d'entrée dans l'équipe), assumée comme telle
+    plutôt que présentée à tort comme une donnée exacte."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request):
+        user_id = request.query_params.get('user')
+        if not user_id:
+            return Response({"error": "user est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        personne = get_object_or_404(User, pk=user_id)
+        equipe_id = request.query_params.get('equipe')
+        crise_id = request.query_params.get('crise')
+
+        # Provenance : aucun champ structuré ne la garde (voir docstring) -- meilleur signal
+        # disponible, dans cet ordre : une offre déposée par cette personne (venue du portail
+        # public) prime sur un simple rattachement institution (souvent vrai des deux à la
+        # fois, ex: un bénévole devenu contact officiel ensuite).
+        a_depose_offre = Offer.objects.filter(author=personne).exists()
+        est_contact_institution = ContactInstitution.objects.filter(utilisateur=personne, actif=True).exists()
+        if a_depose_offre:
+            provenance = {"type": "portail", "detail": "A déposé une offre d'aide sur le portail public."}
+        elif est_contact_institution:
+            institutions_noms = ", ".join(
+                ContactInstitution.objects.filter(utilisateur=personne, actif=True)
+                .values_list('institution__nom', flat=True)
+            )
+            provenance = {"type": "institution", "detail": f"Contact de : {institutions_noms}"}
+        else:
+            provenance = {"type": "inconnu", "detail": "Compte créé directement (invitation par une équipe, ou origine non tracée)."}
+
+        competences = [
+            {
+                "role_libelle": r.role.libelle,
+                "competence_nom": r.competence.nom if r.competence_id else None,
+                "zone_nom": r.zone.nom if r.zone_id else None,
+                "responsabilite": r.responsabilite,
+                "actif": r.actif,
+                "depuis": r.date_debut,
+            }
+            for r in AffectationRoleOperationnel.objects.filter(utilisateur=personne).select_related('role', 'competence', 'zone')
+        ]
+
+        creneaux_qs = (
+            DisponibilitePointEquipe.objects.filter(membre=personne)
+            .select_related('point').order_by('-date')
+        )
+        creneaux = [
+            {
+                "point_id": str(c.point_id), "point_nom": c.point.nom,
+                "date": c.date, "creneau": c.creneau, "creneau_libelle": c.get_creneau_display(),
+            }
+            for c in creneaux_qs
+        ]
+        aujourdhui = timezone.now().date()
+        creneaux_aujourdhui = [c for c in creneaux if c["date"] == aujourdhui]
+
+        affectations_points = [
+            {
+                "point_nom": a.point.nom,
+                "statut": a.statut, "statut_libelle": a.get_statut_display(),
+                "date_attendue": a.date_attendue, "date_reponse": a.date_reponse,
+            }
+            for a in AffectationPointBenevole.objects.filter(benevole=personne).select_related('point').order_by('-date_attendue')
+        ]
+
+        logement = None
+        if crise_id:
+            derniere = (
+                AffectationLogementIntervenant.objects
+                .filter(intervenant=personne, crise_id=crise_id)
+                .select_related('point', 'offre')
+                .first()
+            )
+            if derniere:
+                logement = {
+                    "type": "point" if derniere.point_id else "offre",
+                    "nom": derniere.point.nom if derniere.point_id else derniere.offre.title,
+                    "depuis": derniere.date_creation,
+                }
+
+        # "Depuis quand" : le plus ancien signal disponible tous azimuts (voir docstring),
+        # jamais None sur une simple absence de créneaux/rôle si une affectation existe.
+        dates_connues = [c["date"] for c in creneaux] + [a["date_attendue"].date() for a in affectations_points if a["date_attendue"]]
+        dates_connues += [comp["depuis"].date() for comp in competences if comp["depuis"]]
+        depuis = min(dates_connues) if dates_connues else None
+        duree_jours = (aujourdhui - depuis).days if depuis else None
+
+        return Response({
+            "identite": {
+                "id": str(personne.id),
+                "nom": personne.last_name,
+                "prenom": personne.first_name,
+                "email": personne.email,
+                "telephone": personne.phone_number,
+                "type": personne.type,
+                "type_libelle": personne.get_type_display(),
+            },
+            "provenance": provenance,
+            "competences": competences,
+            "creneaux": creneaux,
+            "creneaux_aujourdhui": creneaux_aujourdhui,
+            "affectations_points": affectations_points,
+            "logement": logement,
+            "engagement": {"depuis": depuis, "duree_jours": duree_jours},
         })
 
 

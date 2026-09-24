@@ -28,6 +28,9 @@ export interface PointOperationnel {
   peut_gerer?: boolean;
   adresse?: string | null;
   commune_nom?: string | null;
+  /** "Logement intervenants" (24/09) : distance à sa propre crise liée, null si le point ou sa
+   * crise n'a pas de coordonnées. */
+  distance_from_crisis_km?: number | null;
   latitude?: number | null;
   longitude?: number | null;
   obligatoire: boolean;

@@ -108,6 +108,21 @@
   cursor: pointer;
 }
 
+.detail-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .75rem;
+  padding: .15rem .5rem;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #374151;
+  cursor: pointer;
+  .material-icons { font-size: 14px; }
+  &:hover { background: #f3f4f6; }
+}
+
 .logement-badge {
   display: inline-flex;
   align-items: center;

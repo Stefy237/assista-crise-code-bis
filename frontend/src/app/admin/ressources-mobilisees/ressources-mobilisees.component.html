@@ -82,6 +82,10 @@
                     <span class="material-icons">night_shelter</span> Besoin d'hébergement
                   </button>
                 }
+
+                <button type="button" class="detail-btn" (click)="ouvrirFiche(unite.personne)">
+                  <span class="material-icons">badge</span> Détail
+                </button>
               </div>
             }
 
@@ -135,4 +139,14 @@
     (affecte)="onLogementAffecte($event)"
     (closed)="fermerPicker()">
   </app-logement-picker-modal>
+}
+
+@if (ficheOuverte && ficheUserId) {
+  <app-fiche-intervenant-modal
+    [userId]="ficheUserId"
+    [criseId]="ficheCriseId"
+    [equipeId]="ficheEquipeId"
+    [equipeNom]="ficheEquipeNom"
+    (closed)="fermerFiche()">
+  </app-fiche-intervenant-modal>
 }

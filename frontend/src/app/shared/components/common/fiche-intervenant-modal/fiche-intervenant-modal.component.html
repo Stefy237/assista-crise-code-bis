@@ -1,0 +1,128 @@
+<div class="modal-overlay" (click)="closed.emit()">
+  <div class="modal modal-lg" (click)="$event.stopPropagation()">
+    <div class="modal-header">
+      <h2>
+        <span class="material-icons">badge</span>
+        Fiche intervenant
+      </h2>
+      <button class="icon-btn" (click)="closed.emit()"><span class="material-icons">close</span></button>
+    </div>
+
+    <div class="modal-body">
+      @if (chargement) {
+        <p class="hint">Chargement…</p>
+      } @else if (erreur) {
+        <p class="erreur">{{ erreur }}</p>
+      } @else if (fiche) {
+
+        <section class="fiche-section">
+          <h3>{{ fiche.identite.prenom }} {{ fiche.identite.nom }}</h3>
+          <div class="ligne-infos">
+            <span><span class="material-icons">mail</span> {{ fiche.identite.email }}</span>
+            @if (fiche.identite.telephone) { <span><span class="material-icons">phone</span> {{ fiche.identite.telephone }}</span> }
+            <span><span class="material-icons">verified_user</span> {{ fiche.identite.type_libelle }}</span>
+          </div>
+          @if (equipeNom) {
+            <div class="ligne-infos"><span><span class="material-icons">groups</span> Équipe : {{ equipeNom }}</span></div>
+          }
+        </section>
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">explore</span> Provenance</h4>
+          <p class="texte">{{ fiche.provenance.detail }}</p>
+        </section>
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">schedule</span> Engagement</h4>
+          @if (fiche.engagement.depuis) {
+            <p class="texte">
+              Connu comme mobilisé depuis le {{ fiche.engagement.depuis | date:'dd/MM/yyyy' }}
+              ({{ fiche.engagement.duree_jours }} jour{{ (fiche.engagement.duree_jours ?? 0) > 1 ? 's' : '' }})
+            </p>
+            <p class="hint-petit">Estimation à partir du plus ancien créneau, rôle ou affectation connu — pas une date d'arrivée officielle.</p>
+          } @else {
+            <p class="hint">Aucune donnée d'engagement (créneau, rôle, affectation) pour l'instant.</p>
+          }
+          @if (fiche.creneaux_aujourdhui.length > 0) {
+            <p class="texte"><strong>Aujourd'hui :</strong>
+              @for (c of fiche.creneaux_aujourdhui; track c.point_id + c.creneau) {
+                <span class="creneau-chip">{{ c.creneau_libelle }} — {{ c.point_nom }}</span>
+              }
+            </p>
+          }
+        </section>
+
+        @if (fiche.logement) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">night_shelter</span> Logement</h4>
+            <p class="texte">{{ fiche.logement.nom }} <span class="hint-petit">(depuis le {{ fiche.logement.depuis | date:'dd/MM/yyyy' }})</span></p>
+          </section>
+        }
+
+        @if (fiche.competences.length > 0) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">stars</span> Compétences / rôles</h4>
+            <ul class="liste-simple">
+              @for (c of fiche.competences; track $index) {
+                <li>
+                  {{ c.role_libelle }}
+                  @if (c.competence_nom) { ({{ c.competence_nom }}) }
+                  @if (c.zone_nom) { — {{ c.zone_nom }} }
+                  @if (!c.actif) { <span class="badge-inactif">inactif</span> }
+                </li>
+              }
+            </ul>
+          </section>
+        }
+
+        @if (fiche.creneaux.length > 0) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">event</span> Lieux et créneaux travaillés</h4>
+            <ul class="liste-simple">
+              @for (c of fiche.creneaux; track c.point_id + c.date + c.creneau) {
+                <li>{{ c.date | date:'dd/MM/yyyy' }} — {{ c.creneau_libelle }} — {{ c.point_nom }}</li>
+              }
+            </ul>
+          </section>
+        }
+
+        @if (fiche.affectations_points.length > 0) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">assignment</span> Affectations sur des points</h4>
+            <ul class="liste-simple">
+              @for (a of fiche.affectations_points; track $index) {
+                <li>
+                  {{ a.point_nom }} — {{ a.statut_libelle }}
+                  @if (a.date_attendue) { (attendu le {{ a.date_attendue | date:'dd/MM/yyyy HH:mm' }}) }
+                </li>
+              }
+            </ul>
+          </section>
+        }
+
+        @if (historiqueCompte.length > 0) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">history</span> Historique du compte</h4>
+            <ul class="liste-simple">
+              @for (h of historiqueCompte; track h.id) {
+                <li>{{ h.date_action | date:'dd/MM/yyyy HH:mm' }} — {{ h.action_libelle }} <span class="hint-petit">{{ h.commentaire }}</span></li>
+              }
+            </ul>
+          </section>
+        }
+
+        @if (historiqueEquipe.length > 0) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">history</span> Historique de l'équipe</h4>
+            <ul class="liste-simple">
+              @for (h of historiqueEquipe; track h.id) {
+                <li>{{ h.date_action | date:'dd/MM/yyyy HH:mm' }} — {{ h.action_libelle }} <span class="hint-petit">{{ h.commentaire }}</span></li>
+              }
+            </ul>
+          </section>
+        }
+
+      }
+    </div>
+  </div>
+</div>
