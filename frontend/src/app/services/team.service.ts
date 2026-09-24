@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import { Team } from '../shared/models/team.model';  // ← import unique
+import { Team, MatrixMessage } from '../shared/models/team.model';  // ← import unique
 import { Dossier } from '../shared/models/dossier.model';
 import { PointOperationnel } from '../shared/models/point-operationnel.model';
 import { RessourceMobilisee } from '../shared/models/ressource-mobilisee.model';
@@ -113,6 +113,18 @@ export class TeamService {
     return this.http.post<{ id: string; room_id: string | null }>(
       `${this.url}/${id}/provisionner-salon-matrix/`, {},
     );
+  }
+
+  /** GET /api/teams/<id>/salon-matrix-messages/ — messages du salon Matrix de l'équipe (voir
+   * TeamViewSet.salon_matrix_messages), relayés côté serveur via le jeton du bot. */
+  getSalonMatrixMessages(id: string): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.get<{ messages: MatrixMessage[] }>(`${this.url}/${id}/salon-matrix-messages/`);
+  }
+
+  /** POST /api/teams/<id>/salon-matrix-messages/ — poste un message dans le salon Matrix de
+   * l'équipe (attribué à l'utilisateur courant, voir envoyer_message_salon). */
+  envoyerMessageSalonMatrix(id: string, texte: string): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.post<{ messages: MatrixMessage[] }>(`${this.url}/${id}/salon-matrix-messages/`, { texte });
   }
 
   rattacherEquipe(parentId: string, equipeId: string): Observable<Team> {

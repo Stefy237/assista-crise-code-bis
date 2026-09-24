@@ -272,6 +272,9 @@
           <button class="tab" [class.active]="detailTab === 'regulateurs'" (click)="detailTab = 'regulateurs'">
             <span class="material-icons">support_agent</span> Régulateurs / thèmes
           </button>
+          <button class="tab" [class.active]="detailTab === 'matrix'" (click)="detailTab = 'matrix'">
+            <span class="material-icons">forum</span> Messagerie
+          </button>
         </nav>
 
         <div class="modal-body">
@@ -481,6 +484,37 @@
                 <button class="btn-primary sm" type="submit">Ajouter</button>
                 <button class="btn-secondary sm" type="button" (click)="showRegulateurForm = false">Annuler</button>
               </form>
+            }
+          }
+
+          @if (detailTab === 'matrix') {
+            @if (!selectedInstitution.salons_matrix?.PERMANENTS && !selectedInstitution.salons_matrix?.BENEVOLES) {
+              <p class="hint">Aucun salon Matrix — le personnel permanent et les bénévoles mobilisés n'ont pas de messagerie générale d'institution.</p>
+              <button class="btn-secondary sm" [disabled]="provisionnantSalonsMatrix" (click)="provisionnerSalonsMatrix()">
+                <span class="material-icons">add</span> Activer les salons Matrix
+              </button>
+            } @else {
+              @if (selectedInstitution.salons_matrix?.PERMANENTS?.room_id) {
+                <app-matrix-salon-chat
+                  [cle]="selectedInstitution.id! + ':PERMANENTS'"
+                  titre="Salon — Permanents"
+                  [chargerMessages]="chargerMessagesSalonInstitution('PERMANENTS')"
+                  [envoyerMessage]="envoyerMessageSalonInstitution('PERMANENTS')"
+                ></app-matrix-salon-chat>
+              } @else {
+                <p class="hint">Salon « Permanents » en attente de création par le pont…</p>
+              }
+
+              @if (selectedInstitution.salons_matrix?.BENEVOLES?.room_id) {
+                <app-matrix-salon-chat
+                  [cle]="selectedInstitution.id! + ':BENEVOLES'"
+                  titre="Salon — Bénévoles mobilisés"
+                  [chargerMessages]="chargerMessagesSalonInstitution('BENEVOLES')"
+                  [envoyerMessage]="envoyerMessageSalonInstitution('BENEVOLES')"
+                ></app-matrix-salon-chat>
+              } @else {
+                <p class="hint">Salon « Bénévoles mobilisés » en attente de création par le pont…</p>
+              }
             }
           }
 

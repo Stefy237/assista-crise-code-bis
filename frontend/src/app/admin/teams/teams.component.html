@@ -772,22 +772,22 @@
             <button class="btn-secondary sm" [disabled]="provisionnantSalonMatrix" (click)="provisionnerSalonMatrix()">
               <span class="material-icons">add</span> Activer le salon Matrix
             </button>
-          } @else {
+          } @else if (!selectedTeam.salon_matrix_room_id) {
             <div class="mission-active-bar">
               <span class="mission-active-label">
-                <span class="material-icons" [class.statut-ok]="selectedTeam.salon_matrix_room_id">forum</span>
-                @if (selectedTeam.salon_matrix_room_id) {
-                  Salon actif · <span class="canal-ok">membres synchronisés en continu</span>
-                } @else {
-                  · <span class="canal-attente">en attente de création par le pont</span>
-                }
+                <span class="material-icons">forum</span>
+                · <span class="canal-attente">en attente de création par le pont</span>
               </span>
-              @if (selectedTeam.salon_matrix_room_id) {
-                <a class="btn-secondary sm" [href]="lienSalonMatrix(selectedTeam.salon_matrix_room_id)" target="_blank" rel="noopener">
-                  <span class="material-icons">open_in_new</span> Ouvrir dans Element
-                </a>
-              }
             </div>
+          } @else {
+            <app-matrix-salon-chat
+              [cle]="selectedTeam.id!"
+              [chargerMessages]="chargerMessagesSalonEquipe"
+              [envoyerMessage]="envoyerMessageSalonEquipe"
+            ></app-matrix-salon-chat>
+            <a class="lien-element-externe" [href]="lienSalonMatrix(selectedTeam.salon_matrix_room_id)" target="_blank" rel="noopener">
+              <span class="material-icons">open_in_new</span> Ouvrir dans Element (fonctions avancées : chiffrement, pièces jointes...)
+            </a>
           }
         </div>
 

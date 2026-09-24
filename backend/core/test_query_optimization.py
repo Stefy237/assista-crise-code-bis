@@ -95,6 +95,29 @@ class TestTeamQueryCount:
         # le prefetch_related('assigned_offers') — une requête de plus par équipe.
         assert len(ctx) < 5 + 5, f"{len(ctx)} requêtes pour 5 équipes : vehicules_count ne doit pas requêter par équipe"
 
+    def test_salon_matrix_does_not_query_per_team(self):
+        """salon_matrix_id/salon_matrix_room_id (TeamSerializer) déréférencent la relation
+        OneToOne inverse `salon_matrix` -- oublié dans select_related lors de l'ajout de la
+        fonctionnalité Matrix le 24/09 (contrairement à canal_meshcore/canal_meshtastic, ajoutés
+        au même endroit pour la même raison), retrouvé en creusant une lenteur signalée sur la
+        vue équipe."""
+        institution = _make_institution('Mairie Perf Matrix', 'PERF_MATRIX')
+        for i in range(5):
+            Team.objects.create(name=f'Equipe Perf Matrix {i}', institution=institution)
+
+        count_5 = _query_count(TeamViewSet.queryset.filter(institution=institution), TeamSerializer, n=5)
+
+        for i in range(5, 10):
+            Team.objects.create(name=f'Equipe Perf Matrix {i}', institution=institution)
+
+        count_10 = _query_count(TeamViewSet.queryset.filter(institution=institution), TeamSerializer, n=10)
+
+        marginal = count_10 - count_5
+        assert marginal <= 3 * 5, (
+            f"{count_5} requêtes pour 5 équipes, {count_10} pour 10 (marginal {marginal}) : "
+            "salon_matrix ne doit pas requêter une fois par équipe"
+        )
+
 
 @pytest.mark.django_db
 class TestDossierQueryCount:

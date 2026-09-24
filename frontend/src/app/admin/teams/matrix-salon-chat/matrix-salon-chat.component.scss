@@ -1,0 +1,57 @@
+.section-matrix {
+  margin-top: .8rem;
+
+  h3 {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: 1rem;
+    margin: 0 0 .8rem;
+    .material-icons { font-size: 18px; color: #7c3aed; }
+  }
+}
+
+.hint { color: #9ca3af; font-size: .85rem; }
+.erreur { color: #dc3545; font-size: .85rem; }
+
+.messages {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  margin-bottom: .8rem;
+  padding: .5rem;
+  background: #fafafa;
+  border-radius: 8px;
+}
+
+.message {
+  max-width: 75%;
+  background: #f3f4f6;
+  border-radius: 8px;
+  padding: .4rem .6rem;
+
+  &.sortant { align-self: flex-end; background: #ede9fe; }
+
+  .message-meta { font-size: .68rem; color: #6b7280; margin-bottom: .15rem; }
+  .message-contenu { font-size: .85rem; color: #1f2937; white-space: pre-wrap; }
+}
+
+.saisie {
+  display: flex;
+  gap: .5rem;
+
+  input { flex: 1; padding: .5rem .7rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: .85rem; }
+
+  button {
+    padding: .5rem 1rem;
+    border-radius: 6px;
+    border: 1px solid #7c3aed;
+    background: #7c3aed;
+    color: #fff;
+    cursor: pointer;
+    font-size: .85rem;
+    &:disabled { opacity: .5; cursor: not-allowed; }
+  }
+}

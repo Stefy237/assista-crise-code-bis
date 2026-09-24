@@ -4,6 +4,7 @@ import { CommonModule } from '@angular/common';
 import { Subscription } from 'rxjs';
 import { AuthService } from '../../auth/services/auth.service';
 import { NotificationService } from '../../services/notification.service';
+import { SuiviPositionPermanentService } from '../../services/suivi-position-permanent.service';
 import { User, UserRole } from '../../shared/models/user.model';
 import { AppNotification, ResumeNotifications } from '../../shared/models/notification.model';
 import { pollWhileVisible } from '../../shared/utils/polling.util';
@@ -140,8 +141,19 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
   constructor(
     private authService: AuthService,
     private notificationService: NotificationService,
-    private router: Router
+    private router: Router,
+    public suiviPosition: SuiviPositionPermanentService,
   ) {}
+
+  /** Bascule le suivi de position permanent (voir SuiviPositionPermanentService) -- accord
+   * navigateur demandé une seule fois, à la première activation. */
+  basculerSuiviPosition(): void {
+    if (this.suiviPosition.actif) {
+      this.suiviPosition.desactiver();
+    } else {
+      this.suiviPosition.activer();
+    }
+  }
 
   ngOnInit(): void {
     this.currentUser = this.authService.getCurrentUser();

@@ -54,6 +54,8 @@ from .models import (
     CanalMeshCore,
     MessageCanalMeshCore,
     SalonMatrixEquipe,
+    SalonMatrixInstitution,
+    TypeSalonInstitution,
     ContactMeshCore,
     CompagnonMeshtastic,
     CanalMeshtastic,
@@ -2201,6 +2203,12 @@ class InstitutionSerializer(
         default=None,
     )
 
+    # {"PERMANENTS": {...}|None, "BENEVOLES": {...}|None} -- toujours les deux clés, valeur
+    # None tant que non provisionné (voir InstitutionViewSet.provisionner_salons_matrix). Le
+    # queryset DOIT prefetch_related('salons_matrix') (voir InstitutionViewSet) sous peine du
+    # même N+1 que celui trouvé et corrigé sur TeamSerializer/salon_matrix le 24/09.
+    salons_matrix = serializers.SerializerMethodField()
+
     class Meta:
 
         model = Institution
@@ -2216,6 +2224,16 @@ class InstitutionSerializer(
             "convention_sous_traitance_acceptee_par",
             "convention_sous_traitance_version",
         ]
+
+    def get_salons_matrix(self, obj):
+        salons = {s.type: s for s in obj.salons_matrix.all()}
+        return {
+            type_salon: (
+                {"id": str(salons[type_salon].id), "room_id": salons[type_salon].room_id}
+                if type_salon in salons else None
+            )
+            for type_salon in TypeSalonInstitution.values
+        }
 
     def to_representation(self, instance):
         # Une VRAIE institution (email/téléphone réels) reste visible en DEMO (voir
@@ -2828,11 +2846,24 @@ class SalonMatrixEquipeSerializer(serializers.ModelSerializer):
 
     equipe_nom = serializers.CharField(source='equipe.name', read_only=True)
     membres = serializers.SerializerMethodField()
+    # Texte prêt à poser tel quel comme sujet (m.room.topic) du salon par le pont -- demande
+    # explicite de Sylvain le 24/09 ("rappel du régulateur et ses coordonnées en en-tête du
+    # canal"). None si l'équipe n'a pas de régulateur désigné : le pont laisse alors le sujet
+    # tel quel plutôt que d'écraser par une chaîne vide.
+    sujet_salon = serializers.SerializerMethodField()
 
     class Meta:
         model = SalonMatrixEquipe
-        fields = ['id', 'equipe', 'equipe_nom', 'room_id', 'membres', 'date_creation', 'derniere_synchronisation']
+        fields = ['id', 'equipe', 'equipe_nom', 'room_id', 'membres', 'sujet_salon', 'date_creation', 'derniere_synchronisation']
         read_only_fields = ['id', 'equipe', 'date_creation']
+
+    def get_sujet_salon(self, obj):
+        regulateur = obj.equipe.regulateur
+        if not regulateur:
+            return None
+        nom = f"{regulateur.first_name} {regulateur.last_name}".strip() or regulateur.email
+        coordonnees = " / ".join(c for c in [regulateur.email, regulateur.phone_number] if c)
+        return f"Régulateur : {nom}" + (f" ({coordonnees})" if coordonnees else "")
 
     def get_membres(self, obj):
         from .matrix import matrix_user_id
@@ -2840,6 +2871,46 @@ class SalonMatrixEquipeSerializer(serializers.ModelSerializer):
             {"id": str(m.id), "matrix_user_id": matrix_user_id(m),
              "nom": f"{m.first_name} {m.last_name}".strip() or m.email}
             for m in obj.equipe.members.filter(is_active=True)
+        ]
+
+
+# Rôles considérés "permanents" d'une institution (personnel institutionnel), par opposition
+# aux bénévoles mobilisés ponctuellement sur ses équipes -- même ensemble que
+# AuthService.isAdmin() côté frontend (RESCUE/LOCAL_AUTH/ADMIN/REGULATEUR).
+ROLES_PERMANENTS_INSTITUTION = [
+    UserRole.ADMINISTRATOR, UserRole.LOCAL_AUTHORITY, UserRole.ORGANIZED_RESCUE, UserRole.REGULATEUR,
+]
+
+
+class SalonMatrixInstitutionSerializer(serializers.ModelSerializer):
+    """Deux salons par institution (voir SalonMatrixInstitution/TypeSalonInstitution) --
+    `membres` recalculé à chaque lecture selon le type, jamais figé : le pont resynchronise en
+    continu (voir matrix-bridge/bridge.py, boucle_provisionnement_salons_institution)."""
+
+    institution_nom = serializers.CharField(source='institution.nom', read_only=True)
+    membres = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalonMatrixInstitution
+        fields = ['id', 'institution', 'institution_nom', 'type', 'room_id', 'membres', 'date_creation', 'derniere_synchronisation']
+        read_only_fields = ['id', 'institution', 'type', 'date_creation']
+
+    def get_membres(self, obj):
+        from .matrix import matrix_user_id
+
+        if obj.type == TypeSalonInstitution.PERMANENTS:
+            queryset = obj.institution.utilisateurs.filter(is_active=True, type__in=ROLES_PERMANENTS_INSTITUTION)
+        else:
+            # Union des membres de toutes les équipes ACTIVES de l'institution -- une équipe
+            # désactivée (mission terminée) n'alimente plus ce salon, voir docstring du modèle.
+            queryset = User.objects.filter(
+                is_active=True, teams__institution=obj.institution, teams__actif=True,
+            ).distinct()
+
+        return [
+            {"id": str(m.id), "matrix_user_id": matrix_user_id(m),
+             "nom": f"{m.first_name} {m.last_name}".strip() or m.email}
+            for m in queryset
         ]
 
 

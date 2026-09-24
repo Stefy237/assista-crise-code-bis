@@ -20,6 +20,12 @@ export interface Institution {
   commune_code_postal?: string | null;
   actif: boolean;
   date_creation?: string;
+  // Voir InstitutionSerializer.get_salons_matrix -- toujours les deux clés, valeur null tant
+  // que non provisionné (InstitutionViewSet.provisionner_salons_matrix).
+  salons_matrix?: {
+    PERMANENTS: { id: string; room_id: string | null } | null;
+    BENEVOLES: { id: string; room_id: string | null } | null;
+  };
 }
 
 export interface ContactInstitution {

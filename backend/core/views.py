@@ -171,6 +171,8 @@ from .models import (
     Status,
     DernierePositionUtilisateur,
     SalonMatrixEquipe,
+    SalonMatrixInstitution,
+    TypeSalonInstitution,
     HistoriquePositionUtilisateur,
     Zone,
     Plan,
@@ -377,6 +379,7 @@ from .serializers import (
     CanalMeshCoreSerializer,
     MessageCanalMeshCoreSerializer,
     SalonMatrixEquipeSerializer,
+    SalonMatrixInstitutionSerializer,
     ContactMeshCoreSerializer,
     CompagnonMeshtasticSerializer,
     NoeudUtilisateurMeshtasticSerializer,
@@ -4535,9 +4538,10 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     # TeamSerializer déréférence aussi institution/institution_delegataire/regulateur (FK) et
     # themes/competences/assigned_informations (M2M) en plus de ce qui était déjà prefetch —
     # 77 requêtes mesurées pour 13 équipes DEMO avant cet ajout. mission_active(.crise)/
-    # canal_meshcore/canal_meshtastic ajoutés avec les fonctionnalités du même nom (voir
-    # TeamSerializer) — sans ça, chacun requêtait une fois par équipe (régression mesurée par
-    # test_query_optimization.py).
+    # canal_meshcore/canal_meshtastic/salon_matrix ajoutés avec les fonctionnalités du même nom
+    # (voir TeamSerializer) — sans ça, chacun requêtait une fois par équipe (régression mesurée
+    # par test_query_optimization.py ; salon_matrix avait été oublié ici lors de son ajout le
+    # 24/09, retrouvé en creusant une lenteur signalée sur la vue équipe).
     queryset           = Team.objects.prefetch_related(
         'members',
         Prefetch('assigned_offers', queryset=Offer.objects.select_related('offer_type')),
@@ -4546,6 +4550,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     ).select_related(
         'leader', 'equipe_parente', 'institution', 'institution_delegataire', 'regulateur',
         'mission_active', 'mission_active__crise', 'canal_meshcore', 'canal_meshtastic',
+        'salon_matrix',
     ).all()
     serializer_class   = TeamSerializer
 
@@ -5614,6 +5619,55 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         )
 
         return Response(SalonMatrixEquipeSerializer(salon).data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='salon-matrix-messages')
+    def salon_matrix_messages(self, request, pk=None):
+        """Chat intégré à la vue équipe (pas de fenêtre séparée / lien Element, demande
+        explicite de Sylvain le 24/09). Contrairement à une première version qui tentait de
+        donner à chaque utilisateur un jeton Matrix personnel (voir mémoire de session --
+        impossible : l'API admin Synapse "login as user" est retirée dès que MAS gère l'auth),
+        tous les messages composés ici transitent par le jeton du bot (voir core/matrix.py) --
+        jamais un jeton exposé au navigateur. Accessible à un membre de l'équipe OU à un acteur
+        institutionnel qui la gère (régulateur), même s'il n'est pas lui-même membre : dans ce
+        second cas on le fait rejoindre le salon à la volée pour qu'il y ait un compte visible."""
+        from .matrix import assurer_membre_salon, envoyer_message_salon, lister_messages_salon, matrix_user_id
+
+        team = self.get_object()
+        est_membre = team.members.filter(id=request.user.id).exists()
+        if not est_membre and not _appartient_a_equipe(request, team):
+            return Response(
+                {"error": "Vous devez appartenir à cette équipe (ou à son institution) pour accéder à son salon Matrix."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        salon = SalonMatrixEquipe.objects.filter(equipe=team).first()
+        if salon is None or not salon.room_id:
+            return Response(
+                {"error": "Le salon Matrix de cette équipe n'est pas encore provisionné."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        nom = f"{request.user.first_name} {request.user.last_name}".strip() or request.user.email
+        if not est_membre:
+            assurer_membre_salon(request.user, salon.room_id, displayname=nom)
+
+        if request.method == 'POST':
+            texte = (request.data.get('texte') or '').strip()
+            if not texte:
+                return Response({"error": "texte requis."}, status=status.HTTP_400_BAD_REQUEST)
+            envoyer_message_salon(salon.room_id, request.user, nom, texte)
+
+        # Table de correspondance UUID Django -> nom lisible, pour attribuer les messages postés
+        # directement depuis Element (pas de préfixe de nom dans leur corps, contrairement aux
+        # messages relayés par ce endpoint -- voir envoyer_message_salon).
+        noms = {str(m.id): f"{m.first_name} {m.last_name}".strip() or m.email for m in team.members.all()}
+        noms[str(request.user.id)] = nom
+        messages = lister_messages_salon(salon.room_id)
+        for m in messages:
+            m['expediteur_nom'] = noms.get(m['expediteur_id'], 'Compte externe')
+            m['moi'] = m['expediteur_id'] == str(request.user.id)
+
+        return Response({"messages": messages})
 
     @action(detail=True, methods=['post'], url_path='provisionner-canal-meshtastic')
     def provisionner_canal_meshtastic(self, request, pk=None):
@@ -8436,7 +8490,7 @@ class InstitutionViewSet(
     # — sans ordre explicite, DRF pagine sur un ordre de résultats non garanti par Postgres, ce
     # qui peut dupliquer ou sauter des lignes d'une page à l'autre.
     queryset = (
-        Institution.objects.select_related('type').order_by('nom')
+        Institution.objects.select_related('type').prefetch_related('salons_matrix').order_by('nom')
     )
 
     serializer_class = (
@@ -8544,6 +8598,87 @@ class InstitutionViewSet(
                 f"{nb} élément(s) (zones/équipes/plans) y sont encore rattachés."
             )
         instance.delete()
+
+    @action(detail=True, methods=['post'], url_path='provisionner-salons-matrix')
+    def provisionner_salons_matrix(self, request, pk=None):
+        """Active les deux salons Matrix généraux de l'institution (voir SalonMatrixInstitution)
+        -- permanents et bénévoles mobilisés. Idempotent, même logique que
+        TeamViewSet.provisionner_salon_matrix (get_or_create, room_id posé par le pont)."""
+        institution = self.get_object()
+        if not _appartient_a_institution(request, institution):
+            return Response(
+                {"error": "Vous ne pouvez provisionner les salons Matrix que de votre propre institution."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        resultats = []
+        for type_salon in TypeSalonInstitution.values:
+            salon, cree = SalonMatrixInstitution.objects.get_or_create(
+                institution=institution, type=type_salon,
+                defaults={"environment": get_active_environment(request)},
+            )
+            audit_log(
+                request=request,
+                action_code="CREATION" if cree else "MODIFICATION",
+                objet_type="SalonMatrixInstitution",
+                objet_id=salon.id,
+                commentaire=f"Salon Matrix {salon.get_type_display()} {'provisionné' if cree else 'déjà actif'} pour « {institution.nom} ».",
+            )
+            resultats.append(salon)
+
+        return Response(SalonMatrixInstitutionSerializer(resultats, many=True).data)
+
+    @action(
+        detail=True, methods=['get', 'post'],
+        url_path=r'salon-matrix-messages/(?P<type_salon>PERMANENTS|BENEVOLES)',
+    )
+    def salon_matrix_messages(self, request, pk=None, type_salon=None):
+        """Chat intégré des salons généraux d'institution -- même relais côté bot que
+        TeamViewSet.salon_matrix_messages (voir cette docstring pour le pourquoi). Accès au
+        salon PERMANENTS réservé au personnel institutionnel ; accès au salon BENEVOLES ouvert
+        à quiconque en fait partie (voir SalonMatrixInstitutionSerializer.get_membres) OU est
+        un acteur institutionnel de l'institution."""
+        from .matrix import envoyer_message_salon, lister_messages_salon
+
+        institution = self.get_object()
+        est_acteur = _appartient_a_institution(request, institution)
+        salon = SalonMatrixInstitution.objects.filter(institution=institution, type=type_salon).first()
+        if salon is None or not salon.room_id:
+            return Response(
+                {"error": "Ce salon Matrix n'est pas encore provisionné."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        membres_ids = {m['id'] for m in SalonMatrixInstitutionSerializer(salon).data['membres']}
+        est_membre = str(request.user.id) in membres_ids
+        if type_salon == TypeSalonInstitution.PERMANENTS and not est_acteur:
+            return Response(
+                {"error": "Salon réservé au personnel institutionnel."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not est_membre and not est_acteur:
+            return Response(
+                {"error": "Vous ne faites pas partie de ce salon."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        nom = f"{request.user.first_name} {request.user.last_name}".strip() or request.user.email
+
+        if request.method == 'POST':
+            texte = (request.data.get('texte') or '').strip()
+            if not texte:
+                return Response({"error": "texte requis."}, status=status.HTTP_400_BAD_REQUEST)
+            envoyer_message_salon(salon.room_id, request.user, nom, texte)
+
+        noms = {m['id']: m['nom'] for m in SalonMatrixInstitutionSerializer(salon).data['membres']}
+        noms[str(request.user.id)] = nom
+        messages = lister_messages_salon(salon.room_id)
+        for m in messages:
+            m['expediteur_nom'] = noms.get(m['expediteur_id'], 'Compte externe')
+            m['moi'] = m['expediteur_id'] == str(request.user.id)
+
+        return Response({"messages": messages})
+
 
 class RoleOperationnelViewSet(
     viewsets.ModelViewSet
@@ -9288,7 +9423,17 @@ class PointOperationnelViewSet(
                 errors.append({"offer_id": offer_id, "error": "Impossible de déterminer les coordonnées du bénévole depuis cette offre."})
                 continue
 
+            # Jusqu'ici ce recrutement ajoutait bien le bénévole aux membres de l'équipe, mais
+            # sans jamais le prévenir ni lui donner de moyen de se connecter (compte créé par
+            # resolve_or_invite_benevole avec un mot de passe inutilisable) -- il ne pouvait
+            # donc ni suivre sa "vue équipe", ni accéder au salon Matrix de l'équipe (voir
+            # SalonMatrixEquipe), ni activer le suivi de position. Envoyé seulement s'il n'était
+            # pas déjà membre (jamais de notification redondante à chaque nouveau recrutement
+            # sur un autre point de la même équipe).
+            deja_membre = point.equipe.members.filter(id=benevole.id).exists()
             point.equipe.members.add(benevole)
+            if not deja_membre:
+                _notify_new_team_member(point.equipe, benevole, request)
 
             affectation = AffectationPointBenevole.objects.create(
                 point=point,
@@ -11212,6 +11357,19 @@ class SalonMatrixEquipeViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
 
     queryset = SalonMatrixEquipe.objects.select_related('equipe').all()
     serializer_class = SalonMatrixEquipeSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def perform_update(self, serializer):
+        serializer.save(derniere_synchronisation=timezone.now())
+
+
+class SalonMatrixInstitutionViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Salons Matrix généraux d'institution (voir SalonMatrixInstitution) -- même posture que
+    SalonMatrixEquipeViewSet : consommé par le pont pour créer le salon côté Synapse et y
+    poser room_id, création réservée à InstitutionViewSet.provisionner_salons_matrix."""
+
+    queryset = SalonMatrixInstitution.objects.select_related('institution').all()
+    serializer_class = SalonMatrixInstitutionSerializer
     http_method_names = ['get', 'patch', 'head', 'options']
 
     def perform_update(self, serializer):

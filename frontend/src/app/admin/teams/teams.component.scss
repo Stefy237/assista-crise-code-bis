@@ -66,6 +66,13 @@
 .canal-attente { color: var(--muted); font-style: italic; }
 .mission-active-label .material-icons.statut-ok { color: #16a34a; }
 
+.lien-element-externe {
+  display: inline-flex; align-items: center; gap: .3rem;
+  margin-top: .4rem; font-size: .75rem; color: #6b7280; text-decoration: none;
+  .material-icons { font-size: 14px; }
+  &:hover { color: #7c3aed; text-decoration: underline; }
+}
+
 .icon-btn {
   background: transparent; border: 1px solid var(--border); border-radius: 8px;
   padding: .35rem; cursor: pointer; display: inline-flex; align-items: center;

@@ -1,5 +1,17 @@
 import type { Polygon } from "geojson";
 
+/** Message du salon Matrix d'une équipe, relayé par TeamViewSet.salon_matrix_messages (le
+ * backend parle à Synapse via le jeton du bot, jamais un jeton exposé au navigateur -- voir
+ * core/matrix.py). Consommé par MatrixSalonChatComponent. */
+export interface MatrixMessage {
+  event_id:        string;
+  texte:           string;
+  horodatage:      number;
+  expediteur_id:   string | null;
+  expediteur_nom:  string;
+  moi:             boolean;
+}
+
 export interface TeamMission {
   id:      string;
   kind:    'Crisis' | 'Offer' | 'Request';

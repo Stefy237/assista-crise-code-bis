@@ -4,6 +4,7 @@ import { Router } from '@angular/router';
 import { BehaviorSubject, catchError, delay, Observable, of, tap, throwError } from 'rxjs';
 import { environment } from '../../../environments/environment';
 import { User, UserRole, UserPayload, Environment } from '../../shared/models/user.model';
+import { SuiviPositionPermanentService } from '../../services/suivi-position-permanent.service';
 
 // interface RegisterRequest {
 //   username: string;
@@ -245,7 +246,7 @@ export class AuthService {
   // private readonly url = `${environment.apiUrl}/auth`;
   // private readonly url = `${environment.apiUrl}/users`;
 
-  constructor(private http: HttpClient) {}
+  constructor(private http: HttpClient, private suiviPosition: SuiviPositionPermanentService) {}
 
   /**
    * Stocke la session (token d'accès, refresh, utilisateur) en localStorage.
@@ -255,6 +256,10 @@ export class AuthService {
     localStorage.setItem('access_token', accessToken);
     localStorage.setItem('refresh_token', refreshToken);
     localStorage.setItem('current_user', JSON.stringify(user));
+    // Relance le suivi de position permanent si l'utilisateur l'avait déjà activé lors d'une
+    // session précédente (voir SuiviPositionPermanentService) -- ne redemande jamais l'accord,
+    // le navigateur ne re-prompt pas une permission déjà accordée pour cette origine.
+    this.suiviPosition.demarrerSiConsentement();
   }
 
   /**

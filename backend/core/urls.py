@@ -59,6 +59,7 @@ from .views import (
     ImportHabitationsView,
     ImportHabitationsExempleView,
     SalonMatrixEquipeViewSet,
+    SalonMatrixInstitutionViewSet,
     PositionMatrixView,
 )
 
@@ -104,6 +105,7 @@ router.register(r'relais-meshcore', RelaisMeshCoreViewSet)
 router.register(r'canaux-meshcore', CanalMeshCoreViewSet)
 router.register(r'messages-canal-meshcore', MessageCanalMeshCoreViewSet)
 router.register(r'salons-matrix', SalonMatrixEquipeViewSet)
+router.register(r'salons-matrix-institution', SalonMatrixInstitutionViewSet)
 router.register(r'contacts-meshcore', ContactMeshCoreViewSet)
 
 router.register(r'compagnons-meshtastic', CompagnonMeshtasticViewSet)

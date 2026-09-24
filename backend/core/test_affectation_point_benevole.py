@@ -97,10 +97,17 @@ class TestInviterBenevole:
         assert point.equipe.members.filter(email="camille-benevole-affectation@test.fr").exists()
         assert DisponibilitePointEquipe.objects.filter(point=point, membre=affectation.benevole).exists()
 
-        assert len(mail.outbox) == 1
+        # 2 emails désormais (voir core/views.py, _notify_new_team_member ajouté au recrutement
+        # le 24/09) : le lien magique d'accès à la "vue équipe" (nouveau, sans quoi ce bénévole
+        # n'avait jusqu'ici aucun moyen de se connecter à la plateforme -- son compte, créé par
+        # resolve_or_invite_benevole, a un mot de passe inutilisable) PUIS la confirmation de
+        # créneau (oui/non), même ordre que dans PointOperationnelViewSet.inviter_benevole.
+        assert len(mail.outbox) == 2
         assert "camille-benevole-affectation@test.fr" in mail.outbox[0].to
-        assert affectation.token_confirmation in mail.outbox[0].body
-        assert point_transit.nom in mail.outbox[0].body
+        assert "connexion-magique" in mail.outbox[0].body
+        assert "camille-benevole-affectation@test.fr" in mail.outbox[1].to
+        assert affectation.token_confirmation in mail.outbox[1].body
+        assert point_transit.nom in mail.outbox[1].body
 
     def test_invite_requires_point_equipe(self, responsable_client, crisis, responsable, offer):
         point_type = PointType.objects.create(code="SANS_EQUIPE_TEST", libelle="Sans equipe test")
@@ -191,7 +198,9 @@ class TestInviterBenevole:
         assert response.status_code == status.HTTP_201_CREATED
         assert len(response.data["created"]) == 2
         assert response.data["errors"] == []
-        assert len(mail.outbox) == 2
+        # 2 emails par bénévole désormais (lien magique d'accès à l'équipe + confirmation de
+        # créneau, voir le commentaire équivalent dans test_invite_creates_affectation_and_sends_email).
+        assert len(mail.outbox) == 4
         alice = point.equipe.members.get(email="alice-bulk@test.fr")
         bob = point.equipe.members.get(email="bob-bulk@test.fr")
         assert DisponibilitePointEquipe.objects.filter(point=point, membre=alice, creneau="SOIR").exists()

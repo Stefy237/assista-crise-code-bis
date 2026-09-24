@@ -4350,6 +4350,50 @@ class SalonMatrixEquipe(EnvironmentScopedModel):
         return f"Salon Matrix de {self.equipe.name}"
 
 
+class TypeSalonInstitution(models.TextChoices):
+    """PERMANENTS : le personnel de l'institution (rôles institutionnels, voir
+    core/matrix.py:membres_permanents_institution). BENEVOLES : tous les membres des équipes
+    ACTIVES de l'institution, quel que soit leur rôle -- se vide/remplit automatiquement au fil
+    des mobilisations (voir core/matrix.py:membres_benevoles_institution), pas de notion de
+    "crise" propre au salon lui-même, juste une photo continue des équipes actives."""
+    PERMANENTS = "PERMANENTS", "Permanents"
+    BENEVOLES = "BENEVOLES", "Bénévoles mobilisés"
+
+
+class SalonMatrixInstitution(EnvironmentScopedModel):
+    """Salon Matrix général d'une institution (demande explicite de Sylvain le 24/09, en plus
+    des salons par équipe SalonMatrixEquipe) -- deux salons distincts par institution, un pour
+    le personnel permanent, un pour les bénévoles actuellement mobilisés sur ses équipes
+    actives. La composition de CHAQUE salon est recalculée en continu par le pont (voir
+    matrix-bridge/bridge.py, boucle_provisionnement_salons_institution), jamais figée à la
+    création : un bénévole démobilisé (équipe désactivée, ou retiré de ses équipes) perd
+    l'accès au salon BENEVOLES automatiquement, sans action manuelle."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    institution = models.ForeignKey(
+        "Institution", on_delete=models.CASCADE, related_name="salons_matrix",
+    )
+
+    type = models.CharField(max_length=15, choices=TypeSalonInstitution.choices)
+
+    room_id = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="Identifiant Matrix du salon, posé par le pont à la création.",
+    )
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    derniere_synchronisation = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['institution', 'type'], name='unique_salon_matrix_institution_type'),
+        ]
+
+    def __str__(self):
+        return f"Salon Matrix {self.get_type_display()} de {self.institution.nom}"
+
+
 class HistoriquePositionUtilisateur(EnvironmentScopedModel):
     """Trace du déplacement d'un utilisateur pendant qu'il partage sa position en direct dans le
     salon Matrix de son équipe (balise de position live Element/MSC3489, voir

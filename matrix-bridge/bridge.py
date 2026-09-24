@@ -93,6 +93,14 @@ class DjangoClient:
     async def rapporter_salon(self, salon_id, room_id):
         await self._request("PATCH", f"/salons-matrix/{salon_id}/", json={"room_id": room_id})
 
+    async def salons_institution_a_synchroniser(self):
+        response = await self._request("GET", "/salons-matrix-institution/")
+        data = response.json()
+        return data["results"] if isinstance(data, dict) else data
+
+    async def rapporter_salon_institution(self, salon_id, room_id):
+        await self._request("PATCH", f"/salons-matrix-institution/{salon_id}/", json={"room_id": room_id})
+
     async def rapporter_position(self, matrix_user_id, latitude, longitude, horodatage_iso):
         await self._request("POST", "/matrix/positions/", json={
             "matrix_user_id": matrix_user_id, "latitude": latitude, "longitude": longitude,
@@ -170,12 +178,38 @@ class SynapseClient:
             logger.warning("Échec de provisionnement du compte %s : %s %s", matrix_user_id, response.status_code, response.text[:200])
 
     async def creer_salon(self, nom):
+        # power_level_content_override : le preset "private_chat" laisse state_default à 50,
+        # donc par défaut seul le bot (power level 100) pourrait poser un événement d'état --
+        # or m.beacon_info (MSC3489, partage de position en direct) EST un événement d'état,
+        # keyé par l'utilisateur qui partage. Sans cette dérogation, Element refuse le partage
+        # de position à tout membre normal (power level 0) avec une erreur de permission,
+        # constaté avec Sylvain le 24/09.
         response = await self._client.post(
             f"{self.base_url}/_matrix/client/v3/createRoom", headers=self._headers(),
-            json={"name": nom, "preset": "private_chat", "visibility": "private"},
+            json={
+                "name": nom, "preset": "private_chat", "visibility": "private",
+                "power_level_content_override": {
+                    "events": {
+                        "m.beacon_info": 0,
+                        "org.matrix.msc3672.beacon_info": 0,
+                    },
+                },
+            },
         )
         response.raise_for_status()
         return response.json()["room_id"]
+
+    async def definir_sujet(self, room_id, sujet):
+        """Sujet du salon (m.room.topic) -- affiché en en-tête par la quasi-totalité des
+        clients Matrix, dont Element. Reposé à chaque cycle (idempotent, PUT d'état -- pas de
+        détection de changement côté pont, plus simple et sans risque de rester périmé si le
+        régulateur change)."""
+        response = await self._client.put(
+            f"{self.base_url}/_matrix/client/v3/rooms/{room_id}/state/m.room.topic",
+            headers=self._headers(), json={"topic": sujet},
+        )
+        if response.status_code != 200:
+            logger.warning("Échec de pose du sujet du salon %s : %s", room_id, response.status_code)
 
     async def membres_actuels(self, room_id):
         response = await self._client.get(
@@ -235,6 +269,9 @@ async def boucle_provisionnement_salons(django, synapse):
                     await django.rapporter_salon(salon["id"], room_id)
                     logger.info("Salon créé pour l'équipe « %s » : %s", salon["equipe_nom"], room_id)
 
+                if salon.get("sujet_salon"):
+                    await synapse.definir_sujet(room_id, salon["sujet_salon"])
+
                 actuels = await synapse.membres_actuels(room_id)
                 for matrix_id in cibles:
                     if matrix_id not in actuels:
@@ -246,6 +283,44 @@ async def boucle_provisionnement_salons(django, synapse):
                         logger.info("Membre %s retiré du salon de « %s ».", matrix_id, salon["equipe_nom"])
         except Exception:
             logger.exception("Échec du cycle de provisionnement des salons.")
+        await asyncio.sleep(SALONS_POLL_INTERVAL_SECONDS)
+
+
+TYPE_SALON_INSTITUTION_LIBELLE = {"PERMANENTS": "Permanents", "BENEVOLES": "Bénévoles mobilisés"}
+
+
+async def boucle_provisionnement_salons_institution(django, synapse):
+    """Même logique que boucle_provisionnement_salons, pour les deux salons généraux par
+    institution (voir SalonMatrixInstitution côté Django -- personnel permanent / bénévoles
+    actuellement mobilisés sur les équipes actives, composition recalculée à chaque cycle)."""
+    while True:
+        try:
+            salons = await django.salons_institution_a_synchroniser()
+            for salon in salons:
+                cibles = {m["matrix_user_id"]: m["nom"] for m in salon["membres"]}
+                for matrix_id, nom in cibles.items():
+                    await synapse.assurer_compte(matrix_id, nom)
+
+                libelle = TYPE_SALON_INSTITUTION_LIBELLE.get(salon["type"], salon["type"])
+                nom_salon = f"{salon['institution_nom']} — {libelle}"
+
+                room_id = salon.get("room_id")
+                if not room_id:
+                    room_id = await synapse.creer_salon(nom_salon[:64])
+                    await django.rapporter_salon_institution(salon["id"], room_id)
+                    logger.info("Salon institution créé pour « %s » : %s", nom_salon, room_id)
+
+                actuels = await synapse.membres_actuels(room_id)
+                for matrix_id in cibles:
+                    if matrix_id not in actuels:
+                        await synapse.rejoindre_de_force(room_id, matrix_id)
+                        logger.info("Membre %s ajouté au salon « %s ».", matrix_id, nom_salon)
+                for matrix_id in actuels:
+                    if matrix_id != synapse.user_id and matrix_id not in cibles:
+                        await synapse.expulser(room_id, matrix_id)
+                        logger.info("Membre %s retiré du salon « %s ».", matrix_id, nom_salon)
+        except Exception:
+            logger.exception("Échec du cycle de provisionnement des salons d'institution.")
         await asyncio.sleep(SALONS_POLL_INTERVAL_SECONDS)
 
 
@@ -324,6 +399,7 @@ async def main():
     try:
         await asyncio.gather(
             boucle_provisionnement_salons(django, synapse),
+            boucle_provisionnement_salons_institution(django, synapse),
             boucle_positions(django, synapse),
         )
     finally:

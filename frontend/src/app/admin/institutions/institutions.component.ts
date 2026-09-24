@@ -16,6 +16,7 @@ import { LocationService, Commune } from '../../services/location.service';
 import { ZoneService } from '../../services/zone.service';
 import { Zone } from '../../shared/models/zone.model';
 import { TagSearchInputComponent } from '../../shared/components/common/tag-search-input/tag-search-input.component';
+import { MatrixSalonChatComponent } from '../teams/matrix-salon-chat/matrix-salon-chat.component';
 
 import {
   Institution,
@@ -31,12 +32,12 @@ import { Competence } from '../../shared/models/competence.model';
 type MainTab = 'institutions' | 'types' | 'roles';
 type ModalView = 'none' | 'create' | 'edit' | 'delete' | 'detail';
 type RefModalView = 'none' | 'create' | 'edit' | 'delete';
-type DetailTab = 'contacts' | 'domaines' | 'regulateurs';
+type DetailTab = 'contacts' | 'domaines' | 'regulateurs' | 'matrix';
 
 @Component({
   selector: 'app-institutions',
   standalone: true,
-  imports: [CommonModule, FormsModule, ReactiveFormsModule, RouterLink, TagSearchInputComponent],
+  imports: [CommonModule, FormsModule, ReactiveFormsModule, RouterLink, TagSearchInputComponent, MatrixSalonChatComponent],
   templateUrl: './institutions.component.html',
   styleUrls: ['./institutions.component.scss'],
 })
@@ -106,6 +107,30 @@ export class InstitutionsComponent implements OnInit {
     this.buildForms();
     this.loadAll();
   }
+
+  // ── Salons Matrix généraux de l'institution (permanents / bénévoles mobilisés) ─────────
+  provisionnantSalonsMatrix = false;
+
+  provisionnerSalonsMatrix(): void {
+    if (!this.selectedInstitution?.id) return;
+    this.provisionnantSalonsMatrix = true;
+    this.institutionService.provisionnerSalonsMatrix(this.selectedInstitution.id).subscribe({
+      next: () => {
+        this.provisionnantSalonsMatrix = false;
+        this.institutionService.getById(this.selectedInstitution!.id!).subscribe(inst => {
+          this.selectedInstitution = inst;
+        });
+        this.showSuccess("Salons Matrix activés — le pont les crée côté serveur sous quelques dizaines de secondes.");
+      },
+      error: () => { this.provisionnantSalonsMatrix = false; this.showError("Erreur lors de l'activation des salons Matrix."); },
+    });
+  }
+
+  chargerMessagesSalonInstitution = (type: 'PERMANENTS' | 'BENEVOLES') =>
+    () => this.institutionService.getSalonMatrixMessages(this.selectedInstitution!.id!, type);
+
+  envoyerMessageSalonInstitution = (type: 'PERMANENTS' | 'BENEVOLES') =>
+    (texte: string) => this.institutionService.envoyerMessageSalonMatrix(this.selectedInstitution!.id!, type, texte);
 
   private buildForms(): void {
     this.institutionForm = this.fb.group({

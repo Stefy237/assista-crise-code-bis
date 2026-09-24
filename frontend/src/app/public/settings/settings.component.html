@@ -153,6 +153,21 @@
               </button>
             </div>
           </form>
+
+          <!-- SUIVI DE POSITION PERMANENT -->
+          <div class="position-suivi-block">
+            <h3><span class="material-icons">my_location</span> Suivi de position pendant mes missions</h3>
+            <p class="tab-hint">
+              Une fois activé, ta position est transmise régulièrement à assista-crise pendant que
+              tu as l'application ouverte, pour que les régulateurs puissent suivre les équipes sur
+              la carte — quelle que soit l'équipe à laquelle tu es rattaché sur le moment. L'accord
+              n'est demandé qu'une seule fois par ton navigateur ; tu peux désactiver à tout moment.
+            </p>
+            <button type="button" class="btn" [class.btn-primary]="!suiviPosition.actif" [class.btn-secondary]="suiviPosition.actif" (click)="basculerSuiviPosition()">
+              <span class="material-icons">{{ suiviPosition.actif ? 'location_off' : 'my_location' }}</span>
+              {{ suiviPosition.actif ? 'Désactiver le suivi de position' : 'Activer le suivi de position' }}
+            </button>
+          </div>
         </div>
       }
 

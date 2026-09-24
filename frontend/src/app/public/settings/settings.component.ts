@@ -23,6 +23,7 @@ import { NoeudUtilisateurMeshtasticService } from '../../services/noeud-utilisat
 import { CompagnonMeshtasticService } from '../../services/compagnon-meshtastic.service';
 import { NoeudMeshUtilisateur } from '../../shared/models/noeud-mesh-utilisateur.model';
 import { NoeudUtilisateurMeshtastic, ReclamerMeshtasticBrokerRequis } from '../../shared/models/noeud-utilisateur-meshtastic.model';
+import { SuiviPositionPermanentService } from '../../services/suivi-position-permanent.service';
 
 @Component({
   selector: 'app-settings',
@@ -128,7 +129,20 @@ export class SettingsComponent implements OnInit {
     private noeudMeshCoreService: NoeudMeshUtilisateurService,
     private noeudMeshtasticService: NoeudUtilisateurMeshtasticService,
     private compagnonMeshtasticService: CompagnonMeshtasticService,
+    public suiviPosition: SuiviPositionPermanentService,
   ) {}
+
+  /** Bascule le suivi de position permanent (voir SuiviPositionPermanentService) -- accord
+   * navigateur demandé une seule fois, à la première activation. Accessible ici (page
+   * /settings, réservée à `authGuard` seul) contrairement au bouton équivalent de l'en-tête
+   * admin, hors d'atteinte d'un simple intervenant sans rôle institutionnel. */
+  basculerSuiviPosition(): void {
+    if (this.suiviPosition.actif) {
+      this.suiviPosition.desactiver();
+    } else {
+      this.suiviPosition.activer();
+    }
+  }
 
   ngOnInit(): void {
     this.currentUser = this.authService.getCurrentUser();

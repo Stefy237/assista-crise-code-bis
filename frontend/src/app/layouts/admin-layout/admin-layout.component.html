@@ -24,6 +24,14 @@
     }
 
     <div class="header-right">
+      <button
+        class="icon-button position-toggle"
+        [class.actif]="suiviPosition.actif"
+        (click)="basculerSuiviPosition()"
+        [title]="suiviPosition.actif ? 'Désactiver le suivi de position permanent' : 'Activer le suivi de position permanent pendant mes missions'">
+        <span class="material-icons">{{ suiviPosition.actif ? 'my_location' : 'location_disabled' }}</span>
+      </button>
+
       @if (canAccessDemo) {
         <button
           class="env-toggle"

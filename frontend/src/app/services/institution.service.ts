@@ -3,6 +3,9 @@ import { HttpClient } from '@angular/common/http';
 import { EMPTY, Observable, expand, reduce } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { Institution } from '../shared/models/institution.model';
+import { MatrixMessage } from '../shared/models/team.model';
+
+export type TypeSalonInstitution = 'PERMANENTS' | 'BENEVOLES';
 
 interface PaginatedInstitutions {
   count: number;
@@ -50,5 +53,23 @@ export class InstitutionService {
 
   delete(id: string): Observable<void> {
     return this.http.delete<void>(`${this.url}/${id}/`);
+  }
+
+  /** POST /api/institutions/<id>/provisionner-salons-matrix/ — active les deux salons
+   * généraux (permanents/bénévoles), voir InstitutionViewSet.provisionner_salons_matrix. */
+  provisionnerSalonsMatrix(id: string): Observable<{ id: string; type: TypeSalonInstitution; room_id: string | null }[]> {
+    return this.http.post<{ id: string; type: TypeSalonInstitution; room_id: string | null }[]>(
+      `${this.url}/${id}/provisionner-salons-matrix/`, {},
+    );
+  }
+
+  /** GET/POST /api/institutions/<id>/salon-matrix-messages/<type>/ — chat intégré des salons
+   * généraux d'institution, même relais côté bot que TeamService.getSalonMatrixMessages. */
+  getSalonMatrixMessages(id: string, type: TypeSalonInstitution): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.get<{ messages: MatrixMessage[] }>(`${this.url}/${id}/salon-matrix-messages/${type}/`);
+  }
+
+  envoyerMessageSalonMatrix(id: string, type: TypeSalonInstitution, texte: string): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.post<{ messages: MatrixMessage[] }>(`${this.url}/${id}/salon-matrix-messages/${type}/`, { texte });
   }
 }

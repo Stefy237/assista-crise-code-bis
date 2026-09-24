@@ -184,6 +184,10 @@
         color: #666;
       }
 
+      &.position-toggle.actif .material-icons {
+        color: #16a34a;
+      }
+
       .notification-badge {
         position: absolute;
         top: 2px;

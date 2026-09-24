@@ -1,0 +1,30 @@
+<div class="section-matrix">
+  <h3>
+    <span class="material-icons">forum</span>
+    {{ titre }}
+  </h3>
+
+  @if (chargement) {
+    <p class="hint">Connexion au salon…</p>
+  } @else {
+    @if (erreur) {
+      <p class="erreur">{{ erreur }}</p>
+    }
+
+    <div class="messages">
+      @for (m of messages; track m.event_id) {
+        <div class="message" [class.sortant]="m.moi">
+          <div class="message-meta">{{ m.expediteur_nom }} · {{ m.horodatage | date:'short' }}</div>
+          <div class="message-contenu">{{ m.texte }}</div>
+        </div>
+      } @empty {
+        <p class="hint">Aucun message pour l'instant.</p>
+      }
+    </div>
+
+    <div class="saisie">
+      <input type="text" placeholder="Écrire à l'équipe..." [(ngModel)]="nouveauMessage" (keyup.enter)="envoyer()">
+      <button type="button" [disabled]="!nouveauMessage.trim() || envoiEnCours" (click)="envoyer()">Envoyer</button>
+    </div>
+  }
+</div>

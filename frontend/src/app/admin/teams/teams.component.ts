@@ -28,6 +28,7 @@ import { MinimapComponent } from '../../shared/components/common/minimap/minimap
 import { TagSearchInputComponent } from '../../shared/components/common/tag-search-input/tag-search-input.component';
 import { PointModalComponent } from '../crises/point-modal/point-modal.component';
 import { EquipeMessagerieMeshComponent } from './equipe-messagerie-mesh/equipe-messagerie-mesh.component';
+import { MatrixSalonChatComponent } from './matrix-salon-chat/matrix-salon-chat.component';
 import { environment } from '../../../environments/environment';
 
 import { Team, TeamMission }  from '../../shared/models/team.model';
@@ -51,7 +52,7 @@ const COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#06b6d4','#3b82f6','#8b
 @Component({
   selector: 'app-teams',
   standalone: true,
-  imports: [CommonModule, FormsModule, ReactiveFormsModule, RouterLink, ZoneMapComponent, MinimapComponent, TagSearchInputComponent, PointModalComponent, EquipeMessagerieMeshComponent],
+  imports: [CommonModule, FormsModule, ReactiveFormsModule, RouterLink, ZoneMapComponent, MinimapComponent, TagSearchInputComponent, PointModalComponent, EquipeMessagerieMeshComponent, MatrixSalonChatComponent],
   templateUrl: './teams.component.html',
   styleUrls: ['./teams.component.scss'],
 })
@@ -1129,6 +1130,12 @@ export class TeamsComponent implements OnInit {
   lienSalonMatrix(roomId: string): string {
     return `${this.elementWebUrl}/#/room/${encodeURIComponent(roomId)}`;
   }
+
+  // Propriétés fléchées (auto-liées) plutôt que des méthodes classiques : passées telles
+  // quelles en [Input] à MatrixSalonChatComponent (voir sa docstring, générique Team/
+  // Institution), qui les appelle sans connaître `this`.
+  chargerMessagesSalonEquipe = () => this.teamService.getSalonMatrixMessages(this.selectedTeam!.id!);
+  envoyerMessageSalonEquipe = (texte: string) => this.teamService.envoyerMessageSalonMatrix(this.selectedTeam!.id!, texte);
 
   /** Crises ouvertes proposables pour la mission — une mission ne doit pas pouvoir se rattacher
    * à une crise déjà clôturée (voir validate_crisis_open côté backend). */
