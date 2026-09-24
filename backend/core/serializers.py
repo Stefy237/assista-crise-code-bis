@@ -629,6 +629,9 @@ class OfferSerializer(serializers.ModelSerializer):
     # jamais été affectée comme ressource à une équipe.
     engagement_statut = serializers.CharField(source='engagement.statut', read_only=True, default=None)
     engagement_statut_libelle = serializers.SerializerMethodField()
+    # "Logement intervenants" (24/09) : pratique côté client plutôt que de tester
+    # accueil_intervenants_valide_par === null soi-même.
+    accueil_intervenants_valide = serializers.SerializerMethodField()
 
     class Meta:
         model = Offer
@@ -637,11 +640,18 @@ class OfferSerializer(serializers.ModelSerializer):
         # (qui journalisent l'action, voir OfferViewSet.perform_destroy/reactiver).
         # deletion_token/reponse_token : jamais exposés en lecture, sinon n'importe quel
         # visiteur du détail public de l'offre pourrait la supprimer ou usurper son
-        # propriétaire (répondre/éditer) via ces jetons.
+        # propriétaire (répondre/éditer) via ces jetons. accueil_intervenants_valide_par/_le :
+        # jamais posables par un PATCH générique, uniquement via
+        # OfferViewSet.valider_accueil_intervenants (même logique que actif).
         extra_kwargs = {
             'photo': {'write_only': True}, 'actif': {'read_only': True},
             'deletion_token': {'write_only': True}, 'reponse_token': {'write_only': True},
+            'accueil_intervenants_valide_par': {'read_only': True},
+            'accueil_intervenants_valide_le': {'read_only': True},
         }
+
+    def get_accueil_intervenants_valide(self, obj):
+        return obj.accueil_intervenants_valide_par_id is not None
 
     def get_competences_libelles(self, obj):
         return [c.nom for c in obj.competences.all()]

@@ -755,6 +755,26 @@ class Offer(HebergementDetailsMixin, EnvironmentScopedModel):
                    "où elle est définitivement purgée. Ne masque jamais les offres actives.",
     )
 
+    # Une offre d'hébergement (offer_type "Hébergement") ne vise plus forcément que les
+    # sinistrés -- demande explicite de Sylvain le 24/09 : la même offre peut aussi bien
+    # accueillir des sinistrés qu'accueillir des intervenants mobilisés (les deux cases sont
+    # indépendantes, une même offre peut cocher les deux). Sans objet pour les autres
+    # offer_type, laissées à leurs valeurs par défaut. accueil_sinistres démarre à True pour
+    # ne rien changer au comportement des offres d'hébergement déjà en base (seul usage qui
+    # existait jusqu'ici) ; accueil_intervenants démarre à False car c'est un nouvel usage,
+    # opt-in, qui nécessite en plus une validation par un régulateur avant d'être exploitable
+    # (voir accueil_intervenants_valide_par -- même patron que Crisis.validator/User.validator
+    # : FK nullable, null = en attente).
+    accueil_sinistres = models.BooleanField(default=True)
+    accueil_intervenants = models.BooleanField(default=False)
+    accueil_intervenants_valide_par = models.ForeignKey(
+        "User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+        help_text="Régulateur ayant validé cette offre pour l'accueil d'intervenants -- "
+                   "null tant que la validation n'a pas eu lieu, même si accueil_intervenants "
+                   "est coché (le régulateur doit confirmer avant que l'offre soit exploitable).",
+    )
+    accueil_intervenants_valide_le = models.DateTimeField(null=True, blank=True)
+
     offer_type = models.ForeignKey(
         OfferType, on_delete=models.PROTECT, related_name="offers"
     )
@@ -3601,6 +3621,10 @@ class TypePersonneAccueillie(models.TextChoices):
     EVACUE = "EVACUE", "Personne évacuée"
     POMPIER = "POMPIER", "Pompier"
     BENEVOLE_AUTRE_EQUIPE = "BENEVOLE_AUTRE_EQUIPE", "Bénévole d'une autre équipe"
+    # Distinct de BENEVOLE_AUTRE_EQUIPE (qui reste tel quel, déjà en base) : un intervenant
+    # logé pour une mission longue, pas forcément rattaché à "une autre équipe" au sens où
+    # cette valeur le sous-entendait -- voir "Logement intervenants" (24/09).
+    INTERVENANT = "INTERVENANT", "Intervenant mobilisé (logement multi-jours)"
     AUTRE = "AUTRE", "Autre"
 
 

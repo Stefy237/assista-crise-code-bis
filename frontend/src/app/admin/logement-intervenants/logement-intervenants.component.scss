@@ -1,0 +1,122 @@
+.logement-page {
+  padding: 1.5rem;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  gap: 1rem;
+
+  h1 {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin: 0;
+    font-size: 1.5rem;
+  }
+
+  .subtitle {
+    margin: .25rem 0 0;
+    color: #6b7280;
+    font-size: .9rem;
+    max-width: 60ch;
+  }
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  padding: .55rem 1rem;
+  border-radius: 6px;
+  border: none;
+  background: #1d4ed8;
+  color: #fff;
+  font-size: .88rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover { background: #1e40af; }
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  border-radius: 6px;
+  border: 1px solid #16a34a;
+  background: #f0fdf4;
+  color: #16a34a;
+  cursor: pointer;
+  font-weight: 600;
+
+  &.sm { padding: .35rem .7rem; font-size: .82rem; }
+  &:disabled { opacity: .5; cursor: not-allowed; }
+  .material-icons { font-size: 16px; }
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .6rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: .9rem;
+
+  &.toast-err { background: #fef2f2; color: #b91c1c; }
+}
+
+.loading, .empty {
+  padding: 2rem;
+  text-align: center;
+  color: #6b7280;
+}
+
+.hint {
+  color: #6b7280;
+  font-size: .85rem;
+  margin: 0 0 .8rem;
+}
+
+.section {
+  margin-bottom: 2rem;
+
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: 1.05rem;
+    margin: 0 0 .7rem;
+    .material-icons { font-size: 20px; color: #1d4ed8; }
+  }
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+
+  th, td {
+    text-align: left;
+    padding: .65rem .75rem;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  th {
+    color: #6b7280;
+    font-weight: 600;
+    font-size: .8rem;
+    text-transform: uppercase;
+  }
+
+  tbody tr:hover { background: #f9fafb; }
+
+  td.actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+}

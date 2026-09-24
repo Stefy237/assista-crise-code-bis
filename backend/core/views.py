@@ -1047,6 +1047,16 @@ class OfferSearchFilter(AuthorEmailFilter):
     # offres de crise en attente d'action : sémantiquement différent (pas de crise rattachée,
     # potentiellement des milliers de fiches), à consulter via /offres/vue_secteur/ à la place.
     exclude_type = filters.CharFilter(method='filter_exclude_type')
+    # "Logement intervenants" (24/09) : ?accueil_intervenants=true liste les offres cochées
+    # pour ça ; ?accueil_intervenants_valide=true restreint en plus aux offres déjà validées
+    # par un régulateur (voir OfferViewSet.valider_accueil_intervenants) -- deux filtres
+    # distincts pour que l'écran de validation régulateur puisse afficher les deux lots
+    # (en attente vs déjà validées) sans requêtes séparées.
+    accueil_intervenants = filters.BooleanFilter(field_name='accueil_intervenants')
+    accueil_intervenants_valide = filters.BooleanFilter(method='filter_accueil_intervenants_valide')
+
+    def filter_accueil_intervenants_valide(self, queryset, name, value):
+        return queryset.filter(accueil_intervenants_valide_par__isnull=not value)
 
     def filter_search(self, queryset, name, value):
         return queryset.filter(
@@ -5955,7 +5965,7 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         # (update/partial_update/destroy n'avaient aucune restriction avant ce changement).
         if self.action in ('update', 'partial_update', 'destroy'):
             return [IsOwnerOrInstitutional()]
-        if self.action in ('assign_dossier', 'bulk_create_team', 'transformer', 'reactiver', 'vue_mairie', 'vue_secteur'):
+        if self.action in ('assign_dossier', 'bulk_create_team', 'transformer', 'reactiver', 'vue_mairie', 'vue_secteur', 'valider_accueil_intervenants'):
             return [IsInstitutionalActor()]
         if self.action == 'affecter_stock':
             # Pas IsInstitutionalActor : un bénévole simple membre de l'équipe du point (voir
@@ -5994,6 +6004,31 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_id=offre.id,
             crise=offre.crisis,
             commentaire=f"Réactivation offre : {offre.title}",
+        )
+        return Response(OfferSerializer(offre, context={'request': request}).data)
+
+    @action(detail=True, methods=["post"], url_path='valider-accueil-intervenants')
+    def valider_accueil_intervenants(self, request, pk=None):
+        """Un acteur institutionnel confirme qu'une offre d'hébergement cochée "accueille des
+        intervenants" est réellement exploitable ("Logement intervenants", 24/09) -- tant que
+        cette validation n'a pas eu lieu, l'offre reste listée en attente, jamais proposée
+        comme logement disponible (on envoie quelqu'un chez un inconnu jamais vérifié sinon).
+        Idempotent : revalider une offre déjà validée se contente de mettre à jour qui/quand."""
+        offre = self.get_object()
+        if not offre.accueil_intervenants:
+            return Response(
+                {"error": "Cette offre ne propose pas d'accueillir des intervenants."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        offre.accueil_intervenants_valide_par = request.user
+        offre.accueil_intervenants_valide_le = timezone.now()
+        offre.save(update_fields=['accueil_intervenants_valide_par', 'accueil_intervenants_valide_le'])
+        audit_log(
+            request=request,
+            action_code="MODIFICATION",
+            objet_type="Offer",
+            objet_id=offre.id,
+            commentaire=f"Offre de logement intervenants validée : {offre.title}",
         )
         return Response(OfferSerializer(offre, context={'request': request}).data)
 

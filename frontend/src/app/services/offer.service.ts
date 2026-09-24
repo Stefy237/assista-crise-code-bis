@@ -89,6 +89,13 @@ export class OfferService {
     return this.http.post<Offer>(`${this.url}/${id}/reactiver/`, {});
   }
 
+  /** POST /api/offres/<id>/valider-accueil-intervenants/ — un acteur institutionnel confirme
+   * qu'une offre d'hébergement cochée "accueille des intervenants" est réellement exploitable
+   * (voir OfferViewSet.valider_accueil_intervenants, "Logement intervenants" 24/09). */
+  validerAccueilIntervenants(id: string): Observable<Offer> {
+    return this.http.post<Offer>(`${this.url}/${id}/valider-accueil-intervenants/`, {});
+  }
+
   /** GET /api/offres/vue_mairie/ — offres de la commune de l'institution de l'utilisateur
    * appelant (réservé institutionnel). */
   vueMairie(): Observable<Offer[]> {

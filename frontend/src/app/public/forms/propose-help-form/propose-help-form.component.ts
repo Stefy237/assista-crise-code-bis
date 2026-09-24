@@ -665,6 +665,8 @@ export class ProposeHelpFormComponent implements OnInit {
         formData.append('animaux_acceptes', String(!!v.animauxAcceptes));
         formData.append('jardin', String(!!v.jardin));
         formData.append('pmr_compatible', String(!!v.pmrCompatible));
+        formData.append('accueil_sinistres', String(!!v.accueilSinistres));
+        formData.append('accueil_intervenants', String(!!v.accueilIntervenants));
       }
       if (v.type === TYPE_SOINS && v.numeroAdeliRpps) formData.append('numero_adeli_rpps', v.numeroAdeliRpps);
       if (v.type === TYPE_TRANSPORT && v.transportType) formData.append('transport_type', v.transportType);
@@ -886,6 +888,8 @@ export class ProposeHelpFormComponent implements OnInit {
       animauxAcceptes: [false],
       jardin: [false],
       pmrCompatible: [false],
+      accueilSinistres: [true],
+      accueilIntervenants: [false],
       numeroAdeliRpps: [''],
       transportType: [''],
       transportAnimauxPrecision: ['', transportAnimauxPrecisionValidator],

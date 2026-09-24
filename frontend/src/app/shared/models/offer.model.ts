@@ -48,6 +48,11 @@ export interface Offer {
   animaux_acceptes?: boolean;
   jardin?: boolean;
   pmr_compatible?: boolean;
+  // "Logement intervenants" (24/09) : indépendantes, une offre peut cocher les deux.
+  accueil_sinistres?: boolean;
+  accueil_intervenants?: boolean;
+  accueil_intervenants_valide?: boolean;
+  accueil_intervenants_valide_le?: string | null;
   numero_adeli_rpps?: string | null;
   transport_type?: string | null;
   transport_animaux_precision?: string | null;

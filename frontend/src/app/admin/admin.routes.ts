@@ -1,6 +1,7 @@
 import { InstitutionsComponent } from './institutions/institutions.component';
 import { CrisesComponent } from './crises/crises.component';
 import { CentresComponent } from './centres/centres.component';
+import { LogementIntervenantsComponent } from './logement-intervenants/logement-intervenants.component';
 import { StocksComparaisonComponent } from './stocks-comparaison/stocks-comparaison.component';
 import { ZonesComponent } from './zones/zones.component';
 import { PlansComponent } from './plans/plans.component';
@@ -65,6 +66,7 @@ export const ADMIN_ROUTES: Routes = [
   { path: 'meshtastic-companions', component: MeshtasticCompanionsComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'meshtastic-canaux', component: MeshtasticCanauxComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'centres', component: CentresComponent, canActivate: [institutionalEffectiveGuard] },
+  { path: 'logement-intervenants', component: LogementIntervenantsComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'zones', component: ZonesComponent, canActivate: [institutionalEffectiveGuard, zonesGuard] },
   { path: 'plans', component: PlansComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'carte', component: MapComponent, canActivate: [institutionalEffectiveGuard] },

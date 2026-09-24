@@ -1,0 +1,125 @@
+<div class="logement-page">
+
+  <header class="page-header">
+    <div class="header-left">
+      <h1><span class="material-icons">night_shelter</span> Logement intervenants</h1>
+      <p class="subtitle">Où loger un bénévole ou un intervenant mobilisé plusieurs jours loin de chez lui — en centre ou chez un particulier.</p>
+    </div>
+    <button type="button" class="btn-primary" (click)="openCreateModal()">
+      <span class="material-icons">add</span> Nouveau centre d'hébergement
+    </button>
+  </header>
+
+  @if (errorMessage) {
+    <div class="toast toast-err"><span class="material-icons">error_outline</span> {{ errorMessage }}</div>
+  }
+
+  @if (isLoading) {
+    <div class="loading">Chargement...</div>
+  }
+
+  @if (!isLoading) {
+
+    <section class="section">
+      <h2><span class="material-icons">home_work</span> Centres / points d'accueil ({{ points.length }})</h2>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Centre</th>
+            <th>Commune</th>
+            <th>Responsable</th>
+            <th>Présents</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (point of points; track point.id) {
+            <tr (click)="openPointModal(point)">
+              <td>{{ point.nom }}</td>
+              <td>{{ point.commune_nom || '—' }}</td>
+              <td>{{ point.responsable_nom || '—' }}</td>
+              <td>{{ point.personnes_presentes ?? 0 }}</td>
+              <td class="actions"><span class="material-icons">chevron_right</span></td>
+            </tr>
+          } @empty {
+            <tr><td colspan="5" class="empty">Aucun centre d'hébergement déclaré.</td></tr>
+          }
+        </tbody>
+      </table>
+    </section>
+
+    @if (isAdmin && offresEnAttente.length > 0) {
+      <section class="section">
+        <h2><span class="material-icons">pending_actions</span> Offres de particuliers en attente de validation ({{ offresEnAttente.length }})</h2>
+        <p class="hint">Ces personnes ont proposé d'accueillir des intervenants — à vérifier avant de les proposer comme logement.</p>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Offre</th>
+              <th>Coordonnées</th>
+              <th>Commune</th>
+              <th>Capacité</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (offre of offresEnAttente; track offre.id) {
+              <tr>
+                <td>{{ offre.title }}</td>
+                <td>{{ offre.first_name_offer }} {{ offre.last_name_offer }} · {{ offre.email_offer }}</td>
+                <td>{{ offre.commune || '—' }}</td>
+                <td>{{ offre.capacite_adultes ?? '—' }} adulte(s), {{ offre.capacite_enfants ?? 0 }} enfant(s)</td>
+                <td class="actions">
+                  <button type="button" class="btn-secondary sm" [disabled]="validationEnCours === offre.id" (click)="valider(offre)">
+                    <span class="material-icons">check</span> Valider
+                  </button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </section>
+    }
+
+    <section class="section">
+      <h2><span class="material-icons">home</span> Offres de particuliers validées ({{ offresValidees.length }})</h2>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Offre</th>
+            <th>Coordonnées</th>
+            <th>Commune</th>
+            <th>Capacité</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (offre of offresValidees; track offre.id) {
+            <tr>
+              <td>{{ offre.title }}</td>
+              <td>{{ offre.first_name_offer }} {{ offre.last_name_offer }} · {{ offre.email_offer }}</td>
+              <td>{{ offre.commune || '—' }}</td>
+              <td>{{ offre.capacite_adultes ?? '—' }} adulte(s), {{ offre.capacite_enfants ?? 0 }} enfant(s)</td>
+            </tr>
+          } @empty {
+            <tr><td colspan="4" class="empty">Aucune offre validée pour l'instant.</td></tr>
+          }
+        </tbody>
+      </table>
+    </section>
+
+  }
+
+  @if (pointModalOpen) {
+    <app-point-modal
+      [crisisId]="editingPoint?.crise ?? null"
+      [pointTypes]="pointTypesHebergement"
+      [selectableInstitutions]="selectableInstitutions"
+      [isAdmin]="isAdmin"
+      [point]="editingPoint"
+      (saved)="onPointSaved()"
+      (closed)="closePointModal()"
+      (pointUpdated)="onPointUpdated($event)">
+    </app-point-modal>
+  }
+
+</div>

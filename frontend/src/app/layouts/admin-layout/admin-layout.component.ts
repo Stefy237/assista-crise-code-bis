@@ -76,6 +76,8 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
 
     { icon: 'home_work', label: 'Centres', route: '/admin/centres' },
 
+    { icon: 'night_shelter', label: 'Logement intervenants', route: '/admin/logement-intervenants' },
+
     { icon: 'layers', label: 'Zones', route: '/admin/zones' },
 
     // Dispositif pré-enregistré (PCS) : équipes/points/zones préparés à l'avance, activables
