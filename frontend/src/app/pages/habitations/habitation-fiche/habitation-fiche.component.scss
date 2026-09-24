@@ -1,0 +1,310 @@
+.fiche-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.fiche-panel {
+  width: min(480px, 100%);
+  height: 100%;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.2);
+}
+
+.fiche-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 1.25rem 1.25rem 0.5rem;
+  border-bottom: 1px solid #eee;
+
+  h2 { font-size: 1.15rem; margin: 0; padding-right: 1rem; }
+}
+
+.btn-fermer {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  color: #888;
+  &:hover { color: #333; }
+}
+
+.fiche-onglets {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid #eee;
+  overflow-x: auto;
+
+  button {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0.6rem 0.6rem;
+    font-size: 0.85rem;
+    color: #666;
+    cursor: pointer;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+
+    &.actif { color: #667eea; border-bottom-color: #667eea; font-weight: 600; }
+  }
+}
+
+.badge {
+  background: #ef4444;
+  color: white;
+  border-radius: 10px;
+  padding: 0 0.4rem;
+  font-size: 0.7rem;
+}
+
+.fiche-contenu {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.ligne-info {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0.75rem;
+
+  .label { font-size: 0.75rem; color: #888; text-transform: uppercase; }
+}
+
+.bloc-evaluation, .bloc-statut-lecture {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #eee;
+
+  h3 { font-size: 0.95rem; margin: 0 0 0.75rem; }
+
+  label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+
+    select, textarea {
+      display: block;
+      width: 100%;
+      margin-top: 0.3rem;
+      padding: 0.5rem;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 400;
+    }
+  }
+}
+
+.pastille-statut {
+  display: inline-block;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: white;
+
+  &[data-statut="NON_EVALUEE"] { background: #9ca3af; }
+  &[data-statut="PAS_DE_DEGATS"] { background: #22c55e; }
+  &[data-statut="DEGATS_FAIBLES"] { background: #f59e0b; }
+  &[data-statut="DEGATS_FORTS"] { background: #ef4444; }
+}
+
+.pastille-chantier {
+  margin-left: 0.5rem;
+  font-size: 0.8rem;
+  color: #555;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.55rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  &:disabled { opacity: 0.6; cursor: not-allowed; }
+}
+
+.btn-secondaire {
+  background: white;
+  border: 1px solid #667eea;
+  color: #667eea;
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+.ajout-photo {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.galerie {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+}
+
+.galerie-item {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #eee;
+
+  img { width: 100%; height: 120px; object-fit: cover; display: block; }
+}
+
+.galerie-legende {
+  font-size: 0.7rem;
+  color: #888;
+  padding: 0.3rem 0.4rem;
+}
+
+.vide {
+  color: #999;
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 1.5rem 0;
+}
+
+.liste-commentaires {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.commentaire {
+  background: #f8f9fb;
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+}
+
+.commentaire-auteur {
+  font-size: 0.75rem;
+  color: #888;
+  margin-bottom: 0.2rem;
+}
+
+.commentaire-texte {
+  font-size: 0.88rem;
+  white-space: pre-wrap;
+}
+
+.nouveau-commentaire {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  textarea {
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 0.88rem;
+  }
+
+  button { align-self: flex-end; }
+}
+
+.historique-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #f0f0f0;
+
+  &:last-child { border-bottom: none; }
+}
+
+.historique-evenement { font-size: 0.88rem; font-weight: 600; }
+.historique-meta { font-size: 0.75rem; color: #888; }
+.historique-commentaire { font-size: 0.85rem; margin-top: 0.2rem; color: #555; }
+
+.rattachement-item {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+
+  &[data-statut="ACCEPTE"] { border-left: 3px solid #22c55e; }
+  &[data-statut="REFUSE"] { border-left: 3px solid #ef4444; opacity: 0.7; }
+}
+
+.rattachement-contact, .rattachement-date { font-size: 0.78rem; color: #888; }
+.rattachement-message { font-size: 0.85rem; margin-top: 0.3rem; font-style: italic; }
+
+.rattachement-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.btn-accepter, .btn-refuser {
+  border: none;
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  color: white;
+}
+
+.btn-accepter { background: #22c55e; }
+.btn-refuser { background: #ef4444; }
+
+.rattachement-statut-badge {
+  font-size: 0.75rem;
+  color: #666;
+  white-space: nowrap;
+}
+
+.bloc-demande-rattachement {
+  .explication, .confirmation {
+    font-size: 0.85rem;
+    color: #555;
+    margin-bottom: 1rem;
+    line-height: 1.4;
+  }
+
+  .confirmation { color: #166534; }
+
+  label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+
+    input, select, textarea {
+      display: block;
+      width: 100%;
+      margin-top: 0.3rem;
+      padding: 0.5rem;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 400;
+      box-sizing: border-box;
+    }
+  }
+}

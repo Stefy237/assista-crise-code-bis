@@ -18,6 +18,7 @@ import re
 
 from django.conf import settings
 from django.contrib import admin
+from django.contrib.auth import views as auth_views
 from django.http import HttpResponseForbidden
 from django.urls import path, re_path, include
 from django.views.static import serve as serve_static
@@ -32,6 +33,13 @@ urlpatterns = [
 
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+
+    # SSO Matrix (voir core/oidc.py, config OAUTH2_PROVIDER) -- /o/authorize/ exige une session
+    # Django classique (cookie), contrairement au reste de l'appli qui n'utilise que des JWT :
+    # login/ ci-dessous fournit ce pont, pour N'IMPORTE QUEL utilisateur actif (contrairement
+    # à /django-admin/login/, réservé aux is_staff).
+    path('accounts/login/', auth_views.LoginView.as_view(template_name='core/login_oidc.html'), name='login'),
+    path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
 ]
 
 # Préfixes sous MEDIA_ROOT qui ne doivent JAMAIS être servis en direct — chacun n'est

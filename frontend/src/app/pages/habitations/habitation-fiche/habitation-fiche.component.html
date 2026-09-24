@@ -1,0 +1,216 @@
+<div class="fiche-overlay" (click)="fermerFiche()">
+  <div class="fiche-panel" (click)="$event.stopPropagation()">
+
+    <div class="fiche-header">
+      <h2>{{ habitation.adresse }}</h2>
+      <button class="btn-fermer" (click)="fermerFiche()">&times;</button>
+    </div>
+
+    <div class="fiche-onglets">
+      <button [class.actif]="onglet === 'details'" (click)="changerOnglet('details')">Détails</button>
+      <button [class.actif]="onglet === 'photos'" (click)="changerOnglet('photos')">Photos ({{ photos.length }})</button>
+      <button [class.actif]="onglet === 'commentaires'" (click)="changerOnglet('commentaires')">Échanges ({{ commentaires.length }})</button>
+      @if (!lectureSeule) {
+        <button [class.actif]="onglet === 'historique'" (click)="changerOnglet('historique')">Historique</button>
+      }
+      @if (!lectureSeule) {
+        <button [class.actif]="onglet === 'rattachement'" (click)="changerOnglet('rattachement')">
+          Rattachement
+          @if (habitation.peut_gerer && habitation.nb_rattachements_en_attente > 0) {
+            <span class="badge">{{ habitation.nb_rattachements_en_attente }}</span>
+          }
+        </button>
+      }
+    </div>
+
+    <div class="fiche-contenu">
+
+      @if (onglet === 'details') {
+        <div class="bloc-infos">
+          <div class="ligne-info"><span class="label">Adresse</span><span>{{ habitation.adresse }}</span></div>
+          <div class="ligne-info">
+            <span class="label">Coordonnées GPS</span>
+            <span>{{ habitation.latitude | number:'1.5-5' }}, {{ habitation.longitude | number:'1.5-5' }}</span>
+          </div>
+          <div class="ligne-info">
+            <span class="label">Parcelle cadastrale</span>
+            <span>{{ habitation.parcelle_cadastrale || 'Non renseignée' }}</span>
+          </div>
+          @if (habitation.commune_nom) {
+            <div class="ligne-info"><span class="label">Commune</span><span>{{ habitation.commune_nom }}</span></div>
+          }
+          @if (habitation.zone_nom) {
+            <div class="ligne-info"><span class="label">Zone</span><span>{{ habitation.zone_nom }}</span></div>
+          }
+          @if (habitation.date_derniere_evaluation) {
+            <div class="ligne-info"><span class="label">Dernière évaluation</span><span>{{ habitation.date_derniere_evaluation | date:'dd/MM/yyyy HH:mm' }}</span></div>
+          }
+        </div>
+
+        @if (habitation.peut_gerer && !lectureSeule) {
+          <div class="bloc-evaluation">
+            <h3>Évaluation</h3>
+            <label>
+              État
+              <select [(ngModel)]="statutEvaluation">
+                @for (option of labelsEvaluation | keyvalue; track option.key) {
+                  <option [value]="option.key">{{ option.value }}</option>
+                }
+              </select>
+            </label>
+
+            @if (degatsConstates) {
+              <label>
+                Avancement du chantier
+                <select [(ngModel)]="statutChantier">
+                  <option [value]="null">— Non renseigné —</option>
+                  @for (option of labelsChantier | keyvalue; track option.key) {
+                    <option [value]="option.key">{{ option.value }}</option>
+                  }
+                </select>
+              </label>
+            }
+
+            <label>
+              Commentaire (optionnel, ajouté au fil d'échange)
+              <textarea [(ngModel)]="commentaireEvaluation" rows="2"></textarea>
+            </label>
+
+            <button class="btn-primary" [disabled]="enregistrementEnCours" (click)="enregistrerEvaluation()">
+              {{ enregistrementEnCours ? 'Enregistrement…' : 'Enregistrer l\'évaluation' }}
+            </button>
+          </div>
+        } @else {
+          <div class="bloc-statut-lecture">
+            <span class="pastille-statut" [attr.data-statut]="habitation.statut_evaluation">
+              {{ labelsEvaluation[habitation.statut_evaluation] }}
+            </span>
+            @if (habitation.statut_chantier) {
+              <span class="pastille-chantier">{{ labelsChantier[habitation.statut_chantier] }}</span>
+            }
+          </div>
+        }
+      }
+
+      @if (onglet === 'photos') {
+        <div class="bloc-photos">
+          @if (authService.getCurrentUser()) {
+            <div class="ajout-photo">
+              <input type="file" accept="image/*" (change)="onFichierChoisi($event)">
+              <button class="btn-secondaire" [disabled]="!fichierChoisi" (click)="televerserPhoto()">Ajouter la photo</button>
+            </div>
+          }
+          <div class="galerie">
+            @for (photo of photos; track photo.id) {
+              <div class="galerie-item">
+                @if (photoUrls[photo.id]) {
+                  <img [src]="photoUrls[photo.id]" [alt]="photo.nom_fichier">
+                }
+                <div class="galerie-legende">{{ photo.auteur_nom }} — {{ photo.date_upload | date:'dd/MM/yyyy' }}</div>
+              </div>
+            } @empty {
+              <p class="vide">Aucune photo pour le moment.</p>
+            }
+          </div>
+        </div>
+      }
+
+      @if (onglet === 'commentaires') {
+        <div class="bloc-commentaires">
+          <div class="liste-commentaires">
+            @for (c of commentaires; track c.id) {
+              <div class="commentaire">
+                <div class="commentaire-auteur">{{ c.auteur_nom }} — {{ c.date_creation | date:'dd/MM/yyyy HH:mm' }}</div>
+                <div class="commentaire-texte">{{ c.commentaire }}</div>
+              </div>
+            } @empty {
+              <p class="vide">Aucun échange pour le moment.</p>
+            }
+          </div>
+          <div class="nouveau-commentaire">
+            <textarea [(ngModel)]="nouveauCommentaire" rows="2" placeholder="Écrire un message…"></textarea>
+            <button class="btn-primary" [disabled]="!nouveauCommentaire.trim()" (click)="envoyerCommentaire()">Envoyer</button>
+          </div>
+        </div>
+      }
+
+      @if (onglet === 'historique') {
+        <div class="bloc-historique">
+          @for (h of historique; track h.id) {
+            <div class="historique-item">
+              <div class="historique-evenement">{{ h.evenement }}</div>
+              <div class="historique-meta">{{ h.auteur_nom }} — {{ h.date_creation | date:'dd/MM/yyyy HH:mm' }}</div>
+              @if (h.commentaire) { <div class="historique-commentaire">{{ h.commentaire }}</div> }
+            </div>
+          } @empty {
+            <p class="vide">Aucun historique.</p>
+          }
+        </div>
+      }
+
+      @if (onglet === 'rattachement') {
+        @if (habitation.peut_gerer) {
+          <div class="bloc-rattachements">
+            @for (r of rattachements; track r.id) {
+              <div class="rattachement-item" [attr.data-statut]="r.statut">
+                <div class="rattachement-info">
+                  <strong>{{ r.nom_demandeur }}</strong> — {{ r.type_lien === 'PROPRIETAIRE' ? 'Propriétaire' : 'Locataire' }}
+                  <div class="rattachement-contact">{{ r.email_demandeur }} @if (r.telephone_demandeur) { · {{ r.telephone_demandeur }} }</div>
+                  @if (r.message) { <div class="rattachement-message">{{ r.message }}</div> }
+                  <div class="rattachement-date">Demandé le {{ r.date_demande | date:'dd/MM/yyyy' }}</div>
+                </div>
+                @if (r.statut === 'EN_ATTENTE') {
+                  <div class="rattachement-actions">
+                    <button class="btn-accepter" (click)="accepterRattachement(r)">Accepter</button>
+                    <button class="btn-refuser" (click)="refuserRattachement(r)">Refuser</button>
+                  </div>
+                } @else {
+                  <span class="rattachement-statut-badge">{{ r.statut === 'ACCEPTE' ? 'Accepté' : 'Refusé' }}</span>
+                }
+              </div>
+            } @empty {
+              <p class="vide">Aucune demande de rattachement pour cette habitation.</p>
+            }
+          </div>
+        } @else {
+          <div class="bloc-demande-rattachement">
+            @if (demandeEnvoyee) {
+              <p class="confirmation">
+                Votre demande a bien été envoyée. Vous recevrez un email dès qu'elle aura été traitée,
+                avec un lien pour suivre l'avancement de votre dossier.
+              </p>
+            } @else {
+              <p class="explication">
+                Vous êtes propriétaire ou locataire de ce logement ? Faites-en la demande ci-dessous —
+                une fois acceptée par la collectivité ou l'association en charge, vous pourrez suivre
+                l'avancement et échanger directement ici, sans avoir besoin de créer de compte.
+              </p>
+              <label>Nom complet
+                <input type="text" [(ngModel)]="formRattachement.nom_demandeur">
+              </label>
+              <label>Email
+                <input type="email" [(ngModel)]="formRattachement.email_demandeur">
+              </label>
+              <label>Téléphone (optionnel)
+                <input type="tel" [(ngModel)]="formRattachement.telephone_demandeur">
+              </label>
+              <label>Vous êtes
+                <select [(ngModel)]="formRattachement.type_lien">
+                  <option value="PROPRIETAIRE">Propriétaire</option>
+                  <option value="LOCATAIRE">Locataire</option>
+                </select>
+              </label>
+              <label>Message (optionnel)
+                <textarea [(ngModel)]="formRattachement.message" rows="2"></textarea>
+              </label>
+              <button class="btn-primary" [disabled]="demandeEnCours" (click)="envoyerDemandeRattachement()">
+                {{ demandeEnCours ? 'Envoi…' : 'Envoyer la demande' }}
+              </button>
+            }
+          </div>
+        }
+      }
+
+    </div>
+  </div>
+</div>

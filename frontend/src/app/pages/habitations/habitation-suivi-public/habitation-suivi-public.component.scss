@@ -1,0 +1,16 @@
+.suivi-public {
+  min-height: 100vh;
+  background: #f4f5f7;
+}
+
+.etat-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  gap: 1rem;
+  color: #555;
+
+  a { color: #667eea; }
+}

@@ -52,6 +52,14 @@ from .views import (
     ImportPersonnelCommunalExempleView,
     ImportInstitutionsView,
     ImportInstitutionsExempleView,
+    HabitationViewSet,
+    HabitationCommentaireViewSet,
+    HabitationHistoriqueViewSet,
+    RattachementHabitationViewSet,
+    ImportHabitationsView,
+    ImportHabitationsExempleView,
+    SalonMatrixEquipeViewSet,
+    PositionMatrixView,
 )
 
 router = DefaultRouter()
@@ -95,6 +103,7 @@ router.register(r'conflits-synchronisation', ConflitSynchronisationViewSet)
 router.register(r'relais-meshcore', RelaisMeshCoreViewSet)
 router.register(r'canaux-meshcore', CanalMeshCoreViewSet)
 router.register(r'messages-canal-meshcore', MessageCanalMeshCoreViewSet)
+router.register(r'salons-matrix', SalonMatrixEquipeViewSet)
 router.register(r'contacts-meshcore', ContactMeshCoreViewSet)
 
 router.register(r'compagnons-meshtastic', CompagnonMeshtasticViewSet)
@@ -175,6 +184,10 @@ router.register(r'recherches-personnes-photos', RecherchePersonnePhotoViewSet)
 router.register(r'recherches-personnes-commentaires-photos',RecherchePersonneCommentairePhotoViewSet)
 router.register(r'zones', ZoneViewSet)
 router.register(r'plans', PlanViewSet)
+router.register(r'habitations', HabitationViewSet)
+router.register(r'habitations-commentaires', HabitationCommentaireViewSet)
+router.register(r'habitations-historique', HabitationHistoriqueViewSet)
+router.register(r'rattachements-habitations', RattachementHabitationViewSet)
 router.register(r'plans-missions-modeles', PlanMissionModeleViewSet)
 
 urlpatterns = [
@@ -202,8 +215,11 @@ urlpatterns = [
     path('imports/personnel-communal/exemple/', ImportPersonnelCommunalExempleView.as_view(), name='import_personnel_communal_exemple'),
     path('imports/institutions/', ImportInstitutionsView.as_view(), name='import_institutions'),
     path('imports/institutions/exemple/', ImportInstitutionsExempleView.as_view(), name='import_institutions_exemple'),
+    path('imports/habitations/', ImportHabitationsView.as_view(), name='import_habitations'),
+    path('imports/habitations/exemple/', ImportHabitationsExempleView.as_view(), name='import_habitations_exemple'),
     path('ma-position/', MaPositionView.as_view(), name='ma_position'),
     path('positions-equipes/', PositionsEquipesView.as_view(), name='positions_equipes'),
+    path('matrix/positions/', PositionMatrixView.as_view(), name='matrix_positions'),
     
     # URLs pour la suppression via token
     path('delete-request/<str:token>/', DeleteRequestView.as_view(), name='delete_request'),

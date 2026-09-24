@@ -222,3 +222,133 @@ def exemple_csv_institutions() -> str:
     writer.writerow(["Mairie d'Exemple-sur-Loire", "Mairie", "", "0100000000", "mairie@exemple.fr", "1 place de la Mairie"])
     writer.writerow(["Croix-Rouge locale", "Association", "Antenne locale", "0100000001", "contact@croix-rouge-exemple.fr", ""])
     return buffer.getvalue()
+
+
+CHAMPS_HABITATIONS = ["adresse", "latitude", "longitude", "parcelle_cadastrale", "commune_code", "commune_nom"]
+
+LABELS_HABITATIONS = {
+    "adresse": "Adresse postale",
+    "latitude": "Latitude (optionnel, géocodée via la BAN si absente)",
+    "longitude": "Longitude (optionnel, géocodée via la BAN si absente)",
+    "parcelle_cadastrale": "Parcelle cadastrale (optionnel, complétée via le cadastre IGN si absente)",
+    "commune_code": "Code commune INSEE (optionnel)",
+    "commune_nom": "Commune (optionnel)",
+}
+
+
+def _geocoder_adresse(adresse: str):
+    """Géocodage ponctuel d'une adresse texte via la BAN -- utilisé uniquement quand le CSV
+    fourni n'a pas déjà latitude/longitude (cas normal : le partenaire fournit un export déjà
+    géolocalisé). Best-effort : ne lève jamais, renvoie (None, None, None, None) en échec."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    try:
+        url = "https://api-adresse.data.gouv.fr/search/?q=" + urllib.parse.quote(adresse) + "&limit=1"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        feature = (data.get("features") or [None])[0]
+        if not feature:
+            return None, None, None, None
+        lon, lat = feature["geometry"]["coordinates"]
+        props = feature.get("properties", {})
+        return lat, lon, props.get("citycode"), props.get("city")
+    except Exception:
+        return None, None, None, None
+
+
+def _parcelle_cadastrale_via_point(lat, lon):
+    """Identifiant de parcelle (ex: 33333000BK0034) via IGN APICarto cadastre, par point GPS --
+    best-effort, ne lève jamais."""
+    import json
+    import urllib.request
+
+    try:
+        payload = json.dumps({"geom": {"type": "Point", "coordinates": [lon, lat]}}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://apicarto.ign.fr/api/cadastre/parcelle",
+            data=payload, headers={"Content-Type": "application/json"}, method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        feature = (data.get("features") or [None])[0]
+        if not feature:
+            return None
+        return feature["properties"].get("idu")
+    except Exception:
+        return None
+
+
+def importer_habitations(request, lignes, mapping, crise=None, zone=None):
+    """mapping : {champ_cible: colonne_source}, champ_cible parmi CHAMPS_HABITATIONS. adresse
+    obligatoire ; latitude/longitude/parcelle_cadastrale géocodés au besoin (voir
+    _geocoder_adresse/_parcelle_cadastrale_via_point) quand absents du fichier -- coûteux
+    (appel externe par ligne manquante), mais un import se fait une fois pour quelques centaines
+    de lignes au plus, pas à chaque lecture."""
+    from django.contrib.gis.geos import Point
+
+    from .audit import audit_log
+    from .models import Habitation
+    from .permissions import get_active_environment
+
+    crees, erreurs = [], []
+    for numero, ligne in enumerate(lignes, start=2):
+        adresse = _valeur(ligne, mapping, "adresse")
+        if not adresse:
+            erreurs.append({"ligne": numero, "message": "L'adresse est obligatoire."})
+            continue
+
+        lat_brut = _valeur(ligne, mapping, "latitude")
+        lon_brut = _valeur(ligne, mapping, "longitude")
+        commune_code = _valeur(ligne, mapping, "commune_code") or None
+        commune_nom = _valeur(ligne, mapping, "commune_nom") or None
+        parcelle = _valeur(ligne, mapping, "parcelle_cadastrale") or None
+
+        try:
+            lat = float(lat_brut) if lat_brut else None
+            lon = float(lon_brut) if lon_brut else None
+        except ValueError:
+            lat, lon = None, None
+
+        if lat is None or lon is None:
+            lat, lon, geocode_commune_code, geocode_commune_nom = _geocoder_adresse(adresse)
+            commune_code = commune_code or geocode_commune_code
+            commune_nom = commune_nom or geocode_commune_nom
+
+        if lat is None or lon is None:
+            erreurs.append({"ligne": numero, "message": "Coordonnées introuvables (ni fournies, ni géocodées)."})
+            continue
+
+        if not parcelle:
+            parcelle = _parcelle_cadastrale_via_point(lat, lon)
+
+        habitation = Habitation.objects.create(
+            adresse=adresse,
+            location=Point(lon, lat, srid=4326),
+            commune_code=commune_code,
+            commune_nom=commune_nom,
+            parcelle_cadastrale=parcelle,
+            crise=crise,
+            zone=zone,
+            environment=get_active_environment(request),
+        )
+        crees.append(habitation.adresse)
+
+    audit_log(
+        request=request,
+        action_code="IMPORT_LISTE",
+        objet_type="Habitation",
+        objet_id=None,
+        commentaire=f"Import référencement des dégâts : {len(crees)} habitation(s) créée(s), {len(erreurs)} erreur(s)",
+    )
+    return {"crees": len(crees), "erreurs": erreurs}
+
+
+def exemple_csv_habitations() -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";")
+    writer.writerow(list(LABELS_HABITATIONS.values()))
+    writer.writerow(["12 rue des Halliers, 33680 Le Porge", "44.874028", "-1.103645", "", "33333", "Le Porge"])
+    writer.writerow(["4 lotissement Plein Soleil, 33680 Le Porge", "", "", "", "", ""])
+    return buffer.getvalue()

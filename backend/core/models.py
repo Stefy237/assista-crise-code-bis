@@ -1853,6 +1853,14 @@ class Document(EnvironmentScopedModel):
         related_name="documents"
     )
 
+    habitation = models.ForeignKey(
+        "Habitation",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="documents"
+    )
+
     def __str__(self):
         return str(self.id)
 
@@ -1892,6 +1900,184 @@ class Zone(EnvironmentScopedModel):
 
     def __str__(self) -> str:
         return self.nom
+
+
+class StatutEvaluationHabitation(models.TextChoices):
+    NON_EVALUEE = "NON_EVALUEE", "Non évaluée"
+    PAS_DE_DEGATS = "PAS_DE_DEGATS", "Pas de dégâts"
+    DEGATS_FAIBLES = "DEGATS_FAIBLES", "Dégâts faibles"
+    DEGATS_FORTS = "DEGATS_FORTS", "Dégâts forts"
+
+
+class StatutChantierHabitation(models.TextChoices):
+    A_DEBLAYER = "A_DEBLAYER", "À déblayer"
+    NETTOYAGE_EN_COURS = "NETTOYAGE_EN_COURS", "Nettoyage / déblaiement en cours"
+    TERMINE = "TERMINE", "Chantier terminé"
+
+
+class Habitation(EnvironmentScopedModel):
+    """Référencement des dégâts par bâtiment (ex: Le Porge, 255 habitations sinistrées) —
+    point sur la carte dont la couleur reflète `statut_evaluation`, complété par
+    `statut_chantier` une fois des dégâts constatés. Alimenté soit par import CSV fourni par la
+    collectivité (voir ImportHabitationsView), soit à terme par un lookup BAN automatique sur
+    la commune/zone (voir doc de conception -- non encore implémenté)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    crise = models.ForeignKey(
+        "Crisis", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="habitations",
+        help_text="Crise à laquelle ce référencement est rattaché, si applicable.",
+    )
+
+    zone = models.ForeignKey(
+        Zone, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="habitations",
+        help_text="Regroupement (quartier/secteur) pour le filtrage de la vue de suivi.",
+    )
+
+    adresse = models.TextField()
+
+    # Dénormalisé pour réutiliser zone_scoping.py (filtrage par commune/secteur de
+    # l'institution) tel quel, comme Request/Offer -- voir SECTEUR_CHAMP_PAR_NIVEAU.
+    commune_code = models.CharField(max_length=10, blank=True, null=True)
+    commune_nom = models.CharField(max_length=255, blank=True, null=True)
+
+    location = gis_models.PointField(srid=4326, null=True, blank=True)
+
+    parcelle_cadastrale = models.CharField(
+        max_length=20, blank=True, null=True,
+        help_text="Identifiant cadastral (ex: 33333000BK0034) -- IGN APICarto cadastre si absent de la BAN.",
+    )
+
+    ban_id = models.CharField(
+        max_length=64, blank=True, null=True,
+        help_text="Identifiant BAN de l'adresse, pour rafraîchissement/déduplication ultérieurs.",
+    )
+
+    statut_evaluation = models.CharField(
+        max_length=20,
+        choices=StatutEvaluationHabitation.choices,
+        default=StatutEvaluationHabitation.NON_EVALUEE,
+    )
+
+    statut_chantier = models.CharField(
+        max_length=20,
+        choices=StatutChantierHabitation.choices,
+        null=True, blank=True,
+        help_text="Uniquement pertinent si statut_evaluation indique des dégâts.",
+    )
+
+    evalue_par = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="habitations_evaluees",
+    )
+
+    date_derniere_evaluation = models.DateTimeField(null=True, blank=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    modifie_le = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.adresse
+
+
+class HabitationCommentaire(EnvironmentScopedModel):
+    """Fil d'échange sur une habitation -- visible à la fois par les agents et par un
+    participant dont le RattachementHabitation a été accepté (voir populate côté vue), pour
+    permettre l'échange régulateur <-> propriétaire/locataire demandé explicitement."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    habitation = models.ForeignKey(Habitation, on_delete=models.CASCADE, related_name="commentaires")
+
+    auteur = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    commentaire = models.TextField()
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.habitation.adresse}"
+
+
+class HabitationHistorique(EnvironmentScopedModel):
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    habitation = models.ForeignKey(Habitation, on_delete=models.CASCADE, related_name="historique")
+
+    auteur = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    evenement = models.CharField(max_length=255)
+
+    commentaire = models.TextField(blank=True, null=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.evenement
+
+
+class TypeLienHabitation(models.TextChoices):
+    PROPRIETAIRE = "PROPRIETAIRE", "Propriétaire"
+    LOCATAIRE = "LOCATAIRE", "Locataire"
+
+
+class StatutRattachementHabitation(models.TextChoices):
+    EN_ATTENTE = "EN_ATTENTE", "En attente"
+    ACCEPTE = "ACCEPTE", "Accepté"
+    REFUSE = "REFUSE", "Refusé"
+
+
+class RattachementHabitation(EnvironmentScopedModel):
+    """Demande d'un particulier ou d'une entreprise de se réclamer propriétaire ou locataire
+    d'une habitation référencée -- déposée SANS compte obligatoire (comme un signalement
+    public, voir InformationViewSet), le suivi étant ensuite accessible par magic-link (même
+    mécanisme que dossier-suivi, voir build_magic_link) ou par un compte classique si le
+    demandeur en a un. Les deux types de lien peuvent coexister pour une même habitation (un
+    propriétaire ET un locataire), d'où l'absence de contrainte d'unicité stricte -- seule la
+    vue empêche une nouvelle demande EN_ATTENTE identique (même email + même type de lien)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    habitation = models.ForeignKey(Habitation, on_delete=models.CASCADE, related_name="rattachements")
+
+    # Rempli si le demandeur avait déjà un compte au moment de la demande, ou dès qu'il se
+    # connecte avec l'email correspondant -- jamais requis pour déposer la demande elle-même.
+    utilisateur = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="rattachements_habitations",
+    )
+
+    nom_demandeur = models.CharField(max_length=255)
+    email_demandeur = models.EmailField()
+    telephone_demandeur = models.CharField(max_length=20, blank=True, null=True)
+
+    type_lien = models.CharField(max_length=20, choices=TypeLienHabitation.choices)
+
+    statut = models.CharField(
+        max_length=20,
+        choices=StatutRattachementHabitation.choices,
+        default=StatutRattachementHabitation.EN_ATTENTE,
+    )
+
+    message = models.TextField(
+        blank=True, null=True,
+        help_text="Complément fourni par le demandeur (justificatif à venir, précisions...).",
+    )
+
+    date_demande = models.DateTimeField(auto_now_add=True)
+
+    traite_par = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="rattachements_habitations_traites",
+    )
+    date_traitement = models.DateTimeField(null=True, blank=True)
+    motif_refus = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.nom_demandeur} ({self.type_lien}) -> {self.habitation.adresse}"
 
 
 class Team(EnvironmentScopedModel):
@@ -4128,6 +4314,64 @@ class CanalMeshCore(EnvironmentScopedModel):
 
     def __str__(self):
         return self.nom
+
+
+class SalonMatrixEquipe(EnvironmentScopedModel):
+    """Salon Matrix privé d'une équipe (SSO Element/Synapse, voir core/oidc.py) — équivalent
+    fonctionnel de CanalMeshCore ("1 équipe = 1 canal privé"), mais indépendant : MeshCore reste
+    en place pour son propre usage (portée radio hors réseau), Matrix sert aux échanges enrichis
+    et au positionnement PERMANENT en mission (contrairement au suivi MeshCore volontairement
+    limité aux missions EN_COURS pour préserver la batterie/le temps d'antenne, voir
+    boucle_positions_missions côté pont MeshCore -- aucune contrainte de ce type ici).
+
+    Provisionné explicitement (TeamViewSet.provisionner_salon_matrix), pas automatiquement à la
+    création de l'équipe -- une institution choisit d'activer Matrix pour cette équipe, même
+    logique opt-in que MeshCore. `room_id` reste vide tant que le pont ne l'a pas créé côté
+    Synapse (voir matrix-bridge/bridge.py, boucle_provisionnement_salons) ; une fois posé, le
+    pont resynchronise en continu les membres du salon sur `equipe.members`, sans autre action
+    manuelle (pas de notion de "régénération" ici, une invitation Matrix ne fuite pas comme une
+    clé partagée MeshCore)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    equipe = models.OneToOneField(
+        "Team", on_delete=models.CASCADE, related_name="salon_matrix",
+    )
+
+    room_id = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="Identifiant Matrix du salon (ex: !abc123:matrix.assista-crise.local), posé par le pont à la création.",
+    )
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    derniere_synchronisation = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Salon Matrix de {self.equipe.name}"
+
+
+class HistoriquePositionUtilisateur(EnvironmentScopedModel):
+    """Trace du déplacement d'un utilisateur pendant qu'il partage sa position en direct dans le
+    salon Matrix de son équipe (balise de position live Element/MSC3489, voir
+    matrix-bridge/bridge.py) — contrairement à DernierePositionUtilisateur (un seul
+    enregistrement écrasé, capture opportuniste ponctuelle), chaque mise à jour de balise est
+    conservée ici pour permettre à un régulateur de rejouer le trajet d'une équipe. Suivi
+    PERMANENT tant que le partage de position Element reste actif (demande explicite de
+    Sylvain, 23/09) — alimenté uniquement par le pont Matrix, jamais par le frontend Angular
+    (qui continue d'utiliser DernierePositionUtilisateur/MaPositionView pour la capture
+    opportuniste classique)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    utilisateur = models.ForeignKey(User, on_delete=models.CASCADE, related_name="historique_positions_matrix")
+    location = gis_models.PointField(srid=4326)
+    horodatage = models.DateTimeField()
+
+    class Meta:
+        ordering = ["-horodatage"]
+        indexes = [models.Index(fields=["utilisateur", "-horodatage"])]
+
+    def __str__(self):
+        return f"Position de {self.utilisateur} à {self.horodatage}"
 
 
 class MessageCanalMeshCore(EnvironmentScopedModel):

@@ -53,6 +53,7 @@ from .models import (
     ConflitSynchronisation,
     CanalMeshCore,
     MessageCanalMeshCore,
+    SalonMatrixEquipe,
     ContactMeshCore,
     CompagnonMeshtastic,
     CanalMeshtastic,
@@ -71,6 +72,11 @@ from .models import (
     Plan,
     PlanMissionModele,
     JournalCollectivite,
+    Habitation,
+    HabitationCommentaire,
+    HabitationHistorique,
+    RattachementHabitation,
+    StatutRattachementHabitation,
 )
 
 class RecherchePersonneCommentairePhotoSerializer(
@@ -1140,6 +1146,10 @@ class TeamSerializer(serializers.ModelSerializer):
     # chaque destinataire le configure lui-même sur son propre appareil.
     canal_meshtastic_id = serializers.CharField(source='canal_meshtastic.id', read_only=True, default=None)
     canal_meshtastic_nom = serializers.CharField(source='canal_meshtastic.nom', read_only=True, default=None)
+    # Salon Matrix privé de l'équipe (voir TeamViewSet.provisionner_salon_matrix) — même
+    # principe que canal_meshcore_id ci-dessus, indépendant.
+    salon_matrix_id = serializers.CharField(source='salon_matrix.id', read_only=True, default=None)
+    salon_matrix_room_id = serializers.CharField(source='salon_matrix.room_id', read_only=True, default=None)
 
     def get_canal_meshcore_provisionne(self, obj):
         canal = getattr(obj, 'canal_meshcore', None)
@@ -1192,6 +1202,8 @@ class TeamSerializer(serializers.ModelSerializer):
             'canal_meshcore_provisionne',
             'canal_meshtastic_id',
             'canal_meshtastic_nom',
+            'salon_matrix_id',
+            'salon_matrix_room_id',
         ]
         # institution_delegataire/equipe_parente ne sont pas modifiables ici : elles ne doivent
         # changer que via les actions dédiées (definir_delegation/retirer_delegation,
@@ -2809,6 +2821,28 @@ class RelaisMeshCoreSerializer(serializers.ModelSerializer):
         return instance
 
 
+class SalonMatrixEquipeSerializer(serializers.ModelSerializer):
+    """`membres` alimente directement le pont matrix-bridge (identifiants Matrix déterministes
+    des membres actuels de l'équipe, voir core.matrix.matrix_user_id) -- lui évite de recalculer
+    la correspondance User -> Matrix lui-même, une seule source de vérité côté Django."""
+
+    equipe_nom = serializers.CharField(source='equipe.name', read_only=True)
+    membres = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalonMatrixEquipe
+        fields = ['id', 'equipe', 'equipe_nom', 'room_id', 'membres', 'date_creation', 'derniere_synchronisation']
+        read_only_fields = ['id', 'equipe', 'date_creation']
+
+    def get_membres(self, obj):
+        from .matrix import matrix_user_id
+        return [
+            {"id": str(m.id), "matrix_user_id": matrix_user_id(m),
+             "nom": f"{m.first_name} {m.last_name}".strip() or m.email}
+            for m in obj.equipe.members.filter(is_active=True)
+        ]
+
+
 class CanalMeshCoreSerializer(serializers.ModelSerializer):
     institution_nom = serializers.CharField(source='institution.nom', read_only=True, default=None)
     crise_nom = serializers.CharField(source='crise.name', read_only=True, default=None)
@@ -3008,5 +3042,101 @@ class ConflitSynchronisationSerializer(serializers.ModelSerializer):
             'satellite', 'modele', 'objet_id', 'payload_local', 'etat_central_au_conflit',
             'statut', 'resolu_le', 'resolu_par',
         ]
+
+
+class HabitationCommentaireSerializer(serializers.ModelSerializer):
+
+    auteur_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HabitationCommentaire
+        fields = "__all__"
+        extra_kwargs = {'auteur': {'read_only': True}}
+
+    def get_auteur_nom(self, obj):
+        if not obj.auteur:
+            return "Inconnu"
+        return (f"{obj.auteur.first_name} {obj.auteur.last_name}").strip() or obj.auteur.username
+
+
+class HabitationHistoriqueSerializer(serializers.ModelSerializer):
+
+    auteur_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HabitationHistorique
+        fields = "__all__"
+
+    def get_auteur_nom(self, obj):
+        if not obj.auteur:
+            return "Système"
+        return (f"{obj.auteur.first_name} {obj.auteur.last_name}").strip() or obj.auteur.username
+
+
+class HabitationSerializer(serializers.ModelSerializer):
+    """`latitude`/`longitude` en lecture/écriture séparées -- même convention que
+    PointOperationnelSerializer -- plutôt que le PointField brut, pour rester cohérent avec ce
+    que le frontend consomme déjà partout ailleurs pour placer un marqueur sur la carte."""
+
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+    zone_nom = serializers.CharField(source="zone.nom", read_only=True, default=None)
+    nb_rattachements_en_attente = serializers.SerializerMethodField()
+    peut_gerer = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Habitation
+        fields = "__all__"
+        read_only_fields = ['evalue_par', 'date_derniere_evaluation', 'date_creation', 'modifie_le']
+
+    def get_latitude(self, obj):
+        return obj.location.y if obj.location else None
+
+    def get_longitude(self, obj):
+        return obj.location.x if obj.location else None
+
+    def get_nb_rattachements_en_attente(self, obj):
+        return obj.rattachements.filter(statut=StatutRattachementHabitation.EN_ATTENTE).count()
+
+    def get_peut_gerer(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        from .habitations import institution_accede_commune
+        return institution_accede_commune(request, obj.commune_code)
+
+    def create(self, validated_data):
+        latitude = self.initial_data.get('latitude')
+        longitude = self.initial_data.get('longitude')
+        if latitude is not None and longitude is not None:
+            from django.contrib.gis.geos import Point
+            validated_data['location'] = Point(float(longitude), float(latitude), srid=4326)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        latitude = self.initial_data.get('latitude')
+        longitude = self.initial_data.get('longitude')
+        if latitude is not None and longitude is not None:
+            from django.contrib.gis.geos import Point
+            validated_data['location'] = Point(float(longitude), float(latitude), srid=4326)
+        return super().update(instance, validated_data)
+
+
+class RattachementHabitationSerializer(serializers.ModelSerializer):
+
+    habitation_adresse = serializers.CharField(source="habitation.adresse", read_only=True)
+    traite_par_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RattachementHabitation
+        fields = "__all__"
+        read_only_fields = [
+            'utilisateur', 'statut', 'traite_par', 'date_traitement', 'motif_refus', 'date_demande',
+        ]
+
+    def get_traite_par_nom(self, obj):
+        if not obj.traite_par:
+            return None
+        return (f"{obj.traite_par.first_name} {obj.traite_par.last_name}").strip() or obj.traite_par.username
 
 

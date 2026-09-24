@@ -1,0 +1,17 @@
+{
+  "default_server_config": {
+    "m.homeserver": {
+      "base_url": "http://172.16.1.113:8008",
+      "server_name": "matrix.assista-crise.local"
+    }
+  },
+  "brand": "Assista-Crise Messagerie",
+  "disable_custom_urls": true,
+  "disable_guests": true,
+  "disable_3pid_login": true,
+  "sso_redirect_options": {
+    "immediate": true
+  },
+  "default_country_code": "FR",
+  "default_theme": "light"
+}

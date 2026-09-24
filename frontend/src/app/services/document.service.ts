@@ -17,8 +17,11 @@ export class DocumentService {
     private http: HttpClient
   ) {}
 
-  getAll(): Observable<DossierDocument[]> {
-    return this.http.get<DossierDocument[]>(this.apiUrl);
+  getAll(params: { dossier?: string; habitation?: string; demande?: string; offre?: string } = {}): Observable<DossierDocument[]> {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => { if (v) query.set(k, v); });
+    const suffix = query.toString();
+    return this.http.get<DossierDocument[]>(`${this.apiUrl}${suffix ? '?' + suffix : ''}`);
   }
 
   create(formData: FormData): Observable<DossierDocument> {

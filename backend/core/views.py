@@ -63,10 +63,13 @@ from django.contrib.gis.measure import D
 from .imports import (
     CHAMPS_PERSONNEL_COMMUNAL,
     CHAMPS_INSTITUTIONS,
+    CHAMPS_HABITATIONS,
     exemple_csv_personnel_communal,
     exemple_csv_institutions,
+    exemple_csv_habitations,
     importer_personnel_communal,
     importer_institutions,
+    importer_habitations,
     parse_fichier,
 )
 from .pagination import OptionalPageNumberPagination, InstitutionPagination
@@ -167,11 +170,21 @@ from .models import (
     EngagementRessource, StatutEngagementRessource,
     Status,
     DernierePositionUtilisateur,
+    SalonMatrixEquipe,
+    HistoriquePositionUtilisateur,
     Zone,
     Plan,
     PlanMissionModele,
     JournalCollectivite,
     Commune,
+    Habitation,
+    HabitationCommentaire,
+    HabitationHistorique,
+    RattachementHabitation,
+    StatutRattachementHabitation,
+    TypeLienHabitation,
+    StatutEvaluationHabitation,
+    StatutChantierHabitation,
 )
 
 
@@ -363,6 +376,7 @@ from .serializers import (
     ConflitSynchronisationSerializer,
     CanalMeshCoreSerializer,
     MessageCanalMeshCoreSerializer,
+    SalonMatrixEquipeSerializer,
     ContactMeshCoreSerializer,
     CompagnonMeshtasticSerializer,
     NoeudUtilisateurMeshtasticSerializer,
@@ -391,6 +405,10 @@ from .serializers import (
     ZoneSerializer,
     PlanSerializer,
     PlanMissionModeleSerializer,
+    HabitationSerializer,
+    HabitationCommentaireSerializer,
+    HabitationHistoriqueSerializer,
+    RattachementHabitationSerializer,
 )
 
 class TagLikeViewSetMixin:
@@ -3928,6 +3946,415 @@ def _instancier_mission_modele(request, modele, team, crise):
     return dossier
 
 
+class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Référencement des dégâts par bâtiment (voir Habitation.__doc__). Lecture publique
+    (AllowAny) -- la carte et la recherche d'adresse pour le rattachement propriétaire/locataire
+    doivent rester consultables sans compte, comme le reste des calques carte publics de
+    l'appli (voir GlobalMapComponent) ; seules la création/modification/évaluation sont
+    réservées à une collectivité locale ou une association déléguée (voir habitations.py)."""
+
+    queryset = Habitation.objects.select_related('zone', 'crise', 'evalue_par').all()
+    serializer_class = HabitationSerializer
+    filterset_fields = ['crise', 'zone', 'commune_code', 'statut_evaluation', 'statut_chantier']
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        recherche = self.request.query_params.get('recherche')
+        if recherche:
+            qs = qs.filter(adresse__icontains=recherche)
+        return qs
+
+    def _refuser_si_non_accede(self, commune_code):
+        from .habitations import institution_accede_commune
+        if not institution_accede_commune(self.request, commune_code):
+            raise PermissionDenied(
+                "Vous n'avez pas de délégation pour gérer les habitations de cette commune."
+            )
+
+    def perform_create(self, serializer):
+        commune_code = serializer.validated_data.get('commune_code')
+        if not commune_code:
+            location = serializer.validated_data.get('location')
+            if location:
+                commune_code = commune_code_from_point(location)
+                serializer.validated_data['commune_code'] = commune_code
+        self._refuser_si_non_accede(commune_code)
+        habitation = serializer.save(environment=get_active_environment(self.request))
+        HabitationHistorique.objects.create(
+            habitation=habitation, auteur=self.request.user, evenement="Habitation référencée",
+            environment=habitation.environment,
+        )
+        audit_log(
+            request=self.request, action_code="CREATION", objet_type="Habitation",
+            objet_id=habitation.id, commentaire=f"Référencement : {habitation.adresse}",
+        )
+
+    def perform_update(self, serializer):
+        self._refuser_si_non_accede(serializer.instance.commune_code)
+        habitation = serializer.save()
+        audit_log(
+            request=self.request, action_code="MODIFICATION", objet_type="Habitation",
+            objet_id=habitation.id, commentaire=f"Modification : {habitation.adresse}",
+        )
+
+    def perform_destroy(self, instance):
+        self._refuser_si_non_accede(instance.commune_code)
+        audit_log(
+            request=self.request, action_code="SUPPRESSION", objet_type="Habitation",
+            objet_id=instance.id, commentaire=f"Suppression : {instance.adresse}",
+        )
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def evaluer(self, request, pk=None):
+        """Pose statut_evaluation (obligatoire) et statut_chantier (optionnel, pertinent
+        seulement si dégâts constatés) en un seul appel, avec traçabilité systématique dans
+        l'historique -- plutôt qu'un simple PATCH, pour ne jamais perdre le "qui/quand" d'une
+        évaluation terrain au profit d'un champ modifié en silence."""
+        habitation = self.get_object()
+        self._refuser_si_non_accede(habitation.commune_code)
+
+        statut_evaluation = request.data.get('statut_evaluation')
+        if statut_evaluation not in StatutEvaluationHabitation.values:
+            return Response({"error": "statut_evaluation invalide."}, status=status.HTTP_400_BAD_REQUEST)
+        statut_chantier = request.data.get('statut_chantier') or None
+        if statut_chantier and statut_chantier not in StatutChantierHabitation.values:
+            return Response({"error": "statut_chantier invalide."}, status=status.HTTP_400_BAD_REQUEST)
+        if statut_evaluation in (StatutEvaluationHabitation.NON_EVALUEE, StatutEvaluationHabitation.PAS_DE_DEGATS):
+            statut_chantier = None  # pas de chantier sans dégâts constatés
+
+        habitation.statut_evaluation = statut_evaluation
+        habitation.statut_chantier = statut_chantier
+        habitation.evalue_par = request.user
+        habitation.date_derniere_evaluation = timezone.now()
+        habitation.save(update_fields=[
+            'statut_evaluation', 'statut_chantier', 'evalue_par', 'date_derniere_evaluation', 'modifie_le',
+        ])
+
+        commentaire = request.data.get('commentaire')
+        if commentaire:
+            HabitationCommentaire.objects.create(
+                habitation=habitation, auteur=request.user, commentaire=commentaire,
+                environment=habitation.environment,
+            )
+
+        HabitationHistorique.objects.create(
+            habitation=habitation, auteur=request.user,
+            evenement=f"Évaluation : {habitation.get_statut_evaluation_display()}"
+                      + (f" — {habitation.get_statut_chantier_display()}" if statut_chantier else ""),
+            environment=habitation.environment,
+        )
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="Habitation",
+            objet_id=habitation.id,
+            commentaire=f"Évaluation : {habitation.adresse} -> {statut_evaluation}",
+        )
+        return Response(HabitationSerializer(habitation, context={'request': request}).data)
+
+    @action(detail=False, methods=['post'], url_path='estimation-ban')
+    def estimation_ban(self, request):
+        """Référence automatiquement toutes les adresses d'UNE commune via la BAN (voir
+        habitations.scanner_ban_commune) -- pas de CSV nécessaire. Périmètre plafonné à cette
+        commune quoi qu'il arrive ; si `crise` est fournie et a une zone dessinée
+        (Crisis.zone_secteurs), elle restreint encore le résultat. `zone` (optionnelle) désigne
+        une Zone nommée du catalogue de l'institution (ex: "Quartier Nord") pour restreindre
+        encore À L'INTÉRIEUR de la commune -- les deux se combinent, aucune n'élargit jamais."""
+        from .habitations import institution_accede_commune, perimetre_scan, scanner_ban_commune
+
+        commune_code = (request.data.get('commune_code') or '').strip()
+        if not commune_code:
+            return Response({"error": "commune_code est obligatoire."}, status=status.HTTP_400_BAD_REQUEST)
+        self._refuser_si_non_accede(commune_code)
+
+        crise = None
+        crise_id = request.data.get('crise')
+        if crise_id:
+            crise = Crisis.objects.filter(pk=crise_id).first()
+            if crise is None:
+                return Response({"error": "Crise introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+
+        zone = None
+        zone_id = request.data.get('zone')
+        if zone_id:
+            zone = Zone.objects.filter(pk=zone_id).first()
+            if zone is None:
+                return Response({"error": "Zone introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+
+        resultat = scanner_ban_commune(commune_code, polygone_limite=perimetre_scan(crise, zone))
+        if resultat["erreur"]:
+            return Response({"error": resultat["erreur"]}, status=status.HTTP_502_BAD_GATEWAY)
+
+        from django.contrib.gis.geos import Point
+
+        deja_connus = set(
+            Habitation.objects.filter(commune_code=commune_code, ban_id__isnull=False)
+            .values_list('ban_id', flat=True)
+        )
+        environment = get_active_environment(request)
+        creees = 0
+        for adresse in resultat["adresses"]:
+            if adresse["ban_id"] and adresse["ban_id"] in deja_connus:
+                continue  # déjà référencée lors d'un précédent scan -- pas de doublon
+            Habitation.objects.create(
+                adresse=adresse["adresse"],
+                location=Point(adresse["lon"], adresse["lat"], srid=4326),
+                commune_code=commune_code,
+                parcelle_cadastrale=adresse["parcelle_cadastrale"],
+                ban_id=adresse["ban_id"],
+                crise=crise,
+                zone=zone,
+                environment=environment,
+            )
+            creees += 1
+
+        audit_log(
+            request=request, action_code="IMPORT_LISTE", objet_type="Habitation", objet_id=None,
+            commentaire=(
+                f"Estimation BAN commune {commune_code} : {creees} habitation(s) créée(s) sur "
+                f"{len(resultat['adresses'])} adresse(s) trouvée(s) ({resultat['voies_totales']} voie(s), "
+                f"{resultat['voies_en_echec']} en échec)"
+            ),
+        )
+        return Response({
+            "creees": creees,
+            "adresses_trouvees": len(resultat["adresses"]),
+            "voies_totales": resultat["voies_totales"],
+            "voies_en_echec": resultat["voies_en_echec"],
+        })
+
+
+class HabitationCommentaireViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Fil d'échange régulateur <-> propriétaire/locataire -- accès en lecture/écriture
+    conditionné soit à la délégation sur la commune (agent), soit à un rattachement ACCEPTE
+    pour cette habitation précise (particulier/entreprise), voir _accede."""
+
+    queryset = HabitationCommentaire.objects.select_related('auteur', 'habitation').all()
+    serializer_class = HabitationCommentaireSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filterset_fields = ['habitation']
+
+    def _accede(self, habitation):
+        from .habitations import institution_accede_commune
+        if institution_accede_commune(self.request, habitation.commune_code):
+            return True
+        return RattachementHabitation.objects.filter(
+            habitation=habitation, utilisateur=self.request.user,
+            statut=StatutRattachementHabitation.ACCEPTE,
+        ).exists()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        habitation_id = self.request.query_params.get('habitation')
+        if not habitation_id:
+            return qs.none()
+        habitation = get_object_or_404(Habitation, pk=habitation_id)
+        if not self._accede(habitation):
+            return qs.none()
+        return qs.filter(habitation=habitation)
+
+    def perform_create(self, serializer):
+        habitation = serializer.validated_data.get('habitation')
+        if not self._accede(habitation):
+            raise PermissionDenied("Vous n'avez pas accès à cette habitation.")
+        serializer.save(auteur=self.request.user, environment=get_active_environment(self.request))
+
+
+class HabitationHistoriqueViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    queryset = HabitationHistorique.objects.select_related('auteur').all()
+    serializer_class = HabitationHistoriqueSerializer
+    filterset_fields = ['habitation']
+
+
+class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Demande de rattachement propriétaire/locataire -- création en libre-service, SANS compte
+    obligatoire (voir RattachementHabitation.__doc__), suivi ensuite par magic-link ou compte
+    classique une fois acceptée."""
+
+    queryset = RattachementHabitation.objects.select_related('habitation', 'utilisateur', 'traite_par').all()
+    serializer_class = RattachementHabitationSerializer
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        from .habitations import institution_accede_commune
+        qs = super().get_queryset()
+        habitation_id = self.request.query_params.get('habitation')
+        if habitation_id:
+            qs = qs.filter(habitation_id=habitation_id)
+        if get_effective_role(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        mes_communes = [
+            h.commune_code for h in Habitation.objects.filter(
+                pk__in=qs.values_list('habitation_id', flat=True)
+            ).distinct()
+            if institution_accede_commune(self.request, h.commune_code)
+        ]
+        return qs.filter(
+            Q(habitation__commune_code__in=mes_communes) | Q(utilisateur=self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        email = (serializer.validated_data.get('email_demandeur') or '').strip().lower()
+        if not email:
+            raise ValidationError({"email_demandeur": "Obligatoire."})
+        utilisateur = self.request.user if self.request.user.is_authenticated else None
+        statut_existant = RattachementHabitation.objects.filter(
+            habitation=serializer.validated_data.get('habitation'),
+            email_demandeur__iexact=email,
+            type_lien=serializer.validated_data.get('type_lien'),
+            statut=StatutRattachementHabitation.EN_ATTENTE,
+        ).exists()
+        if statut_existant:
+            raise ValidationError("Une demande identique est déjà en attente de traitement.")
+        rattachement = serializer.save(
+            utilisateur=utilisateur, email_demandeur=email,
+            environment=get_active_environment(self.request),
+        )
+        audit_log(
+            request=self.request, action_code="CREATION", objet_type="RattachementHabitation",
+            objet_id=rattachement.id,
+            commentaire=f"Demande de rattachement {rattachement.type_lien} : {email} -> {rattachement.habitation.adresse}",
+        )
+
+    def _traiter(self, request, pk, accepter: bool):
+        from .habitations import institution_accede_commune
+        rattachement = self.get_object()
+        if not institution_accede_commune(request, rattachement.habitation.commune_code):
+            raise PermissionDenied("Vous n'avez pas de délégation pour gérer cette commune.")
+        if rattachement.statut != StatutRattachementHabitation.EN_ATTENTE:
+            return Response({"error": "Cette demande a déjà été traitée."}, status=status.HTTP_400_BAD_REQUEST)
+
+        rattachement.statut = StatutRattachementHabitation.ACCEPTE if accepter else StatutRattachementHabitation.REFUSE
+        rattachement.traite_par = request.user
+        rattachement.date_traitement = timezone.now()
+        if not accepter:
+            rattachement.motif_refus = request.data.get('motif_refus') or None
+        rattachement.save(update_fields=['statut', 'traite_par', 'date_traitement', 'motif_refus'])
+
+        if accepter:
+            utilisateur = rattachement.utilisateur
+            if utilisateur is None:
+                utilisateur = User.objects.filter(email__iexact=rattachement.email_demandeur).first()
+            if utilisateur is None:
+                nom_parts = (rattachement.nom_demandeur or '').split(' ', 1)
+                utilisateur = User.objects.create_user(
+                    username=rattachement.email_demandeur, email=rattachement.email_demandeur,
+                    password=None, first_name=nom_parts[0] if nom_parts else '',
+                    last_name=nom_parts[1] if len(nom_parts) > 1 else '',
+                    phone_number=rattachement.telephone_demandeur or None,
+                    type=UserRole.SIMPLE_USER, is_active=True,
+                )
+            rattachement.utilisateur = utilisateur
+            rattachement.save(update_fields=['utilisateur'])
+
+            suivi_link = build_magic_link(
+                request, utilisateur, "magic-login", next_url=f"/habitation-suivi/{rattachement.habitation.id}"
+            )
+            try:
+                send_mail_env_aware(
+                    request,
+                    subject="Votre rattachement à une habitation a été accepté",
+                    message=(
+                        f"Bonjour {rattachement.nom_demandeur},\n\n"
+                        f"Votre demande de rattachement ({rattachement.get_type_lien_display()}) à "
+                        f"l'habitation « {rattachement.habitation.adresse} » a été acceptée.\n\n"
+                        f"Vous pouvez suivre son état et échanger avec le référent en charge du dossier ici :\n{suivi_link}\n\n"
+                        "Cordialement,\nL'équipe Assista-Crise"
+                    ),
+                    from_email=None,
+                    recipient_list=[rattachement.email_demandeur],
+                    fail_silently=True,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                send_mail_env_aware(
+                    request,
+                    subject="Votre demande de rattachement n'a pas été acceptée",
+                    message=(
+                        f"Bonjour {rattachement.nom_demandeur},\n\n"
+                        f"Votre demande de rattachement ({rattachement.get_type_lien_display()}) à "
+                        f"l'habitation « {rattachement.habitation.adresse} » n'a pas été acceptée."
+                        + (f"\n\nMotif : {rattachement.motif_refus}" if rattachement.motif_refus else "")
+                        + "\n\nCordialement,\nL'équipe Assista-Crise"
+                    ),
+                    from_email=None,
+                    recipient_list=[rattachement.email_demandeur],
+                    fail_silently=True,
+                )
+            except Exception:
+                pass
+
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="RattachementHabitation",
+            objet_id=rattachement.id,
+            commentaire=f"Rattachement {'accepté' if accepter else 'refusé'} : {rattachement.email_demandeur}",
+        )
+        return Response(RattachementHabitationSerializer(rattachement, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'])
+    def accepter(self, request, pk=None):
+        return self._traiter(request, pk, accepter=True)
+
+    @action(detail=True, methods=['post'])
+    def refuser(self, request, pk=None):
+        return self._traiter(request, pk, accepter=False)
+
+
+class ImportHabitationsView(APIView):
+    """Import CSV/XLS d'un référencement de dégâts (voir imports.importer_habitations) --
+    réservé aux institutions ayant délégation sur AU MOINS UNE commune (vérifié précisément par
+    ligne n'est pas fait ici : le fichier n'indique pas toujours de commune avant géocodage,
+    voir importer_habitations) ; la restriction fine par commune reste appliquée à la lecture/
+    écriture de chaque Habitation via HabitationViewSet."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from .habitations import communes_accessibles
+        if communes_accessibles(request) == []:
+            return Response(
+                {"error": "Aucune délégation sur une commune ne vous permet cet import."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        fichier = request.FILES.get('fichier')
+        if not fichier:
+            return Response({"error": "Aucun fichier reçu."}, status=status.HTTP_400_BAD_REQUEST)
+        mapping = {champ: request.data.get(f"mapping_{champ}") for champ in CHAMPS_HABITATIONS}
+        if not mapping.get("adresse"):
+            return Response(
+                {"error": "La colonne Adresse doit être associée avant de lancer l'import."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            _colonnes, lignes = parse_fichier(fichier)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        crise_id = request.data.get('crise')
+        crise = Crisis.objects.filter(pk=crise_id).first() if crise_id else None
+        zone_id = request.data.get('zone')
+        zone = Zone.objects.filter(pk=zone_id).first() if zone_id else None
+        resultat = importer_habitations(request, lignes, mapping, crise=crise, zone=zone)
+        return Response(resultat)
+
+
+class ImportHabitationsExempleView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        response = HttpResponse(exemple_csv_habitations(), content_type="text/csv; charset=utf-8")
+        response['Content-Disposition'] = 'attachment; filename="exemple-habitations.csv"'
+        return response
+
+
 class PlanViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     """Dispositif pré-enregistré d'une institution (voir Plan) : sous-ensemble d'équipes/points/
     zones déjà existants, activable en un geste sur une crise réelle (voir `activer`)."""
@@ -4138,7 +4565,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             'rattacher_equipe', 'detacher_equipe',
             'definir_statut_ressource', 'reactiver', 'vue_mairie', 'equipes_institution', 'institutions_liees',
             'ressources_mobilisees', 'assigner_crise', 'provisionner_canal_meshcore',
-            'provisionner_canal_meshtastic',
+            'provisionner_canal_meshtastic', 'provisionner_salon_matrix',
         ):
             return [IsInstitutionalActor()]
         return [permissions.IsAuthenticated()]
@@ -5159,6 +5586,34 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             "destinataires": len(destinataires),
             "compagnon_disponible": compagnon is not None,
         })
+
+    @action(detail=True, methods=['post'], url_path='provisionner-salon-matrix')
+    def provisionner_salon_matrix(self, request, pk=None):
+        """Active le salon Matrix privé de cette équipe (voir SalonMatrixEquipe) -- ne crée que
+        la ligne côté Django, `room_id` reste vide tant que le pont matrix-bridge ne l'a pas
+        créé côté Synapse (poll périodique, voir matrix-bridge/bridge.py). Idempotent : rappeler
+        cette action sur un salon déjà provisionné ne fait rien de plus (le pont resynchronise
+        déjà les membres en continu, pas besoin d'un second déclenchement manuel)."""
+        team = self.get_object()
+        if not _appartient_a_equipe(request, team):
+            return Response(
+                {"error": "Vous ne pouvez provisionner un salon Matrix que pour les équipes de votre institution (ou de l'institution déléguée)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        salon, cree = SalonMatrixEquipe.objects.get_or_create(
+            equipe=team, defaults={"environment": get_active_environment(request)},
+        )
+
+        audit_log(
+            request=request,
+            action_code="CREATION" if cree else "MODIFICATION",
+            objet_type="SalonMatrixEquipe",
+            objet_id=salon.id,
+            commentaire=f"Salon Matrix {'provisionné' if cree else 'déjà actif'} pour l'équipe « {team.name} ».",
+        )
+
+        return Response(SalonMatrixEquipeSerializer(salon).data)
 
     @action(detail=True, methods=['post'], url_path='provisionner-canal-meshtastic')
     def provisionner_canal_meshtastic(self, request, pk=None):
@@ -6764,6 +7219,7 @@ class DocumentViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
+    filterset_fields = ['dossier', 'habitation', 'demande', 'offre']
 
     def get_queryset(self):
 
@@ -6779,8 +7235,15 @@ class DocumentViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         ]:
             return Document.objects.filter(environment=environment)
 
+        habitations_rattachees = RattachementHabitation.objects.filter(
+            utilisateur=user, statut=StatutRattachementHabitation.ACCEPTE,
+        ).values_list('habitation_id', flat=True)
+
         return Document.objects.filter(
-            Q(auteur=user) | Q(dossier__participants__utilisateur=user), environment=environment
+            Q(auteur=user)
+            | Q(dossier__participants__utilisateur=user)
+            | Q(habitation_id__in=habitations_rattachees),
+            environment=environment,
         ).distinct()
 
     def perform_create(self, serializer):
@@ -6790,6 +7253,17 @@ class DocumentViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         if dossier and get_effective_role(self.request) not in INSTITUTIONAL_TYPES:
             if not dossier.participants.filter(utilisateur=user).exists():
                 raise PermissionDenied("Vous n'êtes pas participant de ce dossier.")
+
+        habitation = serializer.validated_data.get('habitation')
+        if habitation:
+            from .habitations import institution_accede_commune
+            accede = institution_accede_commune(self.request, habitation.commune_code) or (
+                RattachementHabitation.objects.filter(
+                    habitation=habitation, utilisateur=user, statut=StatutRattachementHabitation.ACCEPTE,
+                ).exists()
+            )
+            if not accede:
+                raise PermissionDenied("Vous n'avez pas accès à cette habitation.")
 
         document = serializer.save(auteur=user, environment=get_active_environment(self.request))
 
@@ -10726,6 +11200,72 @@ class CanalMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet)
             objet_id=canal.id,
             commentaire=f"Création canal MeshCore : {canal.nom}",
         )
+
+
+class SalonMatrixEquipeViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Salons Matrix d'équipe (voir SalonMatrixEquipe) -- lecture/écriture ouvertes à tout
+    utilisateur authentifié comme le reste des endpoints consommés par un pont (même posture
+    que CanalMeshCoreViewSet/CompagnonMeshCoreViewSet : le compte de service dédié du pont
+    matrix-bridge, authentifié par JWT, en est le seul appelant en pratique pour PATCH room_id).
+    Création réservée aux acteurs institutionnels via TeamViewSet.provisionner_salon_matrix,
+    jamais directement ici."""
+
+    queryset = SalonMatrixEquipe.objects.select_related('equipe').all()
+    serializer_class = SalonMatrixEquipeSerializer
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def perform_update(self, serializer):
+        serializer.save(derniere_synchronisation=timezone.now())
+
+
+class PositionMatrixView(generics.GenericAPIView):
+    """Le pont matrix-bridge rapporte ici la position d'un utilisateur reçue via une balise de
+    position live Element (MSC3489) dans le salon de son équipe -- contrairement à
+    MaPositionView (auto-déclaration par l'utilisateur connecté lui-même), cet endpoint accepte
+    un `matrix_user_id` explicite car l'appelant est le pont, authentifié comme un compte de
+    service distinct de la personne dont la position est rapportée (même logique que
+    CompagnonMeshCoreViewSet.synchroniser_contacts pour les contacts MeshCore). Met à jour
+    DernierePositionUtilisateur (compat avec la carte existante, PositionsEquipesView) ET
+    insère dans HistoriquePositionUtilisateur (trajet complet, propre au suivi permanent
+    Matrix, voir docstring du modèle)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from .matrix import user_id_from_matrix_id
+
+        matrix_id = (request.data.get('matrix_user_id') or '').strip()
+        user_id = user_id_from_matrix_id(matrix_id)
+        if user_id is None:
+            return Response({"error": "matrix_user_id invalide ou non géré par cette appli."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            latitude = float(request.data.get('latitude'))
+            longitude = float(request.data.get('longitude'))
+        except (TypeError, ValueError):
+            return Response({"error": "latitude et longitude sont requis et doivent être numériques."}, status=status.HTTP_400_BAD_REQUEST)
+
+        utilisateur = User.objects.filter(id=user_id).first()
+        if utilisateur is None:
+            return Response({"error": "Utilisateur introuvable."}, status=status.HTTP_404_NOT_FOUND)
+
+        horodatage_brut = request.data.get('horodatage')
+        horodatage = parse_datetime(horodatage_brut) if horodatage_brut else None
+        if horodatage is None:
+            horodatage = timezone.now()
+
+        point = Point(longitude, latitude, srid=4326)
+        environment = get_active_environment(request)
+
+        DernierePositionUtilisateur.objects.update_or_create(
+            utilisateur=utilisateur, environment=environment,
+            defaults={'location': point},
+        )
+        HistoriquePositionUtilisateur.objects.create(
+            utilisateur=utilisateur, location=point, horodatage=horodatage, environment=environment,
+        )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class MessageCanalMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):

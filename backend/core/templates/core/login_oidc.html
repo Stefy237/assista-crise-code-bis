@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Connexion — Assista-Crise</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f4f5f7; display: flex;
+           align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .carte { background: white; border-radius: 12px; padding: 2rem; width: min(360px, 90vw);
+             box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    h1 { font-size: 1.2rem; margin: 0 0 1rem; color: #333; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin: 0.75rem 0 0.25rem; color: #555; }
+    input { width: 100%; padding: 0.55rem; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 0.9rem; box-sizing: border-box; }
+    button { margin-top: 1.25rem; width: 100%; padding: 0.6rem; border: none; border-radius: 6px;
+             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;
+             font-weight: 600; font-size: 0.9rem; cursor: pointer; }
+    .erreurs { color: #b91c1c; font-size: 0.82rem; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="carte">
+    <h1>Connexion à la messagerie Assista-Crise</h1>
+    <form method="post">
+      {% csrf_token %}
+      <label for="id_username">Email</label>
+      <input type="email" name="username" id="id_username" autofocus required>
+      <label for="id_password">Mot de passe</label>
+      <input type="password" name="password" id="id_password" required>
+      <input type="hidden" name="next" value="{{ next }}">
+      <button type="submit">Se connecter</button>
+      {% if form.errors %}
+        <p class="erreurs">Identifiants incorrects.</p>
+      {% endif %}
+    </form>
+  </div>
+</body>
+</html>

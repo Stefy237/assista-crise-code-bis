@@ -106,6 +106,15 @@ export class TeamService {
     );
   }
 
+  /** POST /api/teams/<id>/provisionner-salon-matrix/ — active le salon Matrix privé de
+   * l'équipe (voir TeamViewSet.provisionner_salon_matrix). room_id reste vide dans la réponse
+   * tant que le pont matrix-bridge ne l'a pas créé côté Synapse (poll périodique). */
+  provisionnerSalonMatrix(id: string): Observable<{ id: string; room_id: string | null }> {
+    return this.http.post<{ id: string; room_id: string | null }>(
+      `${this.url}/${id}/provisionner-salon-matrix/`, {},
+    );
+  }
+
   rattacherEquipe(parentId: string, equipeId: string): Observable<Team> {
     return this.http.post<Team>(`${this.url}/${parentId}/rattacher-equipe/`, { equipe_id: equipeId });
   }

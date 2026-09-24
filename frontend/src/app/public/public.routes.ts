@@ -158,4 +158,21 @@ export const PUBLIC_ROUTES: Routes = [
         canActivate: [institutionalEffectiveGuard],
         component: RecherchePersonneDetailComponent
       },
+      {
+        // Public (carte + dépôt de rattachement) -- les actions de gestion sont conditionnées
+        // côté backend (voir Habitation.peut_gerer), pas ici : un visiteur sans délégation voit
+        // la page mais aucun bouton d'action ne fonctionne pour lui.
+        path: 'referencement-degats',
+        loadComponent: () => import('../pages/habitations/habitations-page/habitations-page.component')
+          .then(m => m.HabitationsPageComponent)
+      },
+      {
+        // Atteint uniquement via le magic-link envoyé après acceptation d'un rattachement
+        // (voir RattachementHabitationViewSet._traiter) -- authGuard car l'utilisateur est déjà
+        // authentifié à ce stade par MagicLoginComponent avant la redirection next_url.
+        path: 'habitation-suivi/:id',
+        canActivate: [authGuard],
+        loadComponent: () => import('../pages/habitations/habitation-suivi-public/habitation-suivi-public.component')
+          .then(m => m.HabitationSuiviPublicComponent)
+      },
 ];

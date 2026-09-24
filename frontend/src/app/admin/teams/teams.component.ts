@@ -28,6 +28,7 @@ import { MinimapComponent } from '../../shared/components/common/minimap/minimap
 import { TagSearchInputComponent } from '../../shared/components/common/tag-search-input/tag-search-input.component';
 import { PointModalComponent } from '../crises/point-modal/point-modal.component';
 import { EquipeMessagerieMeshComponent } from './equipe-messagerie-mesh/equipe-messagerie-mesh.component';
+import { environment } from '../../../environments/environment';
 
 import { Team, TeamMission }  from '../../shared/models/team.model';
 import { User }        from '../../shared/models/user.model';
@@ -1103,6 +1104,30 @@ export class TeamsComponent implements OnInit {
       },
       error: () => { this.provisionnantCanalMeshtastic = false; this.showError('Erreur lors de la régénération du canal Meshtastic.'); },
     });
+  }
+
+  // ── Salon Matrix de l'équipe (messagerie Element, positionnement permanent) ───────────
+  provisionnantSalonMatrix = false;
+  readonly elementWebUrl = environment.elementWebUrl;
+
+  provisionnerSalonMatrix(): void {
+    if (!this.selectedTeam?.id) return;
+    this.provisionnantSalonMatrix = true;
+    this.teamService.provisionnerSalonMatrix(this.selectedTeam.id).subscribe({
+      next: (resultat) => {
+        this.provisionnantSalonMatrix = false;
+        this.reloadTeams();
+        if (this.selectedTeam) {
+          this.selectedTeam = { ...this.selectedTeam, salon_matrix_id: resultat.id, salon_matrix_room_id: resultat.room_id };
+        }
+        this.showSuccess("Salon Matrix activé — le pont le crée côté serveur sous quelques dizaines de secondes.");
+      },
+      error: () => { this.provisionnantSalonMatrix = false; this.showError('Erreur lors de l\'activation du salon Matrix.'); },
+    });
+  }
+
+  lienSalonMatrix(roomId: string): string {
+    return `${this.elementWebUrl}/#/room/${encodeURIComponent(roomId)}`;
   }
 
   /** Crises ouvertes proposables pour la mission — une mission ne doit pas pouvoir se rattacher

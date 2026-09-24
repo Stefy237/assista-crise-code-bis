@@ -50,6 +50,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://172.16.1.113",
     "https://172.16.1.113",
     "http://172.16.1.113:4200",
+    "http://172.16.1.113:8085",  # SSO Matrix (login/authorize en clair, voir proxy/nginx.conf)
 
     "http://localhost",
     "http://localhost:4200",
@@ -76,6 +77,7 @@ INSTALLED_APPS = [
     'django_filters',
     'core',
     "django.contrib.gis",
+    'oauth2_provider',
 ]
 
 MIDDLEWARE = [
@@ -272,6 +274,36 @@ SERVER_URL = os.environ.get(
     "https://www.assista-crise.fr"
 )
 
+# Fournisseur OIDC pour Synapse (Matrix, voir core/oidc.py) -- SSO avec le même compte
+# assista-crise, pas de comptes Matrix indépendants (demande explicite, 23/09). La clé privée
+# RSA signe les id_token ; générée une fois par environnement (.113/.114), jamais versionnée.
+OAUTH2_PROVIDER = {
+    "OIDC_ENABLED": True,
+    # Passée en variable d'env sur une seule ligne (\n littéral entre les lignes du PEM, une
+    # vraie clé multi-ligne ne passe pas telle quelle dans un fichier --env-file docker) --
+    # reconvertie ici en vrais retours à la ligne, seule forme que jwcrypto sait parser.
+    "OIDC_RSA_PRIVATE_KEY": os.environ.get("OIDC_RSA_PRIVATE_KEY", "").replace("\\n", "\n"),
+    "OAUTH2_VALIDATOR_CLASS": "core.oidc.AssistaCriseOIDCValidator",
+    # Fixe -- sans ça, django-oauth-toolkit calcule l'iss/issuer depuis le Host de la requête
+    # qui a atteint /o/token/, et Synapse (discover: false) appelle ce endpoint en interne via
+    # "backend:8000" (réseau docker), jamais via l'URL publique -- le claim "iss" de l'id_token
+    # ne correspondrait alors jamais à l'`issuer` configuré côté Synapse (rejeté).
+    "OIDC_ISS_ENDPOINT": os.environ.get("OIDC_ISS_ENDPOINT", "https://172.16.1.113/o"),
+    "SCOPES": {
+        "openid": "Identification (OpenID Connect)",
+        "profile": "Nom affiché",
+        "email": "Adresse email",
+    },
+    "PKCE_REQUIRED": False,
+    # Synapse (serveur, pas navigateur) échange le code contre un token en confidentiel ->
+    # pas de refresh token longue durée nécessaire, un access token suffit le temps de l'échange.
+    "ACCESS_TOKEN_EXPIRE_SECONDS": 600,
+}
+
+# Localpart Matrix déterministe (voir core/matrix.py) -- doit être identique côté pont
+# (matrix-bridge) et côté configuration Synapse (oidc_providers.user_mapping_provider).
+MATRIX_SERVER_NAME = os.environ.get("MATRIX_SERVER_NAME", "matrix.assista-crise.local")
+
 # Durée de conservation (en jours) des lignes de la main courante (AuditLog),
 # purgées par `python manage.py purge_audit_logs` (principe de minimisation RGPD).
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get('AUDIT_LOG_RETENTION_DAYS', 30))
@@ -338,6 +370,14 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    # COOKIES_SECURE_OVERRIDE=False (mis uniquement sur .113, jamais sur .114) : sur .113,
+    # /accounts/login/ et /o/authorize/ sont AUSSI servis en clair sur le port 8085 (voir
+    # proxy/nginx.conf) pour le SSO Matrix, faute de certificat valide pour son IP LAN -- un
+    # cookie marqué Secure ne serait jamais posé/renvoyé par le navigateur sur ce port, et le
+    # POST de connexion échouerait toujours en "CSRF verification failed" (constaté avec
+    # Sylvain le 24/09). Sur .114, le vrai domaine HTTPS (WAF) sert directement ces mêmes
+    # routes sans ce problème -- les cookies y restent Secure, comme avant.
+    cookies_secure = os.environ.get('COOKIES_SECURE_OVERRIDE', 'True') == 'True'
+    SESSION_COOKIE_SECURE = cookies_secure
+    CSRF_COOKIE_SECURE = cookies_secure
 

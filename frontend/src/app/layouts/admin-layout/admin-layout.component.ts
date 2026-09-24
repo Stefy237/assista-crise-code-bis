@@ -126,6 +126,12 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
     // faire).
     { icon: 'how_to_reg', label: 'Validations de comptes', route: '/admin/validations-comptes' },
 
+    // Route publique (hors /admin) : un particulier atteint la carte/le formulaire de
+    // rattachement par un lien direct, pas par ce menu (réservé au personnel institutionnel,
+    // voir isNavItemVisible) -- les actions de gestion restent conditionnées côté backend
+    // (Habitation.peut_gerer, HabitationViewSet).
+    { icon: 'home_repair_service', label: 'Référencement des dégâts', route: '/referencement-degats' },
+
 ];
 
 

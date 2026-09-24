@@ -1,0 +1,16 @@
+<div class="suivi-public">
+  @if (erreur) {
+    <div class="etat-message">
+      <p>Impossible de charger cette fiche. Le lien a peut-être expiré.</p>
+      <a routerLink="/login">Retour à la connexion</a>
+    </div>
+  } @else if (!habitation) {
+    <div class="etat-message"><p>Chargement…</p></div>
+  } @else {
+    <app-habitation-fiche
+      [habitation]="habitation"
+      [lectureSeule]="true"
+      (misAJour)="surMiseAJour($event)">
+    </app-habitation-fiche>
+  }
+</div>

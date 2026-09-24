@@ -1,0 +1,211 @@
+<div class="page-habitations">
+
+  <div class="entete">
+    <h1>Référencement des dégâts</h1>
+    <div class="actions-entete">
+      <div class="toggle-vue">
+        <button [class.actif]="vue === 'carte'" (click)="changerVue('carte')">Carte</button>
+        <button [class.actif]="vue === 'liste'" (click)="changerVue('liste')">Vue de suivi</button>
+      </div>
+      @if (authService.isAdmin()) {
+        <button class="btn-secondaire" (click)="ouvrirEstimation()">Charger depuis la BAN / cadastre</button>
+        <button class="btn-secondaire" (click)="ouvrirImport()">Importer un fichier</button>
+      }
+    </div>
+  </div>
+
+  <div class="filtres">
+    <input
+      type="text" placeholder="Rechercher une adresse…"
+      [(ngModel)]="filtres.recherche" (keyup.enter)="appliquerFiltres()">
+    <select [(ngModel)]="filtres.statut_evaluation" (change)="appliquerFiltres()">
+      <option [value]="undefined">Tous les statuts</option>
+      @for (option of labelsEvaluation | keyvalue; track option.key) {
+        <option [value]="option.key">{{ option.value }}</option>
+      }
+    </select>
+    <select [(ngModel)]="filtres.statut_chantier" (change)="appliquerFiltres()">
+      <option [value]="undefined">Tous les chantiers</option>
+      @for (option of labelsChantier | keyvalue; track option.key) {
+        <option [value]="option.key">{{ option.value }}</option>
+      }
+    </select>
+    <button class="btn-primary" (click)="appliquerFiltres()">Filtrer</button>
+  </div>
+
+  @if (vue === 'carte') {
+    <div class="zone-carte">
+      <app-habitation-carte [filtres]="filtres" (pointClique)="ouvrirFiche($event)"></app-habitation-carte>
+    </div>
+  }
+
+  @if (vue === 'liste') {
+    <div class="zone-liste">
+      @if (chargement) {
+        <p class="vide">Chargement…</p>
+      } @else {
+        @for (groupe of groupesParZone; track groupe.nom) {
+          <div class="groupe-zone">
+            <h3>{{ groupe.nom }} ({{ groupe.habitations.length }})</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Adresse</th>
+                  <th>Statut</th>
+                  <th>Chantier</th>
+                  <th>Parcelle</th>
+                  <th>Localisation</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (h of groupe.habitations; track h.id) {
+                  <tr (click)="ouvrirFiche(h)">
+                    <td>{{ h.adresse }}</td>
+                    <td>
+                      <span class="pastille-mini" [attr.data-statut]="h.statut_evaluation"></span>
+                      {{ labelsEvaluation[h.statut_evaluation] }}
+                    </td>
+                    <td>{{ h.statut_chantier ? labelsChantier[h.statut_chantier] : '—' }}</td>
+                    <td>{{ h.parcelle_cadastrale || '—' }}</td>
+                    <td>
+                      @if (h.latitude && h.longitude) {
+                        <a
+                          class="lien-minimap"
+                          [href]="'https://www.openstreetmap.org/?mlat=' + h.latitude + '&mlon=' + h.longitude + '#map=18/' + h.latitude + '/' + h.longitude"
+                          target="_blank" (click)="$event.stopPropagation()">
+                          Voir sur la carte
+                        </a>
+                      }
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        } @empty {
+          <p class="vide">Aucune habitation référencée pour ces filtres.</p>
+        }
+      }
+    </div>
+  }
+
+  @if (habitationSelectionnee) {
+    <app-habitation-fiche
+      [habitation]="habitationSelectionnee"
+      (fermer)="fermerFiche()"
+      (misAJour)="surMiseAJour($event)">
+    </app-habitation-fiche>
+  }
+
+  @if (panneauEstimationOuvert) {
+    <div class="import-overlay" (click)="panneauEstimationOuvert = false">
+      <div class="import-panel" (click)="$event.stopPropagation()">
+        <h2>Chargement des points depuis la BAN / cadastre</h2>
+        <p class="explication">
+          Recherche toutes les adresses d'UNE commune via la Base Adresse Nationale et les
+          référence en statut « non évaluée ». Toujours limité à cette seule commune ; si vous
+          sélectionnez une crise dont la zone est dessinée sur la carte et/ou une zone nommée
+          (ex: « Quartier Nord »), seules les adresses comprises dans cette zone seront retenues.
+        </p>
+
+        <label class="champ-estimation">
+          Commune
+          <app-tag-search-input
+            [searchFn]="communeSearchFn"
+            labelField="name"
+            subLabelField="codePostal"
+            placeholder="Nom, code postal ou code INSEE…"
+            emptyMessage="Aucune commune trouvée."
+            (itemSelected)="surCommuneChoisie($event)">
+          </app-tag-search-input>
+          @if (communeEstimationLabel) {
+            <span class="commune-choisie">Commune sélectionnée : {{ communeEstimationLabel }}</span>
+          }
+        </label>
+
+        <label class="champ-estimation">
+          Commune impactée (crise, optionnel)
+          <select [(ngModel)]="criseEstimationId">
+            <option value="">— Aucune crise —</option>
+            @for (crise of crises; track crise.id) {
+              <option [value]="crise.id">{{ crise.name }}</option>
+            }
+          </select>
+        </label>
+
+        <label class="champ-estimation">
+          Zone de recherche (optionnel, à l'intérieur de la commune)
+          <select [(ngModel)]="zoneEstimationId">
+            <option value="">— Toute la commune —</option>
+            @for (zone of zones; track zone.id) {
+              <option [value]="zone.id">{{ zone.nom }}</option>
+            }
+          </select>
+        </label>
+
+        <button class="btn-primary" [disabled]="!communeEstimation.trim() || estimationEnCours" (click)="lancerEstimation()">
+          {{ estimationEnCours ? 'Chargement en cours…' : 'Charger les points' }}
+        </button>
+
+        @if (erreurEstimation) {
+          <p class="erreurs">{{ erreurEstimation }}</p>
+        }
+
+        @if (resultatEstimation) {
+          <div class="resultat-import">
+            <p>{{ resultatEstimation.creees }} habitation(s) créée(s) sur {{ resultatEstimation.adresses_trouvees }} adresse(s) trouvée(s)
+              ({{ resultatEstimation.voies_totales }} voie(s) de la commune, {{ resultatEstimation.voies_en_echec }} en échec).</p>
+          </div>
+        }
+
+        <button class="btn-secondaire" (click)="panneauEstimationOuvert = false">Fermer</button>
+      </div>
+    </div>
+  }
+
+  @if (panneauImportOuvert) {
+    <div class="import-overlay" (click)="panneauImportOuvert = false">
+      <div class="import-panel" (click)="$event.stopPropagation()">
+        <h2>Importer un référencement de dégâts</h2>
+        <p class="explication">
+          Fichier CSV/XLS avec les colonnes : adresse (obligatoire), latitude, longitude,
+          parcelle_cadastrale, commune_code, commune_nom (optionnelles — géocodées
+          automatiquement si absentes).
+        </p>
+        <button class="btn-lien" (click)="telechargerExemple()">Télécharger un exemple</button>
+
+        <input type="file" accept=".csv,.xlsx" (change)="onFichierImportChoisi($event)">
+
+        <div class="mapping-colonnes">
+          <label>Colonne Adresse <input type="text" [(ngModel)]="mappingImport['adresse']" placeholder="ex: Adresse"></label>
+          <label>Colonne Latitude <input type="text" [(ngModel)]="mappingImport['latitude']" placeholder="optionnel"></label>
+          <label>Colonne Longitude <input type="text" [(ngModel)]="mappingImport['longitude']" placeholder="optionnel"></label>
+          <label>Colonne Parcelle <input type="text" [(ngModel)]="mappingImport['parcelle_cadastrale']" placeholder="optionnel"></label>
+          <label>Colonne Code commune <input type="text" [(ngModel)]="mappingImport['commune_code']" placeholder="optionnel"></label>
+          <label>Colonne Nom commune <input type="text" [(ngModel)]="mappingImport['commune_nom']" placeholder="optionnel"></label>
+        </div>
+
+        <button class="btn-primary" [disabled]="!fichierImport || importEnCours" (click)="lancerImport()">
+          {{ importEnCours ? 'Import en cours…' : 'Lancer l\'import' }}
+        </button>
+
+        @if (resultatImport) {
+          <div class="resultat-import">
+            <p>{{ resultatImport.crees }} habitation(s) créée(s).</p>
+            @if (resultatImport.erreurs.length > 0) {
+              <p class="erreurs">{{ resultatImport.erreurs.length }} ligne(s) en erreur :</p>
+              <ul>
+                @for (e of resultatImport.erreurs; track e.ligne) {
+                  <li>Ligne {{ e.ligne }} : {{ e.message }}</li>
+                }
+              </ul>
+            }
+          </div>
+        }
+
+        <button class="btn-secondaire" (click)="panneauImportOuvert = false">Fermer</button>
+      </div>
+    </div>
+  }
+
+</div>
