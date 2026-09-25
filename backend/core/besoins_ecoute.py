@@ -7,40 +7,59 @@ filtrer le sélecteur de type des formulaires publics avant tout dépôt."""
 from .models import Besoin, Commune, ImplicationInstitution, StatutImplication, TypeImplication
 
 
-def _institution_couvre_commune(institution, commune_code: str, commune: "Commune | None") -> bool:
-    """Même principe que zone_scoping.py/_institution_secteur_or_400, mais pour une institution
-    ARBITRAIRE (celle d'une ImplicationInstitution) plutôt que celle de l'utilisateur appelant
-    -- compare le secteur effectif de l'institution (commune_code/epci_code/departement_code/
-    region_code dénormalisés, voir Institution.save()) à celui de la commune ciblée."""
-    niveau = institution.secteur_niveau_effectif or "commune"
-    if niveau == "national":
+def _commune_dans_zone_crise(crise, commune_code: str) -> bool:
+    """Détermine si `commune_code` fait partie de la zone de LA CRISE -- une institution
+    déclarée ACTEUR sur une crise écoute sur toute la zone de CETTE crise (celle définie via
+    "Institutions impliquées" -- communes/départements ajoutés, zone dessinée, ou simplement le
+    rayon par défaut autour de son point de départ), pas seulement sur son propre secteur
+    institutionnel. Correctif : une mairie ACTEUR sur une crise intercommunale (ex: "Incendie de
+    Saumos" couvrant Le Porge ET Saumos) ne doit pas être ignorée pour les communes voisines de
+    la même crise sous prétexte que ce n'est pas sa commune de rattachement -- repéré en direct
+    par l'utilisateur (25/09), une mairie ACTEUR avait bien déclaré des thèmes mais aucun
+    n'apparaissait à l'écoute pour la commune homonyme de la crise elle-même."""
+    if commune_code in (crise.zone_communes or []):
         return True
-    if niveau == "commune":
-        return institution.commune_code == commune_code
-    if commune is None:
-        return False
-    if niveau == "epci":
-        return bool(institution.epci_code) and institution.epci_code == commune.epci_code
-    if niveau == "departement":
-        return bool(institution.departement_code) and institution.departement_code == commune.departement_code
-    if niveau == "region":
-        return bool(institution.region_code) and institution.region_code == commune.region_code
-    return False
 
-
-def besoins_a_lecoute(crise, commune_code: str):
-    """Besoins qu'au moins une institution ACTEUR (validée, active) écoute pour `crise`, dont le
-    secteur couvre `commune_code` -- IMPLIQUE n'y figure jamais (une institution seulement
-    concernée par la crise ne fournit pas d'aide, voir ImplicationInstitution.__doc__)."""
     commune = Commune.objects.filter(code=commune_code).first()
+    if commune and commune.departement_code and commune.departement_code in (crise.zone_departements or []):
+        return True
+
+    if commune and commune.centre_latitude is not None and commune.centre_longitude is not None:
+        from django.contrib.gis.geos import Point
+        point = Point(commune.centre_longitude, commune.centre_latitude, srid=4326)
+        if crise.zone_secteurs is not None and not crise.zone_secteurs.empty and crise.zone_secteurs.contains(point):
+            return True
+        if crise.zone is not None and not crise.zone.empty and crise.zone.contains(point):
+            return True
+
+    # Repli : aucune zone composée (communes/départements/dessin) -- crise déclarée seulement
+    # avec un point + un rayon (voir Crisis.location/radius), cas le plus simple. Se contente de
+    # comparer la commune résolue du point de la crise, sans tenir compte du rayon lui-même
+    # (pas de commune référentiel "à N km" prêt à l'emploi) -- suffisant pour le cas courant
+    # d'une crise à l'échelle d'une seule commune.
+    from .geo_lookup import commune_code_from_point
+    return commune_code_from_point(crise.location) == commune_code
+
+
+def besoins_a_lecoute(crise, commune_code: str | None = None):
+    """Besoins qu'au moins une institution ACTEUR (validée, active) écoute pour `crise` --
+    IMPLIQUE n'y figure jamais (une institution seulement concernée par la crise ne fournit pas
+    d'aide, voir ImplicationInstitution.__doc__). `commune_code=None` : AUCUNE restriction
+    géographique -- décision explicite de l'utilisateur (25/09) pour les propositions d'aide
+    (axe "offer") : un offreur peut se trouver n'importe où (un logement à 50km, un trajet
+    depuis Bordeaux...), contrairement à un demandeur ou un signalement qui, eux, sont
+    naturellement dans/près de la zone concernée. Fourni : filtre en plus sur la zone de la
+    crise (voir _commune_dans_zone_crise)."""
+    if commune_code is not None and not _commune_dans_zone_crise(crise, commune_code):
+        return Besoin.objects.none()
+
     implications = ImplicationInstitution.objects.filter(
         crise=crise, actif=True, statut=StatutImplication.VALIDEE,
         type_implication=TypeImplication.ACTEUR,
-    ).select_related("institution").prefetch_related("themes")
+    ).prefetch_related("themes")
 
     besoin_ids = set()
     for implication in implications:
-        if _institution_couvre_commune(implication.institution, commune_code, commune):
-            besoin_ids.update(implication.themes.values_list("id", flat=True))
+        besoin_ids.update(implication.themes.values_list("id", flat=True))
 
     return Besoin.objects.filter(id__in=besoin_ids)

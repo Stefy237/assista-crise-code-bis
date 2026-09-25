@@ -23,17 +23,22 @@
   </div>
 }
 
-@if (criseId && adresse) {
+@if (criseId && (adresse || sansRestrictionGeo)) {
   <div class="bloc-themes">
     @if (chargementThemes) {
       <p class="hint">Recherche des thèmes à l'écoute…</p>
     } @else if (aucunTheme) {
       <p class="alerte-bloquante">
-        Aucun thème à l'écoute pour cette zone actuellement — contactez l'institution locale
-        pour signaler votre besoin autrement.
+        @if (sansRestrictionGeo) {
+          Aucun thème à l'écoute pour cette crise actuellement — contactez l'institution locale
+          pour proposer votre aide autrement.
+        } @else {
+          Aucun thème à l'écoute pour cette zone actuellement — contactez l'institution locale
+          pour signaler votre besoin autrement.
+        }
       </p>
     } @else {
-      <p class="section-description">Thèmes actuellement à l'écoute pour cette crise, à cet endroit :</p>
+      <p class="section-description">Thèmes actuellement à l'écoute pour cette crise{{ sansRestrictionGeo ? '' : ', à cet endroit' }} :</p>
       <ul class="liste-themes">
         @for (besoin of besoins; track besoin.id) {
           <li>{{ besoin.nom }}</li>

@@ -12,10 +12,17 @@ import { Besoin } from '../../../models/besoin.model';
 
 /** Première étape, commune aux 3 formulaires publics de dépôt (offre/demande/signalement) :
  * crise obligatoire, puis lieu (adresse, préremplie par géolocalisation) — et SEULEMENT une
- * fois les deux connus, la liste des thèmes qu'au moins une institution écoute pour cette
- * crise/zone (voir TypesALecouteView côté backend). Émet `typesAutorises` (ids du catalogue de
- * l'axe demandé) pour que le formulaire parent filtre son propre sélecteur de type — ce
- * composant ne connaît rien du reste du formulaire, volontairement minimal et réutilisable. */
+ * fois connus, la liste des thèmes qu'au moins une institution écoute pour cette crise (voir
+ * TypesALecouteView côté backend). Émet `typesAutorises` (ids du catalogue de l'axe demandé)
+ * pour que le formulaire parent filtre son propre sélecteur de type — ce composant ne connaît
+ * rien du reste du formulaire, volontairement minimal et réutilisable.
+ *
+ * axe="offer" (proposer de l'aide) : PAS de restriction géographique -- décision explicite de
+ * l'utilisateur (25/09), un offreur peut se trouver n'importe où (logement à 50km, trajet depuis
+ * une autre ville...). Les thèmes s'affichent dès la crise choisie, sans attendre l'adresse
+ * (toujours demandée : utile pour localiser l'offre elle-même, juste plus utilisée pour filtrer
+ * les thèmes). axe="request"/"information" : restreint à la zone de la crise, un demandeur ou
+ * un signalement étant naturellement dans/près de cette zone. */
 @Component({
   selector: 'app-crise-lieu-theme',
   standalone: true,
@@ -65,15 +72,20 @@ export class CriseLieuThemeComponent implements OnInit {
     this.rechargerThemes();
   }
 
+  get sansRestrictionGeo(): boolean {
+    return this.axe === 'offer';
+  }
+
   private rechargerThemes(): void {
     this.besoins = [];
     this.typesAutorises.emit([]);
     this.appele = false;
 
-    if (!this.criseId || !this.adresse?.citycode) return;
+    if (!this.criseId) return;
+    if (!this.sansRestrictionGeo && !this.adresse?.citycode) return;
 
     this.chargementThemes = true;
-    this.typesALecouteService.get(this.criseId, this.adresse.citycode, this.axe).subscribe({
+    this.typesALecouteService.get(this.criseId, this.adresse?.citycode ?? '', this.axe).subscribe({
       next: (res) => {
         this.chargementThemes = false;
         this.appele = true;

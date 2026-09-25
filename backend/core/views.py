@@ -525,10 +525,12 @@ _PONT_BESOIN_PAR_AXE = {
 
 class TypesALecouteView(generics.GenericAPIView):
     """Filtre le sélecteur de type des formulaires publics (Request/Offer/Information) aux
-    seuls thèmes qu'au moins une institution a déclarés "à l'écoute" pour la crise/commune
-    choisies -- voir besoins_ecoute.besoins_a_lecoute. AllowAny : consultée AVANT tout dépôt,
-    par un visiteur qui n'a pas forcément de compte (même logique que HabitationViewSet en
-    lecture, ou RattachementHabitationViewSet.create)."""
+    seuls thèmes qu'au moins une institution a déclarés "à l'écoute" pour la crise choisie --
+    voir besoins_ecoute.besoins_a_lecoute. AllowAny : consultée AVANT tout dépôt, par un visiteur
+    qui n'a pas forcément de compte (même logique que HabitationViewSet en lecture, ou
+    RattachementHabitationViewSet.create). `commune_code` restreint en plus à la zone de la
+    crise pour "request"/"information" (un demandeur ou un signalement sont naturellement dans
+    ou près de la zone) -- PAS pour "offer" (un offreur peut être n'importe où, voir plus bas)."""
 
     permission_classes = [AllowAny]
 
@@ -539,16 +541,22 @@ class TypesALecouteView(generics.GenericAPIView):
         commune_code = request.query_params.get('commune_code')
         axe = request.query_params.get('axe')
 
-        if not crise_id or not commune_code:
-            return Response({"error": "crise et commune_code sont obligatoires."}, status=status.HTTP_400_BAD_REQUEST)
         if axe not in _PONT_BESOIN_PAR_AXE:
             return Response({"error": "axe doit être request, offer ou information."}, status=status.HTTP_400_BAD_REQUEST)
+        # commune_code non requis pour "offer" -- voir besoins_a_lecoute, pas de restriction
+        # géographique pour une proposition d'aide.
+        if not crise_id or (axe != 'offer' and not commune_code):
+            return Response({"error": "crise est obligatoire (commune_code aussi, sauf pour axe=offer)."}, status=status.HTTP_400_BAD_REQUEST)
 
         crise = Crisis.objects.filter(pk=crise_id).first()
         if crise is None:
             return Response({"error": "Crise introuvable."}, status=status.HTTP_400_BAD_REQUEST)
 
-        besoins = besoins_a_lecoute(crise, commune_code)
+        # "offer" (proposer de l'aide) : pas de restriction géographique -- un offreur peut être
+        # n'importe où (logement à 50km, trajet depuis une autre ville...), contrairement à un
+        # demandeur/signalement, naturellement dans ou près de la zone -- décision explicite de
+        # l'utilisateur (25/09), voir besoins_ecoute.besoins_a_lecoute.
+        besoins = besoins_a_lecoute(crise, None if axe == 'offer' else commune_code)
         pont_model, champ_type_id = _PONT_BESOIN_PAR_AXE[axe]
         type_ids = pont_model.objects.filter(besoin__in=besoins).values_list(champ_type_id, flat=True).distinct()
 
