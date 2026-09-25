@@ -8,6 +8,9 @@ export interface Dossier {
 
   competence: string;
   competence_nom: string;
+  /** Nature du Besoin capturé à la création (COMPETENCE/MATERIEL/MIXTE) -- classe le dossier
+   * ressource/matériel sur la page Cellule de crise, voir Dossier.besoin. */
+  besoin_nature?: 'COMPETENCE' | 'MATERIEL' | 'MIXTE' | null;
 
   equipe?: string;
   equipe_nom?: string;

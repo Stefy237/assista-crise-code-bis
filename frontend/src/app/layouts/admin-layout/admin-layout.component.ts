@@ -49,6 +49,11 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
   navItems: NavItem[] = [
     { icon: 'home', label: 'Accueil', route: '/admin/dashboard' },
 
+    // Placée haut dans le menu à dessein (demande utilisateur du 26/09) : page unique à 3
+    // panneaux repliables (ressource/moyen/coordination) pensée comme l'outil quotidien d'une
+    // cellule de crise, pas une page annexe.
+    { icon: 'dashboard_customize', label: 'Cellule de crise', route: '/admin/cellule-crise' },
+
     { icon: 'flag', label: 'Signalements', route: '/admin/signalements' },
 
     // Vue filtrée sur la commune de l'institution de l'utilisateur (typiquement une mairie) —

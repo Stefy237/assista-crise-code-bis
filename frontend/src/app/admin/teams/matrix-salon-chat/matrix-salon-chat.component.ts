@@ -36,13 +36,24 @@ export class MatrixSalonChatComponent implements OnChanges, OnDestroy {
   @Input() titre = "Salon d'équipe";
   @Input() pretACharger = true;
   @Input() chargerMessages!: () => Observable<{ messages: MatrixMessage[] }>;
-  @Input() envoyerMessage!: (texte: string) => Observable<{ messages: MatrixMessage[] }>;
+  @Input() envoyerMessage!: (texte: string, urgent?: boolean) => Observable<{ messages: MatrixMessage[] }>;
+  /** Case "urgent" à l'envoi -- ouverte à tout le monde, y compris un intervenant isolé (décision
+   * utilisateur du 26/09). Désactivée par défaut : seuls les salons qui en ont vraiment besoin
+   * (chat d'équipe) l'activent. */
+  @Input() autoriserUrgent = false;
+  /** Bouton "Vu" par message -- réservé aux cadres (régulateur/chef d'équipe/institutionnel),
+   * fourni par l'appelant qui seul sait qui est cadre ici. Absent = pas de bouton "Vu" du tout
+   * (ex: salons d'institution, hors périmètre de cet accusé de réception). */
+  @Input() cadre = false;
+  @Input() reagir?: (eventId: string) => Observable<{ status: string }>;
 
   chargement = true;
   erreur = '';
   messages: MatrixMessage[] = [];
   nouveauMessage = '';
+  urgent = false;
   envoiEnCours = false;
+  reactionEnCoursEventId: string | null = null;
 
   private pollingSub?: Subscription;
 
@@ -78,16 +89,26 @@ export class MatrixSalonChatComponent implements OnChanges, OnDestroy {
     const texte = this.nouveauMessage.trim();
     if (!texte) return;
     this.envoiEnCours = true;
-    this.envoyerMessage(texte).subscribe({
+    this.envoyerMessage(texte, this.urgent).subscribe({
       next: (reponse) => {
         this.messages = reponse.messages;
         this.nouveauMessage = '';
+        this.urgent = false;
         this.envoiEnCours = false;
       },
       error: () => {
         this.erreur = "Échec de l'envoi du message.";
         this.envoiEnCours = false;
       },
+    });
+  }
+
+  marquerVu(message: MatrixMessage): void {
+    if (!this.reagir || this.reactionEnCoursEventId) return;
+    this.reactionEnCoursEventId = message.event_id;
+    this.reagir(message.event_id).subscribe({
+      next: () => { this.reactionEnCoursEventId = null; this.rafraichir().subscribe(); },
+      error: () => { this.reactionEnCoursEventId = null; },
     });
   }
 }

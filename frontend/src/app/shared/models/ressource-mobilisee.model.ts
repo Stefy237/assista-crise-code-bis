@@ -3,6 +3,9 @@ export interface RessourceMobilisee {
   nom: string;
   equipe_id: string;
   equipe_nom: string;
+  /** Temps d'engagement sans repos (page Cellule de crise), voir Team.engagement_debut --
+   * null si au repos/pas encore engagée. */
+  equipe_engagement_debut?: string | null;
   institution: string | null;
   crises: string[];
   centres: string[];

@@ -130,7 +130,7 @@ export class InstitutionsComponent implements OnInit {
     () => this.institutionService.getSalonMatrixMessages(this.selectedInstitution!.id!, type);
 
   envoyerMessageSalonInstitution = (type: 'PERMANENTS' | 'BENEVOLES') =>
-    (texte: string) => this.institutionService.envoyerMessageSalonMatrix(this.selectedInstitution!.id!, type, texte);
+    (texte: string, _urgent: boolean = false) => this.institutionService.envoyerMessageSalonMatrix(this.selectedInstitution!.id!, type, texte);
 
   private buildForms(): void {
     this.institutionForm = this.fb.group({

@@ -913,6 +913,12 @@ class OfferMessage(EnvironmentScopedModel):
     contenu = models.TextField()
     date_creation = models.DateTimeField(auto_now_add=True)
 
+    # True par défaut si posé par l'équipe (déjà "lu" par construction, c'est elle qui écrit) ;
+    # False si posé par le propriétaire de l'offre -- alimente la file "Retours externes" de la
+    # page Cellule de crise (voir OfferViewSet.messages, qui repasse ce champ à True à la
+    # lecture institutionnelle).
+    lu_par_institution = models.BooleanField(default=False)
+
     class Meta:
         ordering = ["date_creation"]
 
@@ -1579,6 +1585,19 @@ class Dossier(EnvironmentScopedModel):
         related_name="dossiers",
         null=True,
         blank=True
+    )
+
+    # Le Besoin précis derrière `competence` (voir resolve_besoin_for_request/_information,
+    # views.py) -- capturé directement à la création plutôt que redérivé depuis `competence`
+    # (ambigu : une Competence peut être partagée par plusieurs Besoin via BesoinCompetence).
+    # Sert à classer un dossier "ressource" (nature COMPETENCE/MIXTE) vs "moyen" (MATERIEL) sur
+    # la page Cellule de crise, sans requête supplémentaire.
+    besoin = models.ForeignKey(
+        "Besoin",
+        on_delete=models.SET_NULL,
+        related_name="dossiers",
+        null=True,
+        blank=True,
     )
 
     equipe = models.ForeignKey(
@@ -2263,6 +2282,12 @@ class Team(EnvironmentScopedModel):
         null=True, blank=True,
         related_name="teams_regulees"
     )
+
+    # Temps d'engagement continu sans repos, affiché sur la page Cellule de crise -- None = au
+    # repos/pas encore engagée. Volontairement manuel dans les deux sens (TeamViewSet
+    # .demarrer_engagement/.mettre_au_repos, décision utilisateur du 26/09) : aucune inférence
+    # automatique depuis l'activité (risque de faux repos si l'équipe est juste en attente).
+    engagement_debut = models.DateTimeField(null=True, blank=True)
     # Mission "courante" de l'équipe (singulière) : distincte du M2M Mission.equipes (utilisé
     # par la page Missions, où une mission peut réunir plusieurs équipes). Redéfinir cette
     # mission remplace la précédente — une équipe n'a qu'une mission active à la fois, son

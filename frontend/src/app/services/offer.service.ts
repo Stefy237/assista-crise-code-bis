@@ -176,6 +176,13 @@ export class OfferService {
     return this.http.post<OfferMessage>(`${this.url}/${offerId}/messages/`, { contenu });
   }
 
+  /** GET /api/offres/retours-externes/ — offres ayant au moins un message non lu par
+   * l'institution (voir OfferMessage.lu_par_institution), pour l'onglet "Retours externes" de
+   * la page Cellule de crise. */
+  retoursExternes(criseId: string): Observable<Offer[]> {
+    return this.http.get<Offer[]>(`${this.url}/retours-externes/`, { params: { crisis: criseId } });
+  }
+
   private normalize = (o: any): Offer => {
     if (o.location?.coordinates) {
       return { ...o, ...geoPointToLatLng(o.location) };

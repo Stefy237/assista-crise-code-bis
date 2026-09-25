@@ -1135,7 +1135,7 @@ export class TeamsComponent implements OnInit {
   // quelles en [Input] à MatrixSalonChatComponent (voir sa docstring, générique Team/
   // Institution), qui les appelle sans connaître `this`.
   chargerMessagesSalonEquipe = () => this.teamService.getSalonMatrixMessages(this.selectedTeam!.id!);
-  envoyerMessageSalonEquipe = (texte: string) => this.teamService.envoyerMessageSalonMatrix(this.selectedTeam!.id!, texte);
+  envoyerMessageSalonEquipe = (texte: string, urgent: boolean = false) => this.teamService.envoyerMessageSalonMatrix(this.selectedTeam!.id!, texte, urgent);
 
   /** Crises ouvertes proposables pour la mission — une mission ne doit pas pouvoir se rattacher
    * à une crise déjà clôturée (voir validate_crisis_open côté backend). */

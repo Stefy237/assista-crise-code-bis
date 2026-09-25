@@ -806,8 +806,8 @@ class OfferMessageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OfferMessage
-        fields = ['id', 'offer', 'auteur_equipe', 'auteur_equipe_nom', 'contenu', 'date_creation']
-        extra_kwargs = {'auteur_equipe': {'read_only': True}}
+        fields = ['id', 'offer', 'auteur_equipe', 'auteur_equipe_nom', 'contenu', 'date_creation', 'lu_par_institution']
+        extra_kwargs = {'auteur_equipe': {'read_only': True}, 'lu_par_institution': {'read_only': True}}
 
     def get_auteur_equipe_nom(self, obj):
         if not obj.auteur_equipe_id:
@@ -1432,6 +1432,14 @@ class DossierSerializer(serializers.ModelSerializer):
     competence_nom = serializers.CharField(
         source='competence.nom',
         read_only=True
+    )
+
+    # Nature du Besoin capturé à la création (COMPETENCE/MATERIEL/MIXTE) -- classe le dossier
+    # ressource/matériel sur la page Cellule de crise, voir Dossier.besoin.
+    besoin_nature = serializers.CharField(
+        source='besoin.nature',
+        read_only=True,
+        default=None,
     )
 
     equipe_nom = serializers.CharField(

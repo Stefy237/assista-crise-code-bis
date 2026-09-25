@@ -7,6 +7,7 @@ import { ZonesComponent } from './zones/zones.component';
 import { PlansComponent } from './plans/plans.component';
 import { Routes } from '@angular/router';
 import { DashboardComponent } from './dashboard/dashboard.component';
+import { CelluleCriseComponent } from './cellule-crise/cellule-crise.component';
 import { ReportingComponent } from './reporting/reporting.component';
 import { TeamsComponent } from './teams/teams.component';
 import { MapComponent } from '../shared/components/common/map/map.component';
@@ -45,6 +46,7 @@ export const ADMIN_ROUTES: Routes = [
   { path: '', redirectTo: 'dashboard', pathMatch: 'full' },
   { path: 'acces-refuse', component: AccesRefuseComponent },
   { path: 'dashboard', component: DashboardComponent, canActivate: [institutionalEffectiveGuard] },
+  { path: 'cellule-crise', component: CelluleCriseComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'signalements', component: ReportingComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'dossiers', component: DossiersComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'missions', component: MissionsComponent, canActivate: [institutionalEffectiveGuard] },

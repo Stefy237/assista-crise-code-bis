@@ -13,9 +13,20 @@
 
     <div class="messages">
       @for (m of messages; track m.event_id) {
-        <div class="message" [class.sortant]="m.moi">
-          <div class="message-meta">{{ m.expediteur_nom }} · {{ m.horodatage | date:'short' }}</div>
+        <div class="message" [class.sortant]="m.moi" [class.urgent]="m.urgent">
+          <div class="message-meta">
+            @if (m.urgent) { <span class="material-icons badge-urgent" title="Urgent">priority_high</span> }
+            {{ m.expediteur_nom }} · {{ m.horodatage | date:'short' }}
+          </div>
           <div class="message-contenu">{{ m.texte }}</div>
+          @if (m.vu_par.length > 0) {
+            <div class="message-vu">✅ Vu par {{ m.vu_par.join(', ') }}</div>
+          }
+          @if (cadre && reagir && m.vu_par.length === 0) {
+            <button type="button" class="btn-vu" [disabled]="reactionEnCoursEventId === m.event_id" (click)="marquerVu(m)">
+              Marquer vu
+            </button>
+          }
         </div>
       } @empty {
         <p class="hint">Aucun message pour l'instant.</p>
@@ -24,6 +35,11 @@
 
     <div class="saisie">
       <input type="text" placeholder="Écrire à l'équipe..." [(ngModel)]="nouveauMessage" (keyup.enter)="envoyer()">
+      @if (autoriserUrgent) {
+        <label class="case-urgent">
+          <input type="checkbox" [(ngModel)]="urgent"> Urgent
+        </label>
+      }
       <button type="button" [disabled]="!nouveauMessage.trim() || envoiEnCours" (click)="envoyer()">Envoyer</button>
     </div>
   }

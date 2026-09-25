@@ -122,9 +122,27 @@ export class TeamService {
   }
 
   /** POST /api/teams/<id>/salon-matrix-messages/ — poste un message dans le salon Matrix de
-   * l'équipe (attribué à l'utilisateur courant, voir envoyer_message_salon). */
-  envoyerMessageSalonMatrix(id: string, texte: string): Observable<{ messages: MatrixMessage[] }> {
-    return this.http.post<{ messages: MatrixMessage[] }>(`${this.url}/${id}/salon-matrix-messages/`, { texte });
+   * l'équipe (attribué à l'utilisateur courant, voir envoyer_message_salon). `urgent` : ouvert
+   * à tout le monde, y compris un intervenant isolé (décision utilisateur du 26/09). */
+  envoyerMessageSalonMatrix(id: string, texte: string, urgent = false): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.post<{ messages: MatrixMessage[] }>(`${this.url}/${id}/salon-matrix-messages/`, { texte, urgent });
+  }
+
+  /** POST /api/teams/<id>/salon-matrix-reagir/ — accusé "Vu" sur un message (réaction Matrix,
+   * réservé aux cadres régulateur/chef d'équipe/institutionnel, voir salon_matrix_reagir). */
+  reagirSalonMatrix(id: string, eventId: string): Observable<{ status: string }> {
+    return this.http.post<{ status: string }>(`${this.url}/${id}/salon-matrix-reagir/`, { event_id: eventId });
+  }
+
+  /** POST /api/teams/<id>/demarrer-engagement/ — pose engagement_debut=maintenant si pas déjà
+   * engagée (idempotent). Réservé aux cadres, voir Team.engagement_debut. */
+  demarrerEngagement(id: string): Observable<Team> {
+    return this.http.post<Team>(`${this.url}/${id}/demarrer-engagement/`, {});
+  }
+
+  /** POST /api/teams/<id>/mettre-au-repos/ — repasse engagement_debut à null. */
+  mettreAuRepos(id: string): Observable<Team> {
+    return this.http.post<Team>(`${this.url}/${id}/mettre-au-repos/`, {});
   }
 
   rattacherEquipe(parentId: string, equipeId: string): Observable<Team> {

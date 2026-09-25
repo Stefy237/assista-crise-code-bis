@@ -10,6 +10,11 @@ export interface MatrixMessage {
   expediteur_id:   string | null;
   expediteur_nom:  string;
   moi:             boolean;
+  /** Ouvert à tout le monde, y compris un intervenant isolé (décision utilisateur du 26/09). */
+  urgent:          boolean;
+  /** Noms des cadres ayant posé l'accusé "Vu" (réaction Matrix filtrée côté backend, voir
+   * TeamViewSet.salon_matrix_messages) -- vide si personne, jamais rempli par un non-cadre. */
+  vu_par:          string[];
 }
 
 export interface TeamMission {
@@ -75,4 +80,8 @@ export interface Team {
   created_at?:          string;
   actif?:               boolean;           // false = désactivée (politique de désactivation)
   commune_centre?:      { latitude: number | null; longitude: number | null } | null;
+  /** Temps d'engagement continu sans repos (page Cellule de crise) -- null = au repos/pas
+   * encore engagée. Manuel dans les deux sens, voir TeamService.demarrerEngagement/
+   * mettreAuRepos. */
+  engagement_debut?:    string | null;
 }

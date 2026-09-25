@@ -45,6 +45,14 @@ MATRIX_SERVER_NAME = os.environ.get("MATRIX_SERVER_NAME", "matrix.assista-crise.
 SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://synapse:8008")
 _TOKEN_FILE = Path(os.environ.get("TOKEN_FILE", "/data/bridge_token.json"))
 _EXT_EXPEDITEUR_ID = "com.assistacrise.expediteur_id"
+# Message urgent (ouvert à tout le monde, y compris un intervenant isolé, décision utilisateur
+# du 26/09) : simple clé d'extension supplémentaire dans le content, même esprit que
+# _EXT_EXPEDITEUR_ID -- ignorée par les clients Matrix standards.
+_EXT_URGENT = "com.assistacrise.urgent"
+# Clé de réaction posée par le bouton "Vu" (accusé de réception réservé aux cadres) -- un simple
+# emoji, comme n'importe quelle réaction Matrix (Element l'affiche nativement même pour un
+# intervenant isolé sans notre interface).
+CLE_REACTION_VU = "✅"
 
 
 def _bot_access_token() -> str:
@@ -76,21 +84,53 @@ def assurer_membre_salon(user, room_id, displayname=None) -> None:
 
 def lister_messages_salon(room_id, limite=30) -> list:
     """Les `limite` derniers messages texte du salon (bot inclus s'il a lui-même posté, jamais
-    le cas ici), en ordre chronologique. Le champ `moi` n'est PAS calculé ici (dépend de qui
-    consulte), voir TeamViewSet.salon_matrix_messages."""
+    le cas ici), en ordre chronologique, avec leurs réactions Matrix éventuelles (voir
+    CLE_REACTION_VU -- accusé de réception "Vu", filtré par cadre côté TeamViewSet
+    .salon_matrix_messages, pas ici). Le champ `moi` n'est PAS calculé ici (dépend de qui
+    consulte), voir TeamViewSet.salon_matrix_messages.
+
+    `/messages` renvoie tous les types d'événements du salon dans le même `chunk` (pas de second
+    appel réseau nécessaire pour les réactions) -- seul `/sync`/`/context` bundle nativement les
+    réactions sur leur événement cible (`unsigned.m.relations`), ce qui n'est pas utilisé ici."""
     response = requests.get(
         f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/messages",
         headers=_bot_headers(), params={"dir": "b", "limit": str(limite)},
         timeout=10,
     )
     response.raise_for_status()
-    evenements = [
-        e for e in response.json().get("chunk", [])
+    chunk = response.json().get("chunk", [])
+
+    messages = [
+        e for e in chunk
         if e.get("type") == "m.room.message" and e.get("content", {}).get("msgtype") == "m.text"
     ]
-    evenements.reverse()
+    messages.reverse()
+
+    reactions_par_event: dict = {}
+    for e in chunk:
+        if e.get("type") != "m.reaction":
+            continue
+        relates_to = e.get("content", {}).get("m.relates_to", {})
+        if relates_to.get("rel_type") != "m.annotation":
+            continue
+        cible = relates_to.get("event_id")
+        if not cible:
+            continue
+        expediteur_id = e.get("content", {}).get(_EXT_EXPEDITEUR_ID)
+        if not expediteur_id:
+            # Réaction posée directement depuis Element (pas via le bot) : le sender Matrix
+            # brut identifie déjà le bon compte, contrairement à une réaction du bot (voir
+            # envoyer_reaction_salon -- toutes les réactions "Vu" y transitent, le sender serait
+            # sinon systématiquement le bot lui-même).
+            uid = user_id_from_matrix_id(e.get("sender"))
+            expediteur_id = str(uid) if uid else None
+        reactions_par_event.setdefault(cible, []).append({
+            "cle": relates_to.get("key"),
+            "expediteur_id": expediteur_id,
+        })
+
     resultat = []
-    for e in evenements:
+    for e in messages:
         expediteur_id = e["content"].get(_EXT_EXPEDITEUR_ID)
         if not expediteur_id:
             # Pas passé par le bot (posté directement depuis Element) -- retrouver l'UUID
@@ -102,18 +142,41 @@ def lister_messages_salon(room_id, limite=30) -> list:
             "texte": e["content"].get("body", ""),
             "horodatage": e.get("origin_server_ts"),
             "expediteur_id": expediteur_id,
+            "urgent": bool(e["content"].get(_EXT_URGENT)),
+            "reactions": reactions_par_event.get(e["event_id"], []),
         })
     return resultat
 
 
-def envoyer_message_salon(room_id, user, nom, texte) -> None:
+def envoyer_message_salon(room_id, user, nom, texte, urgent=False) -> None:
     txn_id = uuid.uuid4().hex
+    content = {
+        "msgtype": "m.text",
+        "body": f"{nom} : {texte}",
+        _EXT_EXPEDITEUR_ID: str(user.id),
+    }
+    if urgent:
+        content[_EXT_URGENT] = True
     response = requests.put(
         f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{txn_id}",
+        headers=_bot_headers(), json=content, timeout=10,
+    )
+    response.raise_for_status()
+
+
+def envoyer_reaction_salon(room_id, event_id, user, cle=CLE_REACTION_VU) -> None:
+    """Pose une réaction Matrix (m.reaction/m.annotation) sur `event_id` -- utilisé pour
+    l'accusé de réception "Vu" (réservé aux cadres, voir TeamViewSet.salon_matrix_reagir).
+    Toujours postée par le bot (jamais un jeton personnel, voir doc de conception en tête de
+    fichier) : porte donc `_EXT_EXPEDITEUR_ID`, exactement comme envoyer_message_salon, sinon
+    le sender Matrix brut serait systématiquement le bot lui-même et on perdrait qui a vraiment
+    cliqué "Vu"."""
+    txn_id = uuid.uuid4().hex
+    response = requests.put(
+        f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/send/m.reaction/{txn_id}",
         headers=_bot_headers(),
         json={
-            "msgtype": "m.text",
-            "body": f"{nom} : {texte}",
+            "m.relates_to": {"rel_type": "m.annotation", "event_id": event_id, "key": cle},
             _EXT_EXPEDITEUR_ID: str(user.id),
         },
         timeout=10,

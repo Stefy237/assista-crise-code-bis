@@ -144,6 +144,7 @@ from .models import (
     PointType,
     PointOperationnel,
     ImplicationInstitution,
+    BesoinNature,
     ContributionZoneCommune,
     DemandeMobilisation, TypeDemandeMobilisation, StatutDemandeMobilisation,
     TypeImplication,
@@ -1165,6 +1166,14 @@ class OfferSearchFilter(AuthorEmailFilter):
 
     def filter_exclude_type(self, queryset, name, value):
         return queryset.exclude(offer_type__type=value)
+
+    class Meta:
+        model = Offer
+        # Filtres exacts en plus des filtres déclarés ci-dessus -- ajoutés pour l'onglet
+        # "Offres" de la page Cellule de crise (?crisis=&status=DISPONIBLE), absents jusqu'ici :
+        # ce FilterSet n'exposait aucun filtre par crise/statut, silencieusement ignorés côté
+        # django-filter (pas d'erreur, juste tout le catalogue retourné sans filtrage réel).
+        fields = ['crisis', 'status']
 
 class UserViewSet(viewsets.ModelViewSet):
     # select_related('institution') : UserSerializer.get_ma_zone lit obj.institution sur
@@ -2794,6 +2803,21 @@ def resolve_competence_for_information(signalement):
     return mapping_competence.competence if mapping_competence else None
 
 
+def resolve_besoin_for_request(demande):
+    """Le Besoin précis (pas seulement la Competence qui en dérive, voir
+    resolve_competence_for_request) -- capturé sur Dossier.besoin à la création pour classer un
+    dossier ressource/matériel (Besoin.nature) sans jamais avoir à remonter depuis Competence
+    (ambigu : une compétence peut être partagée par plusieurs Besoin, voir BesoinCompetence)."""
+    mapping_besoin = RequestTypeBesoin.objects.filter(request_type=demande.request_type).first()
+    return mapping_besoin.besoin if mapping_besoin else None
+
+
+def resolve_besoin_for_information(signalement):
+    """Mirror de resolve_besoin_for_request pour un signalement."""
+    mapping_besoin = InformationTypeBesoin.objects.filter(information_type=signalement.information_type).first()
+    return mapping_besoin.besoin if mapping_besoin else None
+
+
 # Statuts d'un Dossier considérés comme "en charge active" d'une équipe -- sert à départager
 # plusieurs équipes à égalité de score de zone (voir meilleure_equipe_pour_competence), pas de
 # sens de compter RESOLU/CLOTURE (déjà traités) ni EN_ATTENTE_DISTRIBUTION (pas encore pris en
@@ -2836,7 +2860,7 @@ def meilleure_equipe_pour_competence(crise, competence, objet_localise):
     return moins_charges[0] if len(moins_charges) == 1 else None
 
 
-def _dossier_pour_soumission(champ_fk: str, objet, crise, competence, equipe, titre, description):
+def _dossier_pour_soumission(champ_fk: str, objet, crise, competence, equipe, titre, description, besoin=None):
     """Get-or-update du Dossier lié à `objet` (Request via champ_fk='demande', Information via
     'information') -- évite de créer un doublon quand une équipe est affectée explicitement
     APRÈS que perform_create ait déjà auto-créé un dossier (voir _assign_request_to_team/
@@ -2845,7 +2869,7 @@ def _dossier_pour_soumission(champ_fk: str, objet, crise, competence, equipe, ti
     if dossier is None:
         return Dossier.objects.create(
             numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
-            crise=crise, competence=competence, equipe=equipe,
+            crise=crise, competence=competence, besoin=besoin, equipe=equipe,
             **{champ_fk: objet},
             titre=titre, description=description,
             statut=Dossier.Statut.AFFECTE if equipe else Dossier.Statut.EN_ATTENTE_AFFECTATION,
@@ -2855,9 +2879,11 @@ def _dossier_pour_soumission(champ_fk: str, objet, crise, competence, equipe, ti
     dossier.equipe = equipe
     if not dossier.competence and competence:
         dossier.competence = competence
+    if not dossier.besoin_id and besoin:
+        dossier.besoin = besoin
     if equipe:
         dossier.statut = Dossier.Statut.AFFECTE
-    dossier.save(update_fields=['equipe', 'competence', 'statut'])
+    dossier.save(update_fields=['equipe', 'competence', 'besoin', 'statut'])
     return dossier, False
 
 
@@ -2882,6 +2908,7 @@ def _assign_request_to_team(demande, team, request, mission=None):
         'demande', demande, demande.crisis, resolve_competence_for_request(demande), team,
         titre=demande.title,
         description=f"Demande affectée à l'équipe {team.name} : {demande.title}",
+        besoin=resolve_besoin_for_request(demande),
     )
     if mission:
         dossier.mission = mission
@@ -2968,9 +2995,10 @@ def _assign_information_to_team(signalement, team, request):
     # Get-or-update : InformationViewSet.perform_create a déjà pu auto-créer ce dossier (voir
     # RequestViewSet.perform_create pour le même principe côté demande) -- évite un doublon.
     dossier, cree = _dossier_pour_soumission(
-        'information', signalement, signalement.crisis, None, team,
+        'information', signalement, signalement.crisis, resolve_competence_for_information(signalement), team,
         titre=signalement.title,
         description=f"Signalement affecté à l'équipe {team.name} : {signalement.title}",
+        besoin=resolve_besoin_for_information(signalement),
     )
     if not cree:
         DossierHistorique.objects.create(
@@ -3352,6 +3380,7 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
                     crise=demande.crisis,
                     competence=competence,
+                    besoin=resolve_besoin_for_request(demande),
                     equipe=equipe,
                     demande=demande,
                     titre=demande.title,
@@ -3389,6 +3418,7 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                         numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
                         crise=demande.crisis,
                         competence=None,
+                        besoin=resolve_besoin_for_request(demande),
                         equipe=None,
                         demande=demande,
                         titre=demande.title,
@@ -3740,6 +3770,80 @@ def _creer_equipe_pour_point(point, nom, institution, request):
     if institution is not None:
         _notify_institution_referent_of_team(team, institution, request)
     return team
+
+
+class CelluleCriseView(generics.GenericAPIView):
+    """Page "Cellule de crise" (ressource/moyen/coordination) : un seul appel au chargement,
+    qui provisionne au passage la "cellule" comme une Team comme une autre (voir
+    _creer_equipe_pour_point -- même mécanisme que "je crée une équipe à la volée avec ce
+    point", appliqué ici au PointType CELLULE_CRISE) et retourne les compteurs qui alimentent
+    les badges des 3 panneaux."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request, crise_id):
+        crise = get_object_or_404(Crisis, pk=crise_id)
+        equipe = self._get_or_create_cellule(request, crise)
+        salon = SalonMatrixEquipe.objects.filter(equipe=equipe).first()
+
+        dossiers_en_attente = Dossier.objects.filter(
+            crise=crise,
+            statut__in=[Dossier.Statut.EN_ATTENTE_AFFECTATION, Dossier.Statut.EN_ATTENTE_DISTRIBUTION],
+        )
+        nb_ressource = dossiers_en_attente.filter(besoin__nature__in=[BesoinNature.COMPETENCE, BesoinNature.MIXTE]).count()
+        nb_moyen = dossiers_en_attente.filter(besoin__nature=BesoinNature.MATERIEL).count()
+        nb_non_qualifie = dossiers_en_attente.filter(besoin__isnull=True).count()
+
+        nb_retours_externes = (
+            OfferMessage.objects.filter(lu_par_institution=False, offer__crisis=crise)
+            .values('offer').distinct().count()
+        )
+
+        nb_acteur_en_attente = ImplicationInstitution.objects.filter(
+            crise=crise, type_implication=TypeImplication.ACTEUR, statut=StatutImplication.EN_ATTENTE,
+        ).count()
+
+        return Response({
+            "equipe_id": str(equipe.id),
+            "salon_room_id": salon.room_id if salon else None,
+            "salon_pret": bool(salon and salon.room_id),
+            "compteurs": {
+                "dossiers_ressource_en_attente": nb_ressource,
+                "dossiers_moyen_en_attente": nb_moyen,
+                "dossiers_non_qualifies_en_attente": nb_non_qualifie,
+                "retours_externes_non_lus": nb_retours_externes,
+                "institutions_acteur_en_attente": nb_acteur_en_attente,
+            },
+        })
+
+    def _get_or_create_cellule(self, request, crise):
+        point_type = PointType.objects.filter(code="CELLULE_CRISE").first()
+        point = None
+        if point_type is not None:
+            point = PointOperationnel.objects.filter(crise=crise, type=point_type).first()
+            if point is None:
+                point = PointOperationnel.objects.create(
+                    nom=f"Cellule de crise — {crise.name}", type=point_type, crise=crise,
+                    location=crise.location, environment=get_active_environment(request),
+                )
+
+        if point is not None and point.equipe_id:
+            equipe = point.equipe
+        elif point is not None:
+            institution = getattr(request.user, 'institution', None)
+            equipe = _creer_equipe_pour_point(point, f"Cellule de crise — {crise.name}", institution, request)
+        else:
+            # PointType CELLULE_CRISE absent (référentiel non seedé) -- repli minimal : une
+            # Team directement, sans point, pour ne jamais bloquer la page.
+            equipe, _ = Team.objects.get_or_create(
+                name=f"Cellule de crise — {crise.name}",
+                defaults={"environment": get_active_environment(request)},
+            )
+
+        SalonMatrixEquipe.objects.get_or_create(
+            equipe=equipe, defaults={"environment": get_active_environment(request)},
+        )
+        return equipe
 
 
 def _vue_equipe_link(request, team, membre):
@@ -5230,6 +5334,9 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     "nom": f"{membre.first_name} {membre.last_name}".strip() or membre.email,
                     "equipe_id": str(team.id),
                     "equipe_nom": team.name,
+                    # Temps d'engagement sans repos (page Cellule de crise), voir
+                    # Team.engagement_debut -- None si au repos/pas encore engagée.
+                    "equipe_engagement_debut": team.engagement_debut.isoformat() if team.engagement_debut else None,
                     "institution": institution_nom,
                     "crises": crises,
                     "crise_ids": crise_ids_equipe,
@@ -5262,6 +5369,9 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     "offre_id": str(offre.id),
                     "equipe_id": str(team.id),
                     "equipe_nom": team.name,
+                    # Temps d'engagement sans repos (page Cellule de crise), voir
+                    # Team.engagement_debut -- None si au repos/pas encore engagée.
+                    "equipe_engagement_debut": team.engagement_debut.isoformat() if team.engagement_debut else None,
                     "institution": institution_nom,
                     "crises": crises,
                     "centres": centres,
@@ -5965,6 +6075,47 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         return Response(SalonMatrixEquipeSerializer(salon).data)
 
+    def _est_cadre(self, request, team) -> bool:
+        """« Cadre » (accord utilisateur du 26/09) : acteur institutionnel au sens large, OU le
+        chef d'équipe lui-même -- même définition réutilisée pour le compteur d'engagement et
+        pour le bouton « Vu » (accusé de réception réservé aux cadres, voir
+        salon_matrix_reagir)."""
+        if IsInstitutionalActor().has_permission(request, self):
+            return True
+        return bool(team.leader_id) and team.leader_id == request.user.id
+
+    @action(detail=True, methods=['post'], url_path='demarrer-engagement')
+    def demarrer_engagement(self, request, pk=None):
+        """Pose engagement_debut=maintenant si l'équipe n'est pas déjà engagée (idempotent) --
+        voir Team.engagement_debut. Réservé aux cadres (décision utilisateur du 26/09 : manuel
+        dans les deux sens, aucune inférence automatique depuis l'activité)."""
+        team = self.get_object()
+        if not self._est_cadre(request, team):
+            return Response({"error": "Réservé aux cadres (régulateur/chef d'équipe/institutionnel)."}, status=status.HTTP_403_FORBIDDEN)
+        if not team.engagement_debut:
+            team.engagement_debut = timezone.now()
+            team.save(update_fields=['engagement_debut'])
+            audit_log(
+                request=request, action_code="MODIFICATION", objet_type="Team", objet_id=team.id,
+                commentaire=f"Équipe « {team.name} » engagée.",
+            )
+        return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=['post'], url_path='mettre-au-repos')
+    def mettre_au_repos(self, request, pk=None):
+        """Repasse engagement_debut à None -- voir demarrer_engagement, même garde cadre."""
+        team = self.get_object()
+        if not self._est_cadre(request, team):
+            return Response({"error": "Réservé aux cadres (régulateur/chef d'équipe/institutionnel)."}, status=status.HTTP_403_FORBIDDEN)
+        if team.engagement_debut:
+            team.engagement_debut = None
+            team.save(update_fields=['engagement_debut'])
+            audit_log(
+                request=request, action_code="MODIFICATION", objet_type="Team", objet_id=team.id,
+                commentaire=f"Équipe « {team.name} » mise au repos.",
+            )
+        return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
+
     @action(detail=True, methods=['get', 'post'], url_path='salon-matrix-messages')
     def salon_matrix_messages(self, request, pk=None):
         """Chat intégré à la vue équipe (pas de fenêtre séparée / lien Element, demande
@@ -5975,7 +6126,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         jamais un jeton exposé au navigateur. Accessible à un membre de l'équipe OU à un acteur
         institutionnel qui la gère (régulateur), même s'il n'est pas lui-même membre : dans ce
         second cas on le fait rejoindre le salon à la volée pour qu'il y ait un compte visible."""
-        from .matrix import assurer_membre_salon, envoyer_message_salon, lister_messages_salon, matrix_user_id
+        from .matrix import assurer_membre_salon, envoyer_message_salon, lister_messages_salon, matrix_user_id, CLE_REACTION_VU
 
         team = self.get_object()
         est_membre = team.members.filter(id=request.user.id).exists()
@@ -6000,7 +6151,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             texte = (request.data.get('texte') or '').strip()
             if not texte:
                 return Response({"error": "texte requis."}, status=status.HTTP_400_BAD_REQUEST)
-            envoyer_message_salon(salon.room_id, request.user, nom, texte)
+            envoyer_message_salon(salon.room_id, request.user, nom, texte, urgent=bool(request.data.get('urgent')))
 
         # Table de correspondance UUID Django -> nom lisible, pour attribuer les messages postés
         # directement depuis Element (pas de préfixe de nom dans leur corps, contrairement aux
@@ -6011,8 +6162,52 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         for m in messages:
             m['expediteur_nom'] = noms.get(m['expediteur_id'], 'Compte externe')
             m['moi'] = m['expediteur_id'] == str(request.user.id)
+            # "Vu" : ne fait jamais confiance à une réaction dont l'auteur n'est pas cadre au
+            # moment de l'affichage (même si quelqu'un réagit depuis Element brut plutôt que le
+            # bouton dédié, voir salon_matrix_reagir) -- filtre appliqué ici, pas seulement au
+            # bouton d'envoi.
+            vus = []
+            for r in m.pop('reactions', []):
+                if r.get('cle') != CLE_REACTION_VU or not r.get('expediteur_id'):
+                    continue
+                reacteur = User.objects.filter(pk=r['expediteur_id']).first()
+                if reacteur and self._est_cadre_user(reacteur, team):
+                    vus.append(noms.get(r['expediteur_id']) or f"{reacteur.first_name} {reacteur.last_name}".strip() or reacteur.email)
+            m['vu_par'] = vus
 
         return Response({"messages": messages})
+
+    def _est_cadre_user(self, user, team) -> bool:
+        """Variante de _est_cadre pour un utilisateur ARBITRAIRE (pas forcément l'appelant de la
+        requête courante) -- sert à filtrer, à l'affichage, quelles réactions "Vu" comptent
+        vraiment (voir salon_matrix_messages)."""
+        if user.type in INSTITUTIONAL_TYPES:
+            return True
+        return bool(team.leader_id) and team.leader_id == user.id
+
+    @action(detail=True, methods=['post'], url_path='salon-matrix-reagir')
+    def salon_matrix_reagir(self, request, pk=None):
+        """Accusé de réception "Vu" sur un message du salon -- réservé aux cadres (voir
+        _est_cadre), pose une réaction Matrix (voir envoyer_reaction_salon). Symétrique à
+        l'ouverture large de l'envoi de message (tout le monde peut écrire, y compris un
+        intervenant isolé) : ici au contraire on restreint, pour que "Vu" reste un vrai signal
+        de prise en compte par un responsable, pas un simple like."""
+        from .matrix import envoyer_reaction_salon
+
+        team = self.get_object()
+        if not self._est_cadre(request, team):
+            return Response({"error": "Réservé aux cadres (régulateur/chef d'équipe/institutionnel)."}, status=status.HTTP_403_FORBIDDEN)
+
+        event_id = request.data.get('event_id')
+        if not event_id:
+            return Response({"error": "event_id requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        salon = SalonMatrixEquipe.objects.filter(equipe=team).first()
+        if salon is None or not salon.room_id:
+            return Response({"error": "Le salon Matrix de cette équipe n'est pas encore provisionné."}, status=status.HTTP_409_CONFLICT)
+
+        envoyer_reaction_salon(salon.room_id, event_id, request.user)
+        return Response({"status": "ok"})
 
     @action(detail=True, methods=['post'], url_path='provisionner-canal-meshtastic')
     def provisionner_canal_meshtastic(self, request, pk=None):
@@ -6307,7 +6502,7 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             # _peut_gerer_stock_point) peut légitimement gérer son stock, comme pour
             # MaterielPointViewSet — la vérification fine se fait dans l'action elle-même.
             return [permissions.IsAuthenticated()]
-        if self.action == 'messages':
+        if self.action in ('messages', 'retours_externes'):
             return [IsInstitutionalActor()]
         return [AllowAny()]
 
@@ -6375,6 +6570,9 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         réponse/édition (voir OfferReponsePublicView)."""
         offre = self.get_object()
         if request.method == "GET":
+            # Marque tout le fil comme lu par l'institution -- alimente la file "Retours
+            # externes" de la page Cellule de crise (voir OfferMessage.lu_par_institution).
+            offre.messages.filter(lu_par_institution=False).update(lu_par_institution=True)
             return Response(OfferMessageSerializer(offre.messages.all(), many=True).data)
 
         contenu = (request.data.get('contenu') or '').strip()
@@ -6387,6 +6585,7 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         message = OfferMessage.objects.create(
             offer=offre, auteur_equipe=request.user, contenu=contenu, environment=offre.environment,
+            lu_par_institution=True,
         )
 
         reponse_url = f"{settings.SERVER_URL.rstrip('/')}/repondre-offre/{offre.reponse_token}/"
@@ -6409,6 +6608,17 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             print(f"Erreur envoi email message offre : {e}")
 
         return Response(OfferMessageSerializer(message).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"], url_path="retours-externes")
+    def retours_externes(self, request):
+        """Offres ayant au moins un message non lu par l'institution (voir
+        OfferMessage.lu_par_institution) -- alimente l'onglet "Retours externes" du panneau
+        Ressource de la page Cellule de crise. `?crisis=` filtre sur une crise précise."""
+        qs = self.get_queryset().filter(messages__lu_par_institution=False).distinct()
+        crisis_id = request.query_params.get('crisis')
+        if crisis_id:
+            qs = qs.filter(crisis_id=crisis_id)
+        return Response(OfferSerializer(qs, context={'request': request}, many=True).data)
 
     @action(detail=False, methods=["get"], permission_classes=[IsInstitutionalActor],
             pagination_class=OptionalPageNumberPagination)
@@ -6950,7 +7160,7 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
                 dossier = Dossier.objects.create(
                     numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
-                    crise=info.crisis, competence=competence, equipe=equipe,
+                    crise=info.crisis, competence=competence, besoin=resolve_besoin_for_information(info), equipe=equipe,
                     information=info, titre=info.title,
                     description=f"Signalement créé automatiquement : {info.title}",
                     statut=statut, environment=info.environment,

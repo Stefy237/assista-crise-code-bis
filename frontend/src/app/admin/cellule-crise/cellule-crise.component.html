@@ -1,0 +1,350 @@
+<div class="cellule-page">
+
+  <div class="entete">
+    <h1>Cellule de crise</h1>
+    <div class="select-wrapper">
+      <select [(ngModel)]="criseId" (change)="onCriseChange()">
+        <option value="">Choisissez une crise</option>
+        @for (crise of crises; track crise.id) {
+          <option [value]="crise.id">{{ crise.name }}</option>
+        }
+      </select>
+    </div>
+  </div>
+
+  @if (!criseId) {
+    <p class="hint">Choisissez une crise pour ouvrir sa cellule.</p>
+  } @else {
+
+    <!-- Barre "Messages" -- chat interne de la cellule (les 3 rôles entre eux) -->
+    @if (cellule) {
+      <div class="barre-repliable">
+        <button type="button" class="barre-entete" (click)="messagesOuvert = !messagesOuvert">
+          <span class="material-icons">forum</span>
+          Messages de la cellule
+          @if (!cellule.salon_pret) { <span class="hint-petit">(salon en préparation…)</span> }
+          <span class="material-icons chevron">{{ messagesOuvert ? 'expand_less' : 'expand_more' }}</span>
+        </button>
+        @if (messagesOuvert && cellule.salon_pret) {
+          <app-matrix-salon-chat
+            [cle]="'cellule-' + cellule.equipe_id"
+            titre="Cellule de crise"
+            [autoriserUrgent]="true"
+            [cadre]="true"
+            [chargerMessages]="chargerMessagesEquipe(cellule.equipe_id)"
+            [envoyerMessage]="envoyerMessageEquipe(cellule.equipe_id)"
+            [reagir]="reagirMessageEquipe(cellule.equipe_id)">
+          </app-matrix-salon-chat>
+        }
+      </div>
+
+      <!-- Barre "Urgences" -- messages marqués urgents, tous salons de la crise confondus -->
+      <div class="barre-repliable">
+        <button type="button" class="barre-entete" (click)="urgencesOuvert = !urgencesOuvert">
+          <span class="material-icons">priority_high</span>
+          Urgences
+          @if (nombreUrgences > 0) { <span class="badge badge-urgent">{{ nombreUrgences }}</span> }
+          <span class="material-icons chevron">{{ urgencesOuvert ? 'expand_less' : 'expand_more' }}</span>
+        </button>
+        @if (urgencesOuvert) {
+          <div class="liste-urgences">
+            @for (item of messagesUrgents; track item.message.event_id) {
+              <div class="urgence-item">
+                <strong>{{ item.equipeNom }}</strong> — {{ item.message.expediteur_nom }} :
+                {{ item.message.texte }}
+                @if (item.message.vu_par.length > 0) {
+                  <span class="vu">✅ Vu par {{ item.message.vu_par.join(', ') }}</span>
+                }
+              </div>
+            } @empty {
+              <p class="hint">Aucun message urgent actuellement.</p>
+            }
+          </div>
+        }
+      </div>
+    }
+
+    <!-- ─── Panneau RESSOURCE ─────────────────────────────────────────── -->
+    <div class="panneau">
+      <button type="button" class="panneau-entete" (click)="basculerPanneau('ressource')">
+        <span class="material-icons">groups</span>
+        <h2>Ressource</h2>
+        @if (cellule) {
+          <span class="badge">{{ cellule.compteurs.dossiers_ressource_en_attente }}</span>
+        }
+        <span class="material-icons chevron">{{ panneaux.ressource ? 'expand_less' : 'expand_more' }}</span>
+      </button>
+
+      @if (panneaux.ressource) {
+        <div class="panneau-corps panneau-technique">
+          <div class="onglets">
+            <button type="button" [class.actif]="ongletRessource === 'demandes'" (click)="changerOngletRessource('demandes')">
+              Demandes <span class="badge-onglet">{{ dossiersNonAffectesFiltres.length }}</span>
+            </button>
+            <button type="button" [class.actif]="ongletRessource === 'offres'" (click)="changerOngletRessource('offres')">
+              Offres <span class="badge-onglet">{{ offresDisponibles.length }}</span>
+            </button>
+            <button type="button" [class.actif]="ongletRessource === 'disponibilites'" (click)="changerOngletRessource('disponibilites')">
+              Disponibilités <span class="badge-onglet">{{ disponibilites.length }}</span>
+            </button>
+            <button type="button" [class.actif]="ongletRessource === 'signalements'" (click)="changerOngletRessource('signalements')">
+              Signalements <span class="badge-onglet">{{ signalementsNonAffectesFiltres.length }}</span>
+            </button>
+            <button type="button" [class.actif]="ongletRessource === 'retours'" (click)="changerOngletRessource('retours')">
+              Retours externes <span class="badge-onglet">{{ retoursExternes.length }}</span>
+            </button>
+          </div>
+
+          @if (chargementRessource) {
+            <p class="hint">Chargement…</p>
+          } @else {
+
+            @if (ongletRessource === 'demandes') {
+              <table class="table-dense">
+                <thead><tr><th>Titre</th><th>Compétence</th><th>Priorité</th><th>Équipe suggérée</th><th></th></tr></thead>
+                <tbody>
+                  @for (d of dossiersNonAffectesFiltres; track d.id) {
+                    <tr>
+                      <td>{{ d.titre }}</td>
+                      <td>
+                        @if (d.competence_nom) {
+                          <a (click)="basculerExclusion(d.competence_nom)" title="Masquer cette catégorie">{{ d.competence_nom }}</a>
+                        } @else { — }
+                      </td>
+                      <td>{{ d.priorite_libelle || d.priorite }}</td>
+                      <td>{{ d.equipe_nom || '—' }}</td>
+                      <td>
+                        @if (d.equipe) {
+                          <button type="button" (click)="affecterDossier(d, d.equipe)">Confirmer</button>
+                        }
+                      </td>
+                    </tr>
+                  } @empty {
+                    <tr><td colspan="5" class="hint">Aucune demande en attente.</td></tr>
+                  }
+                </tbody>
+              </table>
+            }
+
+            @if (ongletRessource === 'offres') {
+              <table class="table-dense">
+                <thead><tr><th>Titre</th><th>Type</th><th>Compétences</th><th>Distance</th></tr></thead>
+                <tbody>
+                  @for (o of offresDisponibles; track o.id) {
+                    <tr>
+                      <td>{{ o.title }}</td>
+                      <td>{{ o.offer_type_nom }}</td>
+                      <td>{{ (o.competences_libelles || []).join(', ') || '—' }}</td>
+                      <td>{{ o.distance_from_crisis_km != null ? (o.distance_from_crisis_km | number:'1.0-1') + ' km' : '—' }}</td>
+                    </tr>
+                  } @empty {
+                    <tr><td colspan="4" class="hint">Aucune offre disponible.</td></tr>
+                  }
+                </tbody>
+              </table>
+            }
+
+            @if (ongletRessource === 'disponibilites') {
+              <table class="table-dense">
+                <thead><tr><th>Offre</th><th>Date</th><th>Créneau</th></tr></thead>
+                <tbody>
+                  @for (dispo of disponibilites; track dispo.id) {
+                    <tr><td>{{ dispo.offer }}</td><td>{{ dispo.date }}</td><td>{{ dispo.creneau }}</td></tr>
+                  } @empty {
+                    <tr><td colspan="3" class="hint">Aucune disponibilité déclarée.</td></tr>
+                  }
+                </tbody>
+              </table>
+            }
+
+            @if (ongletRessource === 'signalements') {
+              <table class="table-dense">
+                <thead><tr><th>Titre</th><th>Compétence</th><th>Priorité</th><th>Équipe suggérée</th><th></th></tr></thead>
+                <tbody>
+                  @for (d of signalementsNonAffectesFiltres; track d.id) {
+                    <tr>
+                      <td>{{ d.titre }}</td>
+                      <td>{{ d.competence_nom || '—' }}</td>
+                      <td>{{ d.priorite_libelle || d.priorite }}</td>
+                      <td>{{ d.equipe_nom || '—' }}</td>
+                      <td>
+                        @if (d.equipe) {
+                          <button type="button" (click)="affecterDossier(d, d.equipe)">Confirmer</button>
+                        }
+                      </td>
+                    </tr>
+                  } @empty {
+                    <tr><td colspan="5" class="hint">Aucun signalement en attente.</td></tr>
+                  }
+                </tbody>
+              </table>
+            }
+
+            @if (ongletRessource === 'retours') {
+              <table class="table-dense">
+                <thead><tr><th>Offre</th><th>Propriétaire</th></tr></thead>
+                <tbody>
+                  @for (o of retoursExternes; track o.id) {
+                    <tr><td>{{ o.title }}</td><td>{{ o.email_offer }}</td></tr>
+                  } @empty {
+                    <tr><td colspan="2" class="hint">Aucun retour externe non lu.</td></tr>
+                  }
+                </tbody>
+              </table>
+            }
+          }
+        </div>
+      }
+    </div>
+
+    <!-- ─── Panneau MOYEN ─────────────────────────────────────────────── -->
+    <div class="panneau">
+      <button type="button" class="panneau-entete" (click)="basculerPanneau('moyen')">
+        <span class="material-icons">inventory_2</span>
+        <h2>Moyen</h2>
+        @if (cellule) {
+          <span class="badge">{{ cellule.compteurs.dossiers_moyen_en_attente }}</span>
+        }
+        <span class="material-icons chevron">{{ panneaux.moyen ? 'expand_less' : 'expand_more' }}</span>
+      </button>
+
+      @if (panneaux.moyen) {
+        <div class="panneau-corps">
+          @for (equipe of equipes; track equipe.team.id) {
+            <div class="carte-equipe">
+              <button type="button" class="carte-equipe-entete" (click)="basculerEquipe(equipe.team.id!)">
+                <strong>{{ equipe.team.name }}</strong>
+                <span class="resume-equipe">
+                  {{ equipe.nbPersonnes }} pers.
+                  @if (materielAffiche(equipe).texte) {
+                    · {{ materielAffiche(equipe).texte }}
+                    @if (materielAffiche(equipe).reste > 0) { et {{ materielAffiche(equipe).reste }} autres }
+                  }
+                </span>
+                <span class="badge-engagement" [class.au-repos]="!equipe.team.engagement_debut">
+                  {{ dureeDepuis(equipe.team.engagement_debut) }}
+                </span>
+                <span class="material-icons chevron">{{ estDepliee(equipe.team.id!) ? 'expand_less' : 'expand_more' }}</span>
+              </button>
+
+              @if (estDepliee(equipe.team.id!)) {
+                <div class="carte-equipe-corps">
+                  <div class="ligne-actions">
+                    @if (equipe.team.engagement_debut) {
+                      <button type="button" (click)="mettreAuRepos(equipe.team)">Mettre au repos</button>
+                    } @else {
+                      <button type="button" (click)="demarrerEngagement(equipe.team)">Démarrer l'engagement</button>
+                    }
+                    <a [routerLink]="['/admin/equipes']" [queryParams]="{ openTeam: equipe.team.id }" class="lien-fiche">Voir la fiche complète →</a>
+                  </div>
+
+                  @if (equipe.team.commune_centre?.latitude != null) {
+                    <app-minimap
+                      [latitude]="equipe.team.commune_centre!.latitude!"
+                      [longitude]="equipe.team.commune_centre!.longitude!"
+                      [zoneGeojson]="equipe.team.zone_precise_geojson || null"
+                      [zoom]="11">
+                    </app-minimap>
+                  } @else {
+                    <p class="hint-petit">Zone non définie pour cette équipe.</p>
+                  }
+
+                  <h4>Dossiers</h4>
+                  <ul class="liste-simple">
+                    @for (d of (dossiersParEquipe[equipe.team.id!] || []); track d.id) {
+                      <li>{{ d.titre }} — {{ d.statut }}</li>
+                    } @empty {
+                      <li class="hint">Aucun dossier.</li>
+                    }
+                  </ul>
+
+                  @if (equipe.team.salon_matrix_room_id) {
+                    <app-matrix-salon-chat
+                      [cle]="equipe.team.id!"
+                      [titre]="'Salon — ' + equipe.team.name"
+                      [pretACharger]="estDepliee(equipe.team.id!)"
+                      [autoriserUrgent]="true"
+                      [cadre]="estCadreEquipe(equipe.team)"
+                      [chargerMessages]="chargerMessagesEquipe(equipe.team.id!)"
+                      [envoyerMessage]="envoyerMessageEquipe(equipe.team.id!)"
+                      [reagir]="reagirMessageEquipe(equipe.team.id!)">
+                    </app-matrix-salon-chat>
+                  } @else {
+                    <p class="hint-petit">Salon Matrix non provisionné pour cette équipe.</p>
+                  }
+                </div>
+              }
+            </div>
+          } @empty {
+            <p class="hint">Aucune équipe rattachée à cette crise.</p>
+          }
+        </div>
+      }
+    </div>
+
+    <!-- ─── Panneau COORDINATION ──────────────────────────────────────── -->
+    <div class="panneau">
+      <button type="button" class="panneau-entete" (click)="basculerPanneau('coordination')">
+        <span class="material-icons">hub</span>
+        <h2>Coordination</h2>
+        <span class="material-icons chevron">{{ panneaux.coordination ? 'expand_less' : 'expand_more' }}</span>
+      </button>
+
+      @if (panneaux.coordination) {
+        <div class="panneau-corps">
+
+          @if (cellule) {
+            <div class="bandeau-compteurs">
+              <div><strong>{{ cellule.compteurs.dossiers_ressource_en_attente }}</strong><span>Ressource</span></div>
+              <div><strong>{{ cellule.compteurs.dossiers_moyen_en_attente }}</strong><span>Moyen</span></div>
+              <div><strong>{{ cellule.compteurs.dossiers_non_qualifies_en_attente }}</strong><span>Non qualifiés</span></div>
+              <div><strong>{{ cellule.compteurs.retours_externes_non_lus }}</strong><span>Retours externes</span></div>
+              <div><strong>{{ cellule.compteurs.institutions_acteur_en_attente }}</strong><span>Institutions à valider</span></div>
+            </div>
+          }
+
+          <h4>Affectations à confirmer</h4>
+          <ul class="liste-simple">
+            @for (d of dossiersAValider; track d.id) {
+              <li>
+                {{ d.titre }} → <strong>{{ d.equipe_nom }}</strong>
+                <button type="button" (click)="confirmerAffectation(d)">Confirmer</button>
+              </li>
+            } @empty {
+              <li class="hint">Rien à valider.</li>
+            }
+          </ul>
+
+          <h4>Institutions à valider (acteur)</h4>
+          <ul class="liste-simple">
+            @for (i of implicationsEnAttente; track i.id) {
+              <li>
+                {{ i.institution_nom }} — {{ (i.themes_libelles || []).join(', ') }}
+                <button type="button" (click)="validerImplication(i)">Valider</button>
+                <button type="button" class="btn-secondaire" (click)="refuserImplication(i)">Refuser</button>
+              </li>
+            } @empty {
+              <li class="hint">Rien à valider.</li>
+            }
+          </ul>
+
+          <h4>Journal de bord</h4>
+          <div class="form-journal">
+            <textarea [(ngModel)]="nouvelleEntreeJournal" placeholder="Nouvelle entrée…" rows="2"></textarea>
+            <button type="button" [disabled]="!nouvelleEntreeJournal.trim()" (click)="envoyerEntreeJournal()">Ajouter</button>
+          </div>
+          <div class="fil-journal">
+            @for (entree of journal; track entree.id) {
+              <div class="entree-journal">
+                <span class="meta">{{ entree.auteur_nom }} · {{ entree.date_creation | date:'short' }}</span>
+                <p>{{ entree.contenu }}</p>
+              </div>
+            } @empty {
+              <p class="hint">Aucune entrée pour l'instant.</p>
+            }
+          </div>
+        </div>
+      }
+    </div>
+  }
+</div>

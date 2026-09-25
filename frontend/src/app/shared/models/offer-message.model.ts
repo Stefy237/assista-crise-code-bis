@@ -5,4 +5,7 @@ export interface OfferMessage {
   auteur_equipe_nom?: string | null;
   contenu: string;
   date_creation: string;
+  /** True dès la création si posé par l'équipe (déjà "lu"), false si posé par le propriétaire
+   * de l'offre jusqu'à ce qu'un institutionnel ouvre le fil -- voir OfferViewSet.messages. */
+  lu_par_institution: boolean;
 }

@@ -33,16 +33,42 @@
   padding: .4rem .6rem;
 
   &.sortant { align-self: flex-end; background: #ede9fe; }
+  &.urgent { border: 1px solid #dc2626; background: #fef2f2; }
 
-  .message-meta { font-size: .68rem; color: #6b7280; margin-bottom: .15rem; }
+  .message-meta { font-size: .68rem; color: #6b7280; margin-bottom: .15rem; display: flex; align-items: center; gap: .2rem; }
   .message-contenu { font-size: .85rem; color: #1f2937; white-space: pre-wrap; }
+  .badge-urgent { font-size: 14px; color: #dc2626; }
+  .message-vu { font-size: .72rem; color: #15803d; margin-top: .2rem; }
+}
+
+.btn-vu {
+  margin-top: .3rem;
+  align-self: flex-start;
+  font-size: .72rem;
+  padding: .15rem .5rem;
+  border-radius: 999px;
+  border: 1px solid #15803d;
+  background: #fff;
+  color: #15803d;
+  cursor: pointer;
+  &:disabled { opacity: .5; cursor: not-allowed; }
 }
 
 .saisie {
   display: flex;
+  align-items: center;
   gap: .5rem;
 
-  input { flex: 1; padding: .5rem .7rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: .85rem; }
+  input[type="text"] { flex: 1; padding: .5rem .7rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: .85rem; }
+
+  .case-urgent {
+    display: inline-flex;
+    align-items: center;
+    gap: .25rem;
+    font-size: .8rem;
+    color: #dc2626;
+    white-space: nowrap;
+  }
 
   button {
     padding: .5rem 1rem;
