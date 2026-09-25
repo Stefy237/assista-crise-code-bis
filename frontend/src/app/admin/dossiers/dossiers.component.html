@@ -20,11 +20,27 @@
     </div>
   </div>
 
+  <div class="selection-toolbar" *ngIf="selection.size > 0">
+    <span>{{ selection.size }} dossier(s) sélectionné(s)</span>
+    <select [(ngModel)]="bulkEquipeId">
+      <option value="">Choisir une équipe…</option>
+      <option *ngFor="let t of teams" [ngValue]="t.id">{{ t.name }}</option>
+    </select>
+    <button type="button" [disabled]="!bulkEquipeId || bulkEnCours" (click)="reaffecterSelection()">
+      {{ bulkEnCours ? 'Réaffectation…' : 'Réaffecter la sélection' }}
+    </button>
+    <button type="button" class="btn-secondary" (click)="selection.clear()">Annuler la sélection</button>
+  </div>
+
   <div class="dossiers-grid">
 
     <div class="dossier-card" *ngFor="let d of dossiers">
 
       <div class="card-top">
+
+        <label class="select-dossier" (click)="$event.stopPropagation()">
+          <input type="checkbox" [checked]="estSelectionne(d.id)" (change)="basculerSelection(d.id)">
+        </label>
 
         <div class="numero">
 

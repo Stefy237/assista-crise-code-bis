@@ -37,6 +37,43 @@
   }
 }
 
+.selection-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: .6rem .9rem;
+  margin-bottom: 1rem;
+  font-size: .88rem;
+
+  select {
+    padding: .35rem .6rem;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+  }
+
+  button {
+    border: none;
+    border-radius: 6px;
+    padding: .35rem .8rem;
+    cursor: pointer;
+    background: #2563eb;
+    color: white;
+    &:disabled { opacity: .6; cursor: not-allowed; }
+    &.btn-secondary { background: #e5e7eb; color: #374151; }
+  }
+}
+
+.select-dossier {
+  display: inline-flex;
+  margin-right: .5rem;
+}
+
 .dossiers-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));

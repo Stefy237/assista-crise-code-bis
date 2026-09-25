@@ -45,6 +45,13 @@ export class DossiersComponent implements OnInit {
   viewMode: 'ma_file' | 'tous' = 'tous';
   isRegulateur = false;
 
+  // Sélection multiple + réaffectation en masse (voir DossierViewSet.affecter_equipe_masse) --
+  // même pattern que ressources-mobilisees (Set d'ids sélectionnés, toolbar visible dès qu'il y
+  // en a au moins un).
+  selection = new Set<string>();
+  bulkEquipeId = '';
+  bulkEnCours = false;
+
   selectedDossier: Dossier | null = null;
   savingEquipe = false;
   savingStatut = false;
@@ -96,8 +103,35 @@ export class DossiersComponent implements OnInit {
 
     source.subscribe(data => {
       this.dossiers = data;
+      this.selection.clear();
     });
   }
+
+  estSelectionne(id: string): boolean {
+    return this.selection.has(id);
+  }
+
+  basculerSelection(id: string): void {
+    if (this.selection.has(id)) {
+      this.selection.delete(id);
+    } else {
+      this.selection.add(id);
+    }
+  }
+
+  reaffecterSelection(): void {
+    if (this.selection.size === 0 || !this.bulkEquipeId) return;
+    this.bulkEnCours = true;
+    this.dossierService.affecterEquipeBulk([...this.selection], this.bulkEquipeId).subscribe({
+      next: () => {
+        this.bulkEnCours = false;
+        this.bulkEquipeId = '';
+        this.load();
+      },
+      error: () => { this.bulkEnCours = false; },
+    });
+  }
+
   openDossier(dossier: Dossier): void {
 
     this.selectedDossier = dossier;

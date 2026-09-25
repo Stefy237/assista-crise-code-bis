@@ -64,5 +64,14 @@ export class DossierService {
   definirStatut(id: string, statut: string): Observable<Dossier> {
     return this.http.post<Dossier>(`${this.url}/${id}/definir-statut/`, { statut });
   }
+
+  /** POST /api/dossiers/affecter-equipe-masse/ — réaffecte plusieurs dossiers à une même équipe
+   * en une fois (même effet que affecterEquipe appelé dossier par dossier). Réservé
+   * institutionnel. */
+  affecterEquipeBulk(dossierIds: string[], equipeId: string): Observable<{ affectes: number; dossiers: Dossier[] }> {
+    return this.http.post<{ affectes: number; dossiers: Dossier[] }>(`${this.url}/affecter-equipe-masse/`, {
+      dossiers: dossierIds, equipe: equipeId,
+    });
+  }
 }
 

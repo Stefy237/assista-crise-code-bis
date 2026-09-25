@@ -940,19 +940,11 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=["post"], url_path="affecter-equipe", permission_classes=[IsInstitutionalActor])
-    def affecter_equipe(self, request, pk=None):
-        """Affecte (ou réaffecte) une équipe à ce dossier directement depuis la vue régulateur.
-        Jusqu'ici, seule la création via assign_team/creer_dossier peuplait correctement
-        DossierParticipant et notifiait les régulateurs — un dossier déjà existant sans équipe
-        (ou à réaffecter) n'avait aucun chemin dédié, seulement le PATCH générique qui ne fait
-        ni l'un ni l'autre. Fait passer le statut à AFFECTE s'il n'était qu'en attente."""
-        dossier = self.get_object()
-        team_id = request.data.get('equipe')
-        if not team_id:
-            return Response({"error": "Équipe requise."}, status=status.HTTP_400_BAD_REQUEST)
-        team = get_object_or_404(Team, pk=team_id)
-
+    def _affecter_equipe_un_dossier(self, dossier, team, request):
+        """Corps partagé par affecter_equipe (un dossier) et affecter_equipe_masse (plusieurs) :
+        affecte l'équipe, fait passer le statut à AFFECTE s'il n'était qu'en attente (sert aussi
+        de validation d'une affectation auto-suggérée, voir RequestViewSet/InformationViewSet
+        .perform_create), historise, notifie, journalise."""
         ancien_statut = dossier.statut
         dossier.equipe = team
         if dossier.statut in (
@@ -977,7 +969,44 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             ancien_etat=ancien_statut, nouvel_etat=dossier.statut,
             commentaire=f"Équipe affectée au dossier {dossier.numero} : {team.name}",
         )
+        return dossier
+
+    @action(detail=True, methods=["post"], url_path="affecter-equipe", permission_classes=[IsInstitutionalActor])
+    def affecter_equipe(self, request, pk=None):
+        """Affecte (ou réaffecte) une équipe à ce dossier directement depuis la vue régulateur.
+        Jusqu'ici, seule la création via assign_team/creer_dossier peuplait correctement
+        DossierParticipant et notifiait les régulateurs — un dossier déjà existant sans équipe
+        (ou à réaffecter) n'avait aucun chemin dédié, seulement le PATCH générique qui ne fait
+        ni l'un ni l'autre. Fait passer le statut à AFFECTE s'il n'était qu'en attente."""
+        dossier = self.get_object()
+        team_id = request.data.get('equipe')
+        if not team_id:
+            return Response({"error": "Équipe requise."}, status=status.HTTP_400_BAD_REQUEST)
+        team = get_object_or_404(Team, pk=team_id)
+        dossier = self._affecter_equipe_un_dossier(dossier, team, request)
         return Response(DossierSerializer(dossier, context=self.get_serializer_context()).data)
+
+    @action(detail=False, methods=["post"], url_path="affecter-equipe-masse", permission_classes=[IsInstitutionalActor])
+    def affecter_equipe_masse(self, request):
+        """Réaffecte plusieurs dossiers à une même équipe en une fois (ex: transférer toute la
+        file d'une équipe indisponible vers une autre) -- même effet que affecter_equipe appelé
+        un par un, juste groupé pour éviter de le faire dossier par dossier depuis l'UI."""
+        dossier_ids = request.data.get('dossiers') or []
+        team_id = request.data.get('equipe')
+        if not dossier_ids:
+            return Response({"error": "Aucun dossier sélectionné."}, status=status.HTTP_400_BAD_REQUEST)
+        if not team_id:
+            return Response({"error": "Équipe requise."}, status=status.HTTP_400_BAD_REQUEST)
+        team = get_object_or_404(Team, pk=team_id)
+
+        dossiers = list(self.get_queryset().filter(pk__in=dossier_ids))
+        for dossier in dossiers:
+            self._affecter_equipe_un_dossier(dossier, team, request)
+
+        return Response({
+            "affectes": len(dossiers),
+            "dossiers": DossierSerializer(dossiers, many=True, context=self.get_serializer_context()).data,
+        })
 
     @action(detail=True, methods=["post"], url_path="definir-statut", permission_classes=[permissions.IsAuthenticated])
     def definir_statut(self, request, pk=None):
@@ -2754,6 +2783,84 @@ def resolve_competence_for_request(demande):
     return mapping_competence.competence if mapping_competence else None
 
 
+def resolve_competence_for_information(signalement):
+    """Compétence déduite du type de signalement (InformationType -> Besoin -> Competence),
+    mirror exact de resolve_competence_for_request -- voir InformationTypeBesoin (pont ajouté
+    le 25/09 pour les thèmes à l'écoute des formulaires publics, réutilisé ici)."""
+    mapping_besoin = InformationTypeBesoin.objects.filter(information_type=signalement.information_type).first()
+    if not mapping_besoin:
+        return None
+    mapping_competence = BesoinCompetence.objects.filter(besoin=mapping_besoin.besoin).first()
+    return mapping_competence.competence if mapping_competence else None
+
+
+# Statuts d'un Dossier considérés comme "en charge active" d'une équipe -- sert à départager
+# plusieurs équipes à égalité de score de zone (voir meilleure_equipe_pour_competence), pas de
+# sens de compter RESOLU/CLOTURE (déjà traités) ni EN_ATTENTE_DISTRIBUTION (pas encore pris en
+# charge par personne).
+STATUTS_DOSSIER_CHARGE_ACTIVE = [Dossier.Statut.NOUVEAU, Dossier.Statut.AFFECTE, Dossier.Statut.EN_COURS]
+
+
+def meilleure_equipe_pour_competence(crise, competence, objet_localise):
+    """Équipe la mieux placée pour prendre en charge `objet_localise` (Request ou Information --
+    doit exposer .crisis/.location/.commune_code, voir team_zone_specificity) parmi les équipes
+    affectées à `competence` sur `crise` (AffectationCompetence active). Meilleur score de zone
+    (team_zone_specificity : zone précise > commune > département > secteur de la crise) ;
+    parmi les équipes à égalité de score, la moins chargée (dossiers NOUVEAU/AFFECTE/EN_COURS)
+    l'emporte. Si toujours à égalité (zone ET charge identiques) : None -- décision utilisateur
+    du 26/09, ne jamais trancher arbitrairement, laisser le régulateur choisir à la main."""
+    affectations = (
+        AffectationCompetence.objects.filter(crise=crise, competence=competence, active=True)
+        .select_related('equipe')
+    )
+
+    candidats_par_score: dict = {}
+    for affectation in affectations:
+        score = team_zone_specificity(affectation.equipe, objet_localise)
+        if score is not None:
+            candidats_par_score.setdefault(score, []).append(affectation.equipe)
+
+    if not candidats_par_score:
+        return None
+
+    candidats = candidats_par_score[max(candidats_par_score)]
+    if len(candidats) == 1:
+        return candidats[0]
+
+    charges = {
+        team.id: team.dossiers.filter(statut__in=STATUTS_DOSSIER_CHARGE_ACTIVE).count()
+        for team in candidats
+    }
+    charge_min = min(charges.values())
+    moins_charges = [t for t in candidats if charges[t.id] == charge_min]
+    return moins_charges[0] if len(moins_charges) == 1 else None
+
+
+def _dossier_pour_soumission(champ_fk: str, objet, crise, competence, equipe, titre, description):
+    """Get-or-update du Dossier lié à `objet` (Request via champ_fk='demande', Information via
+    'information') -- évite de créer un doublon quand une équipe est affectée explicitement
+    APRÈS que perform_create ait déjà auto-créé un dossier (voir _assign_request_to_team/
+    _assign_information_to_team). Retourne (dossier, cree: bool)."""
+    dossier = Dossier.objects.filter(**{champ_fk: objet}).first()
+    if dossier is None:
+        return Dossier.objects.create(
+            numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
+            crise=crise, competence=competence, equipe=equipe,
+            **{champ_fk: objet},
+            titre=titre, description=description,
+            statut=Dossier.Statut.AFFECTE if equipe else Dossier.Statut.EN_ATTENTE_AFFECTATION,
+            environment=objet.environment,
+        ), True
+
+    dossier.equipe = equipe
+    if not dossier.competence and competence:
+        dossier.competence = competence
+    if equipe:
+        dossier.statut = Dossier.Statut.AFFECTE
+    dossier.save(update_fields=['equipe', 'competence', 'statut'])
+    return dossier, False
+
+
 def _assign_request_to_team(demande, team, request, mission=None):
     """Corps partagé par RequestViewSet.assign_team (une demande) et .bulk_assign_mission
     (plusieurs) : crée le dossier de suivi, notifie le·s régulateur·s, informe le demandeur
@@ -2767,18 +2874,22 @@ def _assign_request_to_team(demande, team, request, mission=None):
 
     team.assigned_requests.add(demande)
 
-    dossier = Dossier.objects.create(
-        numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
-        crise=demande.crisis,
-        competence=resolve_competence_for_request(demande),
-        equipe=team,
-        mission=mission,
-        demande=demande,
+    # Get-or-update plutôt que création systématique : RequestViewSet.perform_create a déjà pu
+    # auto-créer ce dossier (compétence résolue, équipe éventuellement auto-suggérée) --
+    # affecter explicitement une équipe ici confirme/corrige ce dossier existant au lieu d'en
+    # créer un second en doublon (bug repéré le 26/09).
+    dossier, cree = _dossier_pour_soumission(
+        'demande', demande, demande.crisis, resolve_competence_for_request(demande), team,
         titre=demande.title,
         description=f"Demande affectée à l'équipe {team.name} : {demande.title}",
-        statut=Dossier.Statut.AFFECTE,
-        environment=demande.environment,
     )
+    if mission:
+        dossier.mission = mission
+        dossier.save(update_fields=['mission'])
+    if not cree:
+        DossierHistorique.objects.create(
+            dossier=dossier, evenement=f"Équipe affectée : {team.name}", environment=dossier.environment,
+        )
 
     demandeur, _ = resolve_or_invite_demandeur(demande, request=request)
 
@@ -2822,11 +2933,14 @@ def _assign_request_to_team(demande, team, request, mission=None):
 
     audit_log(
         request=request,
-        action_code="CREATION",
+        action_code="CREATION" if cree else "MODIFICATION",
         objet_type="Dossier",
         objet_id=dossier.id,
         crise=demande.crisis,
-        commentaire=f"Dossier {dossier.numero} créé suite à l'affectation de la demande à {team.name}",
+        commentaire=(
+            f"Dossier {dossier.numero} créé suite à l'affectation de la demande à {team.name}" if cree
+            else f"Dossier {dossier.numero} : équipe affectée/confirmée ({team.name}) suite à l'affectation de la demande"
+        ),
     )
 
     return "created", dossier, regulateurs
@@ -2851,16 +2965,17 @@ def _assign_information_to_team(signalement, team, request):
         team.members.add(signalement.author)
         nouveau_membre = True
 
-    dossier = Dossier.objects.create(
-        numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
-        crise=signalement.crisis,
-        equipe=team,
-        information=signalement,
+    # Get-or-update : InformationViewSet.perform_create a déjà pu auto-créer ce dossier (voir
+    # RequestViewSet.perform_create pour le même principe côté demande) -- évite un doublon.
+    dossier, cree = _dossier_pour_soumission(
+        'information', signalement, signalement.crisis, None, team,
         titre=signalement.title,
         description=f"Signalement affecté à l'équipe {team.name} : {signalement.title}",
-        statut=Dossier.Statut.AFFECTE,
-        environment=signalement.environment,
     )
+    if not cree:
+        DossierHistorique.objects.create(
+            dossier=dossier, evenement=f"Équipe affectée : {team.name}", environment=dossier.environment,
+        )
 
     populate_dossier_participants_and_notify(
         dossier, equipe=team,
@@ -2870,11 +2985,14 @@ def _assign_information_to_team(signalement, team, request):
 
     audit_log(
         request=request,
-        action_code="CREATION",
+        action_code="CREATION" if cree else "MODIFICATION",
         objet_type="Dossier",
         objet_id=dossier.id,
         crise=signalement.crisis,
-        commentaire=f"Dossier {dossier.numero} créé suite à l'affectation du signalement à {team.name}",
+        commentaire=(
+            f"Dossier {dossier.numero} créé suite à l'affectation du signalement à {team.name}" if cree
+            else f"Dossier {dossier.numero} : équipe affectée/confirmée ({team.name}) suite à l'affectation du signalement"
+        ),
     )
 
     if signalement.email_information:
@@ -3196,6 +3314,13 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         try:
 
+            # Le statut reste EN_ATTENTE_AFFECTATION dès qu'une compétence est résolue --
+            # qu'une équipe ait été trouvée automatiquement ou non : l'affectation automatique
+            # ne doit JAMAIS se confirmer silencieusement (AFFECTE), une validation humaine
+            # reste requise (décision utilisateur du 26/09) -- voir DossierViewSet
+            # .affecter_equipe, qui sert aussi de validation quand elle est appelée avec la
+            # même équipe. EN_ATTENTE_DISTRIBUTION reste un signal distinct ("personne ne
+            # surveille cette compétence actuellement"), inchangé.
             statut = Dossier.Statut.EN_ATTENTE_AFFECTATION
 
             equipe = None
@@ -3215,42 +3340,11 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     .distinct()
                 )
 
-                if regulateurs_disponibles.exists():
-
-                    statut = Dossier.Statut.AFFECTE
-
-                else:
-
-                    statut = (
-                        Dossier.Statut
-                        .EN_ATTENTE_DISTRIBUTION
-                    )
+                if not regulateurs_disponibles.exists():
+                    statut = Dossier.Statut.EN_ATTENTE_DISTRIBUTION
 
                 if demande.crisis:
-
-                    # Parmi les équipes affectées à cette compétence sur cette crise, on
-                    # retient celle dont la zone d'intervention déclarée couvre le mieux
-                    # la localisation de la demande (zone précise > commune > département
-                    # > aucune zone déclarée = disponible partout).
-                    affectations = (
-                        AffectationCompetence.objects
-                        .filter(
-                            crise=demande.crisis,
-                            competence=competence,
-                            active=True
-                        )
-                        .select_related('equipe')
-                    )
-
-                    meilleur_score = None
-
-                    for affectation in affectations:
-
-                        score = team_zone_specificity(affectation.equipe, demande)
-
-                        if score is not None and (meilleur_score is None or score > meilleur_score):
-                            meilleur_score = score
-                            equipe = affectation.equipe
+                    equipe = meilleure_equipe_pour_competence(demande.crisis, competence, demande)
 
             if competence:
 
@@ -6832,9 +6926,53 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             # Sinon on sauvegarde sans auteur (None)
             info = serializer.save(author=None, deletion_token=deletion_token, environment=environment)
         
+        # Dossier de suivi auto-créé, avec affectation automatique d'équipe par compétence --
+        # même logique que RequestViewSet.perform_create (voir sa docstring pour le détail du
+        # statut jamais auto-confirmé), généralisée à Information le 26/09 (jusqu'ici aucun
+        # dossier n'était créé à la soumission d'un signalement). Pas de participant DEMANDEUR
+        # (cohérent avec _assign_information_to_team : un signalement n'a pas de "demandeur").
+        try:
+            if info.crisis:
+                competence = resolve_competence_for_information(info)
+                statut = Dossier.Statut.EN_ATTENTE_AFFECTATION
+                equipe = None
+
+                if competence:
+                    regulateurs_disponibles = (
+                        AffectationRoleOperationnel.objects.filter(
+                            competence=competence, role__code="REGULATEUR", actif=True,
+                            disponibilites__disponible=True, disponibilites__date_fin__isnull=True,
+                        ).distinct()
+                    )
+                    if not regulateurs_disponibles.exists():
+                        statut = Dossier.Statut.EN_ATTENTE_DISTRIBUTION
+                    equipe = meilleure_equipe_pour_competence(info.crisis, competence, info)
+
+                dossier = Dossier.objects.create(
+                    numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
+                    crise=info.crisis, competence=competence, equipe=equipe,
+                    information=info, titre=info.title,
+                    description=f"Signalement créé automatiquement : {info.title}",
+                    statut=statut, environment=info.environment,
+                )
+                populate_dossier_participants_and_notify(dossier, equipe=equipe)
+                if not competence:
+                    DossierHistorique.objects.create(
+                        dossier=dossier, evenement="Aucune compétence trouvée automatiquement",
+                        commentaire="Le dossier nécessite une affectation manuelle.",
+                        environment=dossier.environment,
+                    )
+                audit_log(
+                    request=self.request, action_code="CREATION", objet_type="Dossier",
+                    objet_id=dossier.id, crise=dossier.crise,
+                    commentaire=f"Dossier {dossier.numero} créé automatiquement pour le signalement : {info.title}",
+                )
+        except Exception as e:
+            print(f"Erreur création dossier automatique (signalement) : {e}")
+
         # Construire l'URL de suppression (automatique selon l'environnement)
         deletion_url = f"{settings.SERVER_URL.rstrip('/')}/api/delete-information/{deletion_token}/"
-        
+
         try:
             print(f"Tentative d'envoi de mail à {info.email_information}...")
             
