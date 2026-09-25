@@ -1,0 +1,146 @@
+<div class="modal-overlay" (click)="closed.emit()">
+  <div class="modal modal-lg" (click)="$event.stopPropagation()">
+    <div class="modal-header">
+      <h2>
+        <span class="material-icons">inventory_2</span>
+        Fiche matériel
+      </h2>
+      <button class="icon-btn" (click)="closed.emit()"><span class="material-icons">close</span></button>
+    </div>
+
+    <div class="modal-body">
+      @if (chargement) {
+        <p class="hint">Chargement…</p>
+      } @else if (erreur) {
+        <p class="erreur">{{ erreur }}</p>
+      } @else if (fiche) {
+
+        <section class="fiche-section">
+          <h3>{{ fiche.identite.titre }}</h3>
+          @if (fiche.identite.description) { <p class="texte">{{ fiche.identite.description }}</p> }
+          <div class="ligne-infos">
+            @if (fiche.identite.materiel_catalogue_nom) { <span><span class="material-icons">category</span> {{ fiche.identite.materiel_catalogue_nom }}</span> }
+            @if (fiche.identite.quantite) { <span><span class="material-icons">tag</span> {{ fiche.identite.quantite }} {{ fiche.identite.unite || '' }}</span> }
+            @if (fiche.identite.immatriculation) { <span><span class="material-icons">directions_car</span> {{ fiche.identite.immatriculation }}</span> }
+            @if (fiche.identite.nombre_places_assises) { <span><span class="material-icons">event_seat</span> {{ fiche.identite.nombre_places_assises }} places</span> }
+          </div>
+          <div class="ligne-infos">
+            <span><span class="material-icons">person</span> {{ fiche.proprietaire.nom }}</span>
+            @if (fiche.proprietaire.email) { <span><span class="material-icons">mail</span> {{ fiche.proprietaire.email }}</span> }
+            @if (fiche.proprietaire.telephone) { <span><span class="material-icons">phone</span> {{ fiche.proprietaire.telephone }}</span> }
+          </div>
+        </section>
+
+        @if (photoUrl || galeriePhotos.length > 0) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">photo_library</span> Photos</h4>
+            <div class="galerie">
+              @if (photoUrl) { <img [src]="photoUrl" alt="Photo principale" class="photo-principale"> }
+              @for (p of galeriePhotos; track p.id) {
+                <img [src]="p.url" alt="Photo" class="photo-galerie">
+              }
+            </div>
+          </section>
+        }
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">build</span> État actuel</h4>
+          @if (fiche.etat_actuel) {
+            <div class="etat-badge" [class]="'etat-' + fiche.etat_actuel.etat">
+              {{ fiche.etat_actuel.etat_libelle }}
+            </div>
+            @if (fiche.etat_actuel.commentaire) { <p class="texte">{{ fiche.etat_actuel.commentaire }}</p> }
+            @if (fiche.etat_actuel.reparateur_nom) {
+              <p class="hint-petit">
+                Réparateur : {{ fiche.etat_actuel.reparateur_nom }}
+                @if (fiche.etat_actuel.reparateur_contact) { ({{ fiche.etat_actuel.reparateur_contact }}) }
+                @if (fiche.etat_actuel.lieu_reparation) { — {{ fiche.etat_actuel.lieu_reparation }} }
+                @if (fiche.etat_actuel.date_reparation) { — {{ fiche.etat_actuel.date_reparation | date:'dd/MM/yyyy' }} }
+                @if (fiche.etat_actuel.cout_reparation) { — {{ fiche.etat_actuel.cout_reparation }} €}
+              </p>
+            }
+          } @else {
+            <p class="hint">Aucun suivi enregistré — considéré disponible par défaut.</p>
+          }
+
+          <form class="form-suivi" (ngSubmit)="ajouterEvenement()">
+            <div class="form-row">
+              <select [(ngModel)]="nouvelEtat" name="etat">
+                <option value="DISPONIBLE">Disponible</option>
+                <option value="INDISPONIBLE">Indisponible (besoin de maintenance)</option>
+                <option value="EN_REPARATION">En réparation</option>
+                <option value="HORS_SERVICE">Hors service</option>
+              </select>
+            </div>
+            <textarea placeholder="Commentaire libre..." [(ngModel)]="nouveauCommentaire" name="commentaire" rows="2"></textarea>
+            <div class="form-row">
+              <input type="text" placeholder="Qui répare (nom)" [(ngModel)]="nouveauReparateurNom" name="reparateurNom">
+              <input type="text" placeholder="Contact réparateur" [(ngModel)]="nouveauReparateurContact" name="reparateurContact">
+            </div>
+            <div class="form-row">
+              <input type="text" placeholder="Lieu de réparation" [(ngModel)]="nouveauLieuReparation" name="lieuReparation">
+              <input type="date" [(ngModel)]="nouvelleDateReparation" name="dateReparation">
+              <input type="number" min="0" placeholder="Coût (€)" [(ngModel)]="nouveauCout" name="cout">
+            </div>
+            <button type="submit" class="btn-primary sm" [disabled]="ajoutEnCours">
+              <span class="material-icons">add</span> Enregistrer
+            </button>
+          </form>
+        </section>
+
+        @if (fiche.evenements.length > 1) {
+          <section class="fiche-section">
+            <h4><span class="material-icons">history</span> Historique de maintenance</h4>
+            <ul class="liste-simple">
+              @for (e of fiche.evenements.slice(1); track e.id) {
+                <li>
+                  {{ e.date_creation | date:'dd/MM/yyyy HH:mm' }} — {{ e.etat_libelle }}
+                  @if (e.commentaire) { : {{ e.commentaire }} }
+                  @if (e.cree_par_nom) { <span class="hint-petit">({{ e.cree_par_nom }})</span> }
+                </li>
+              }
+            </ul>
+          </section>
+        }
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">attach_file</span> Documents</h4>
+          @if (documents.length > 0) {
+            <ul class="liste-simple">
+              @for (d of documents; track d.id) {
+                <li>
+                  <a href="javascript:void(0)" (click)="telechargerDocument(d)">{{ d.nom_fichier }}</a>
+                  @if (d.commentaire) { — {{ d.commentaire }} }
+                  <span class="hint-petit">({{ d.auteur_nom }}, {{ d.date_upload | date:'dd/MM/yyyy' }})</span>
+                </li>
+              }
+            </ul>
+          } @else {
+            <p class="hint">Aucun document.</p>
+          }
+          <form class="form-document" (ngSubmit)="envoyerDocument()">
+            <input type="file" (change)="onFichierChoisi($event)">
+            <input type="text" placeholder="Commentaire (ex: facture réparation)" [(ngModel)]="commentaireDocument" name="commentaireDocument">
+            <button type="submit" class="btn-secondary sm" [disabled]="!fichierAEnvoyer || uploadEnCours">
+              <span class="material-icons">upload</span> Ajouter
+            </button>
+          </form>
+        </section>
+
+        <section class="fiche-section">
+          <h4><span class="material-icons">history</span> Historique d'activité</h4>
+          @if (fiche.historique_activite.length > 0) {
+            <ul class="liste-simple liste-activite">
+              @for (h of fiche.historique_activite; track $index) {
+                <li>{{ h.date | date:'dd/MM/yyyy HH:mm' }} — {{ h.commentaire || h.action_libelle }}</li>
+              }
+            </ul>
+          } @else {
+            <p class="hint">Aucune activité enregistrée.</p>
+          }
+        </section>
+
+      }
+    </div>
+  </div>
+</div>

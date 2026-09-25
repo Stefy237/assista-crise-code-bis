@@ -66,6 +66,7 @@ from .models import (
     ContributionMateriel,
     StatutMateriel,
     RegistrePresence,
+    SuiviMaterielEvenement,
     DeclarationSecurite,
     AffectationPointBenevole,
     Notification,
@@ -891,6 +892,25 @@ class RegistrePresenceSerializer(serializers.ModelSerializer):
             return None
         full_name = f"{obj.enregistre_par.first_name} {obj.enregistre_par.last_name}".strip()
         return full_name or obj.enregistre_par.email
+
+
+class SuiviMaterielEvenementSerializer(serializers.ModelSerializer):
+    """Suivi d'état/maintenance d'une offre de matériel ("fiche matériel", 24/09) — voir
+    SuiviMaterielEvenement.__doc__."""
+
+    etat_libelle = serializers.CharField(source="get_etat_display", read_only=True)
+    cree_par_nom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SuiviMaterielEvenement
+        fields = '__all__'
+        read_only_fields = ['id', 'cree_par', 'date_creation']
+
+    def get_cree_par_nom(self, obj):
+        if not obj.cree_par:
+            return None
+        full_name = f"{obj.cree_par.first_name} {obj.cree_par.last_name}".strip()
+        return full_name or obj.cree_par.email
 
     def validate(self, attrs):
         point = attrs.get('point') or (self.instance.point if self.instance else None)

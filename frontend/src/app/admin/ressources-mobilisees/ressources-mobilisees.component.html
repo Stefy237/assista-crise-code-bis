@@ -123,6 +123,12 @@
                     <span class="material-icons">apartment</span> {{ materiel.organisation_nom }}
                   </span>
                 }
+
+                @if (materiel.offre_id) {
+                  <button type="button" class="detail-btn" (click)="ouvrirFicheMateriel(materiel.offre_id)">
+                    <span class="material-icons">inventory_2</span> Détail
+                  </button>
+                }
               </div>
             }
           </div>
@@ -149,4 +155,11 @@
     [equipeNom]="ficheEquipeNom"
     (closed)="fermerFiche()">
   </app-fiche-intervenant-modal>
+}
+
+@if (ficheMaterielOuverte && ficheMaterielOffreId) {
+  <app-fiche-materiel-modal
+    [offreId]="ficheMaterielOffreId"
+    (closed)="fermerFicheMateriel()">
+  </app-fiche-materiel-modal>
 }

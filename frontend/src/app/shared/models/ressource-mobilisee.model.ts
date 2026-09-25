@@ -20,6 +20,8 @@ export interface RessourceMobilisee {
   user_id?: string;
 
   // type === 'materiel' uniquement — voir TeamViewSet.ressources_mobilisees.
+  /** Id de l'offre elle-même — "fiche matériel" (24/09). */
+  offre_id?: string;
   proprietaire_nom?: string | null;
   proprietaire_id?: string | null;
   proprietaire_email?: string | null;

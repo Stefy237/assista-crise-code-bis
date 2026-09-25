@@ -7,6 +7,7 @@ import { RessourceMobilisee } from '../../shared/models/ressource-mobilisee.mode
 import { AffecterLogementResultat } from '../../shared/models/logement-intervenant.model';
 import { LogementPickerModalComponent } from '../../shared/components/common/logement-picker-modal/logement-picker-modal.component';
 import { FicheIntervenantModalComponent } from '../../shared/components/common/fiche-intervenant-modal/fiche-intervenant-modal.component';
+import { FicheMaterielModalComponent } from '../../shared/components/common/fiche-materiel-modal/fiche-materiel-modal.component';
 
 type TypeFilter = 'ALL' | 'personne' | 'materiel';
 
@@ -42,7 +43,7 @@ interface GroupeEquipe {
 @Component({
   selector: 'app-ressources-mobilisees',
   standalone: true,
-  imports: [CommonModule, FormsModule, LogementPickerModalComponent, FicheIntervenantModalComponent],
+  imports: [CommonModule, FormsModule, LogementPickerModalComponent, FicheIntervenantModalComponent, FicheMaterielModalComponent],
   templateUrl: './ressources-mobilisees.component.html',
   styleUrl: './ressources-mobilisees.component.scss',
 })
@@ -159,6 +160,19 @@ export class RessourcesMobiliseesComponent implements OnInit {
 
   fermerFiche(): void {
     this.ficheOuverte = false;
+  }
+
+  // ── Fiche matériel (24/09) ──────────────────────────────────────────────────────────────
+  ficheMaterielOuverte = false;
+  ficheMaterielOffreId: string | null = null;
+
+  ouvrirFicheMateriel(offreId: string): void {
+    this.ficheMaterielOffreId = offreId;
+    this.ficheMaterielOuverte = true;
+  }
+
+  fermerFicheMateriel(): void {
+    this.ficheMaterielOuverte = false;
   }
 
   /** Respecte la recherche/le filtre de type — base commune à l'export CSV (toujours à plat)

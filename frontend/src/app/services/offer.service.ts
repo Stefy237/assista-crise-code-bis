@@ -55,6 +55,18 @@ export class OfferService {
     return this.http.post<void>(`${environment.apiUrl}/photos-offres/`, fd);
   }
 
+  /** GET /api/photos-offres/?offer=<id> — galerie (fiche matériel, 24/09). */
+  getPhotos(offerId: string): Observable<{ id: string; ordre: number }[]> {
+    return this.http.get<{ id: string; ordre: number }[]>(`${environment.apiUrl}/photos-offres/`, {
+      params: { offer: offerId },
+    });
+  }
+
+  /** GET /api/photos-offres/<id>/preview/ */
+  previewPhoto(photoId: string): Observable<Blob> {
+    return this.http.get(`${environment.apiUrl}/photos-offres/${photoId}/preview/`, { responseType: 'blob' });
+  }
+
   /** POST /api/offres/<id>/transformer/ — recrée cette offre en demande ou signalement
    * (réservé institutionnel, refusé si déjà affectée). Supprime l'offre d'origine. */
   transformer(id: string, cible: 'REQUEST' | 'INFORMATION'): Observable<any> {

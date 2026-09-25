@@ -151,6 +151,7 @@ from .models import (
     User, Crisis, TypeCrise, Request, RequestPhoto, Offer, OfferPhoto, OfferMessage, Information, DisponibiliteOffre, DisponibilitePointEquipe, MaterielPoint,
     MaterielCatalogue, ContributionMateriel, StatutMateriel, TypeMateriel, NiveauStock, RegistrePresence, TypePersonneAccueillie, DeclarationSecurite, SituationDeclarant,
     AffectationLogementIntervenant,
+    SuiviMaterielEvenement,
     CompagnonMeshCore, NoeudMeshUtilisateur, MessageMeshLog, DirectionMessageMesh, StatutMessageMesh,
     CommandeMeshCore, TypeCommandeMeshCore, StatutCommandeMeshCore,
     RelaisMeshCore, CanalMeshCore, MessageCanalMeshCore, ContactMeshCore, TypeContactMeshCore,
@@ -390,6 +391,7 @@ from .serializers import (
     ContactMeshtasticSerializer,
     ContributionMaterielSerializer,
     RegistrePresenceSerializer,
+    SuiviMaterielEvenementSerializer,
     DeclarationSecuriteSerializer,
     AffectationPointBenevoleSerializer,
     InformationSerializer,
@@ -4962,6 +4964,9 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 rows.append({
                     "type": "materiel",
                     "nom": offre.title,
+                    # "Fiche matériel" (24/09) : id de l'offre elle-même, absent jusqu'ici --
+                    # rien ne permettait de rouvrir la fiche depuis cette liste.
+                    "offre_id": str(offre.id),
                     "equipe_id": str(team.id),
                     "equipe_nom": team.name,
                     "institution": institution_nom,
@@ -10283,6 +10288,106 @@ class FicheIntervenantView(generics.GenericAPIView):
             "historique_compte": historique_compte,
             "historique_activite": historique_activite,
             "historique_equipe_evenements": historique_equipe_evenements,
+        })
+
+
+class SuiviMaterielEvenementViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Suivi d'état/maintenance d'une offre de matériel ("fiche matériel", 24/09) -- voir
+    SuiviMaterielEvenement.__doc__. Écriture réservée aux acteurs institutionnels (même
+    logique que RegistrePresenceViewSet/AffecterLogementView : c'est le régulateur qui
+    constate/déclare une panne, pas le propriétaire du matériel lui-même)."""
+
+    queryset = SuiviMaterielEvenement.objects.select_related('offre', 'cree_par').all()
+    serializer_class = SuiviMaterielEvenementSerializer
+    filterset_fields = ['offre']
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        evenement = serializer.save(cree_par=self.request.user, environment=get_active_environment(self.request))
+        audit_log(
+            request=self.request,
+            action_code="CREATION",
+            objet_type="SuiviMaterielEvenement",
+            objet_id=evenement.id,
+            commentaire=f"Suivi matériel « {evenement.offre.title} » : {evenement.get_etat_display()}",
+        )
+
+
+class FicheMaterielView(generics.GenericAPIView):
+    """Fiche d'une offre de matériel, ouverte depuis Ressources mobilisées (24/09, pendant du
+    "Détail" côté personne) : infos de la source (offre de prêt), propriétaire, état actuel et
+    historique de maintenance, historique d'activité. Les photos/documents ne sont PAS ici --
+    déjà servis par leurs propres endpoints (OfferViewSet.preview, OfferPhotoViewSet,
+    DocumentViewSet, tous déjà génériques et filtrables par offre), le frontend les appelle
+    directement plutôt que de les dupliquer dans cette réponse."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request):
+        offre_id = request.query_params.get('offre')
+        if not offre_id:
+            return Response({"error": "offre est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        offre = get_object_or_404(Offer, pk=offre_id)
+
+        evenements_qs = (
+            SuiviMaterielEvenement.objects.filter(offre=offre)
+            .select_related('cree_par').order_by('-date_creation')
+        )
+        evenements = [
+            {
+                "id": str(e.id),
+                "etat": e.etat, "etat_libelle": e.get_etat_display(),
+                "commentaire": e.commentaire,
+                "reparateur_nom": e.reparateur_nom, "reparateur_contact": e.reparateur_contact,
+                "lieu_reparation": e.lieu_reparation, "date_reparation": e.date_reparation,
+                "cout_reparation": e.cout_reparation,
+                "cree_par_nom": (
+                    f"{e.cree_par.first_name} {e.cree_par.last_name}".strip() or e.cree_par.email
+                    if e.cree_par else None
+                ),
+                "date_creation": e.date_creation,
+            }
+            for e in evenements_qs
+        ]
+        etat_actuel = evenements[0] if evenements else None
+
+        historique = [
+            {
+                "date": a.date_action,
+                "action_code": a.action.code, "action_libelle": a.action.libelle,
+                "commentaire": a.commentaire,
+                "succes": a.succes,
+            }
+            for a in AuditLog.objects.filter(objet_type='Offer', objet_id=offre.id).select_related('action').order_by('-date_action')[:100]
+        ]
+
+        return Response({
+            "identite": {
+                "id": str(offre.id),
+                "titre": offre.title,
+                "description": offre.description,
+                "materiel_type": offre.materiel_type,
+                "materiel_catalogue_nom": offre.materiel_catalogue.nom if offre.materiel_catalogue_id else None,
+                "quantite": offre.quantite,
+                "unite": offre.unite,
+                "immatriculation": offre.immatriculation,
+                "nombre_places_assises": offre.nombre_places_assises,
+                "has_photo": bool(offre.photo),
+                "status": offre.status, "status_libelle": offre.get_status_display(),
+                "actif": offre.actif,
+            },
+            "proprietaire": {
+                "nom": f"{offre.first_name_offer} {offre.last_name_offer}".strip(),
+                "email": offre.email_offer,
+                "telephone": offre.phone_offer,
+            },
+            "etat_actuel": etat_actuel,
+            "evenements": evenements,
+            "historique_activite": historique,
         })
 
 

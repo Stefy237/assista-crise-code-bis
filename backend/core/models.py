@@ -3723,6 +3723,54 @@ class AffectationLogementIntervenant(EnvironmentScopedModel):
         return f"Logement de {self.intervenant} pour {self.crise.name} : {cible}"
 
 
+class EtatMateriel(models.TextChoices):
+    DISPONIBLE = "DISPONIBLE", "Disponible"
+    INDISPONIBLE = "INDISPONIBLE", "Indisponible (besoin de maintenance)"
+    EN_REPARATION = "EN_REPARATION", "En réparation"
+    HORS_SERVICE = "HORS_SERVICE", "Hors service"
+
+
+class SuiviMaterielEvenement(EnvironmentScopedModel):
+    """Suivi d'état/maintenance d'une offre de matériel (24/09, "fiche matériel" -- demande
+    explicite : état, commentaire libre, qui répare, où/quand/combien coûte la réparation,
+    documents). Pas de champ "état courant" séparé -- même patron que
+    AffectationLogementIntervenant : l'état actuel est celui du plus récent événement (voir
+    Meta.ordering), une nouvelle ligne à chaque changement garde l'historique complet des
+    pannes/réparations plutôt qu'un simple update en place.
+
+    Les documents (photos de la panne, facture du réparateur...) passent par le modèle
+    Document existant (déjà générique, FK `offre` déjà présente) -- pas de nouveau modèle
+    fichier ici, juste un commentaire libre les référençant si besoin."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    offre = models.ForeignKey("Offer", on_delete=models.CASCADE, related_name="suivi_evenements")
+
+    etat = models.CharField(max_length=20, choices=EtatMateriel.choices)
+
+    commentaire = models.TextField(blank=True, null=True)
+
+    # "qui assure la réparation si nécessaire, ou, quand, combien (si c'est un réparateur
+    # pro)" -- texte libre plutôt qu'un annuaire de réparateurs structuré, ce matériel de
+    # secours n'a pas vocation à entretenir un tel référentiel.
+    reparateur_nom = models.CharField(max_length=255, blank=True, null=True)
+    reparateur_contact = models.CharField(max_length=255, blank=True, null=True)
+    lieu_reparation = models.CharField(max_length=255, blank=True, null=True)
+    date_reparation = models.DateField(null=True, blank=True)
+    cout_reparation = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Coût en euros, montant entier (même convention que HebergementDetailsMixin.loyer_montant_*).",
+    )
+
+    cree_par = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date_creation"]
+
+    def __str__(self) -> str:
+        return f"{self.get_etat_display()} — {self.offre.title}"
+
+
 class TypeDeclarant(models.TextChoices):
     PERSONNE_SEULE = "PERSONNE_SEULE", "Personne seule"
     FAMILLE = "FAMILLE", "Famille"

@@ -41,6 +41,8 @@ from .views import (
     MaterielCatalogueViewSet,
     ContributionMaterielViewSet,
     RegistrePresenceViewSet,
+    SuiviMaterielEvenementViewSet,
+    FicheMaterielView,
     DeclarationSecuriteViewSet,
     ZoneViewSet,
     PlanViewSet,
@@ -161,6 +163,7 @@ router.register(r'materiels-points', MaterielPointViewSet)
 router.register(r'materiels-catalogue', MaterielCatalogueViewSet)
 router.register(r'contributions-materiel', ContributionMaterielViewSet)
 router.register(r'registre-presences', RegistrePresenceViewSet)
+router.register(r'suivi-materiel', SuiviMaterielEvenementViewSet)
 router.register(r'declarations-securite', DeclarationSecuriteViewSet)
 router.register(r'informations', InformationViewSet)
 router.register(r'types-demande', RequestTypeViewSet)
@@ -228,6 +231,7 @@ urlpatterns = [
     path('logements-disponibles/', LogementsDisponiblesView.as_view(), name='logements_disponibles'),
     path('affecter-logement/', AffecterLogementView.as_view(), name='affecter_logement'),
     path('fiche-intervenant/', FicheIntervenantView.as_view(), name='fiche_intervenant'),
+    path('fiche-materiel/', FicheMaterielView.as_view(), name='fiche_materiel'),
     
     # URLs pour la suppression via token
     path('delete-request/<str:token>/', DeleteRequestView.as_view(), name='delete_request'),
