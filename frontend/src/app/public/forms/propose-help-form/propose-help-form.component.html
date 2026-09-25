@@ -25,36 +25,15 @@
     @if(state === 1) {
       <form [formGroup]="requestForm">
 
-        <!-- Étape 1 : Détails de la demande -->
-          <!-- Pour la crise -->
-            <div class="form-group">
-                <label for="crisisSearch" class="form-label">
-                Pour la crise
-                </label>
-                <div class="autocomplete-wrapper">
-                  <input
-                    type="text"
-                    id="crisisSearch"
-                    [(ngModel)]="crisisSearch"
-                    [ngModelOptions]="{standalone: true}"
-                    (input)="onCrisisSearchChange($event)"
-                    (focus)="showCrisisDropdown = true"
-                    placeholder="Rechercher une crise..."
-                    class="form-input"
-                    autocomplete="off"
-                  />
-                  @if(showCrisisDropdown && filteredCrisisOptions.length > 0) {
-                    <div class="autocomplete-dropdown">
-                      @for(crisis of filteredCrisisOptions; track crisis.value) {
-                        <div class="autocomplete-item" (click)="selectCrisis(crisis)">
-                          {{ crisis.label }}
-                        </div>
-                      }
-                    </div>
-                  }
-                </div>
-            </div>
+        <!-- Étape 1 : crise, lieu, puis thèmes à l'écoute -->
+        <app-crise-lieu-theme
+          axe="offer"
+          (criseSelectionnee)="onCriseSelectionnee($event)"
+          (adresseSelectionnee)="onAddressSelected($event)"
+          (typesAutorises)="onTypesAutorises($event)">
+        </app-crise-lieu-theme>
 
+        @if (typesOffreAutorises.length > 0) {
             <!-- Quelle aide proposez-vous -->
              @for(row of offerRows.controls; track row; let i = $index) {
                 @let rg = rowGroup(row);
@@ -78,7 +57,7 @@
                         class="form-select"
                         [class.invalid]="rg.get('type')?.invalid && rg.get('type')?.touched">
                         <option value="">Choisissez votre offre</option>
-                        @for(option of offerTypeOptions.slice(1); track option.value) {
+                        @for(option of offerTypeOptionsFiltrees; track option.value) {
                             <option [value]="option.value">
                                 {{ option.label }}
                             </option>
@@ -568,30 +547,12 @@
                 Proposer un autre service ?
                 </a>
             </div>
+        }
 
-            <!-- Votre adresse -->
+            <!-- Adresse visible : l'adresse elle-même est déjà connue (voir app-crise-lieu-theme
+                 en tête d'étape), seule la visibilité reste à choisir ici. -->
+            @if (selectedAddress) {
             <div class="form-section">
-                <h2 class="section-title">Votre adresse <span class="required">*</span></h2>
-                <p class="section-description">
-                La commune est nécessaire pour rapprocher votre offre des besoins à proximité —
-                vous choisissez juste après si l'adresse précise reste visible ou non.
-                </p>
-
-                <div class="form-group">
-                  <app-address-picker
-                    label="Votre adresse"
-                    placeholder="Rechercher une adresse…"
-                    [required]="true"
-                    (addressSelected)="onAddressSelected($event)">
-                  </app-address-picker>
-                  @if (requestForm.touched && !selectedAddress) {
-                    <div class="error-message">
-                      Veuillez sélectionner une adresse dans la liste proposée
-                    </div>
-                  }
-                </div>
-
-                <!-- Checkbox adresse visible -->
                 <div class="form-group checkbox-group">
                 <label class="checkbox-label">
                     <input
@@ -605,6 +566,7 @@
                 </label>
                 </div>
             </div>
+            }
 
             <!-- Images liées à l'annonce -->
             <div class="form-section">

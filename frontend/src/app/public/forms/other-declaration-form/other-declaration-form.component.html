@@ -279,52 +279,36 @@
     <!-- Form for "Autre information" -->
     @if(state === StateForm.OtherDeclaration) {
       <form [formGroup]="otherInformationForm" (ngSubmit)="onSubmit()">
-        <!-- Pour la crise -->
-        <div class="form-group">
-          <label for="crisisSearchOther" class="form-label">
-            Pour la crise
-          </label>
-          <div class="autocomplete-wrapper">
-            <input
-              type="text"
-              id="crisisSearchOther"
-              [(ngModel)]="crisisSearch"
-              [ngModelOptions]="{standalone: true}"
-              (input)="onCrisisSearchChange($event)"
-              (focus)="showCrisisDropdown = true"
-              placeholder="Rechercher une crise..."
-              class="form-input"
-              autocomplete="off"
-            />
-            @if(showCrisisDropdown && filteredCrisisOptions.length > 0) {
-              <div class="autocomplete-dropdown">
-                @for(crisis of filteredCrisisOptions; track crisis.value) {
-                  <div class="autocomplete-item" (click)="selectCrisis(crisis)">
-                    {{ crisis.label }}
-                  </div>
-                }
-              </div>
-            }
-          </div>
-        </div>
+        <!-- Étape 1 : crise, lieu, puis thèmes à l'écoute -->
+        <app-crise-lieu-theme
+          axe="information"
+          (criseSelectionnee)="onCriseSelectionneeOther($event)"
+          (adresseSelectionnee)="onAddressSelectedOther($event)"
+          (typesAutorises)="onTypesAutorisesOther($event)">
+        </app-crise-lieu-theme>
 
+        @if (typesSignalementAutorises.length > 0) {
         <!-- Information Type -->
         <div class="form-group">
-          <label class="form-label">
+          <label for="informationType" class="form-label">
             Type de signalement <span class="required">*</span>
           </label>
-          <app-tag-search-input
-            placeholder="Ex: arbre sur la chaussée, route inondée..."
-            [searchFn]="informationTypeSearchFn"
-            [createFn]="informationTypeCreateFn"
-            (itemSelected)="onInformationTypeSelected($event)">
-          </app-tag-search-input>
-          @if (selectedInformationType) {
-            <p class="selected-type-confirm">Type retenu : {{ selectedInformationType.type }}</p>
-          }
+          <div class="select-wrapper">
+            <select
+              id="informationType"
+              class="form-select"
+              [ngModel]="selectedInformationType?.id"
+              [ngModelOptions]="{standalone: true}"
+              (ngModelChange)="onOtherInformationTypeSelect($event)">
+              <option value="">Choisissez le type de signalement</option>
+              @for (t of informationTypeOptionsFiltrees; track t.id) {
+                <option [value]="t.id">{{ t.type }}</option>
+              }
+            </select>
+          </div>
           @if(otherInformationForm.touched && !selectedInformationType) {
             <div class="error-message">
-              Merci de sélectionner ou créer un type de signalement.
+              Merci de sélectionner un type de signalement.
             </div>
           }
         </div>
@@ -521,6 +505,7 @@
             Enregistrer
           </button>
         </div>
+        }
       </form>
     }
   </div>

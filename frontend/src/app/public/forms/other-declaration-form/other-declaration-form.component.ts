@@ -16,6 +16,7 @@ import { AddressResult } from '../../../shared/models/address-result.model';
 import { CentreAccueilPublic } from '../../../shared/models/point-operationnel.model';
 import { RgpdNoticeComponent } from '../../../shared/components/public/rgpd-notice/rgpd-notice.component';
 import { ValidationSummaryComponent } from '../../../shared/components/public/validation-summary/validation-summary.component';
+import { CriseLieuThemeComponent } from '../../../shared/components/public/crise-lieu-theme/crise-lieu-theme.component';
 
 enum StateForm {
   DeclareSafe,
@@ -25,7 +26,7 @@ enum StateForm {
 @Component({
   selector: 'app-other-declaration-form',
   standalone: true,
-  imports: [ReactiveFormsModule, CommonModule, FormsModule, AddressPickerComponent, TagSearchInputComponent, RgpdNoticeComponent, ValidationSummaryComponent],
+  imports: [ReactiveFormsModule, CommonModule, FormsModule, AddressPickerComponent, TagSearchInputComponent, RgpdNoticeComponent, ValidationSummaryComponent, CriseLieuThemeComponent],
   templateUrl: './other-declaration-form.component.html',
   styleUrl: './other-declaration-form.component.scss'
 })
@@ -68,6 +69,32 @@ export class OtherDeclarationFormComponent implements OnInit {
 
   selectedInformationType: InformationType | null = null;
 
+  // Étape "crise + lieu + thèmes à l'écoute" (voir app-crise-lieu-theme), uniquement pour
+  // "Autre information" -- "Je suis en sécurité" n'a pas d'axe thème/besoin, non concerné.
+  criseSelectionneeOther: Crisis | null = null;
+  typesSignalementAutorises: string[] = [];
+  informationTypeOptions: InformationType[] = [];
+
+  onCriseSelectionneeOther(crise: Crisis | null): void {
+    this.criseSelectionneeOther = crise;
+    this.otherInformationForm.patchValue({ crisisId: crise?.id || '' });
+  }
+
+  onTypesAutorisesOther(typeIds: string[]): void {
+    this.typesSignalementAutorises = typeIds;
+    if (this.selectedInformationType && !typeIds.includes(this.selectedInformationType.id)) {
+      this.selectedInformationType = null;
+    }
+  }
+
+  get informationTypeOptionsFiltrees(): InformationType[] {
+    return this.informationTypeOptions.filter(t => this.typesSignalementAutorises.includes(t.id));
+  }
+
+  onOtherInformationTypeSelect(id: string): void {
+    this.selectedInformationType = this.informationTypeOptions.find(t => t.id === id) || null;
+  }
+
   // Position + azimut capturés au moment de la photo (prioritaires sur l'adresse saisie
   // manuellement s'ils sont disponibles) — cf. capturePhotoWithLocation().
   capturedLatitude: number | null = null;
@@ -90,6 +117,10 @@ export class OtherDeclarationFormComponent implements OnInit {
   ngOnInit(): void {
     this.initForm();
     this.loadActiveCrises();
+    this.informationService.getTypes().subscribe({
+      next: (types) => { this.informationTypeOptions = types; },
+      error: () => {},
+    });
   }
 
   informationTypeSearchFn = (q: string) => this.informationService.searchTypes(q);
@@ -286,7 +317,8 @@ export class OtherDeclarationFormComponent implements OnInit {
   private otherInformationValidationErrors(): string[] {
     const errors: string[] = [];
     const f = this.otherInformationForm;
-    if (!this.selectedInformationType) errors.push('Sélectionnez ou créez un type de signalement.');
+    if (!f.get('crisisId')?.value) errors.push('Choisissez la crise concernée.');
+    if (!this.selectedInformationType) errors.push('Sélectionnez un type de signalement à l\'écoute.');
     if (f.get('description')?.invalid) errors.push('La description est obligatoire (10 caractères minimum).');
     if (!this.hasLocationForOther()) errors.push('Sélectionnez une adresse, ou prenez une photo géolocalisée.');
     if (f.get('lastName')?.invalid) errors.push('Le nom est obligatoire.');

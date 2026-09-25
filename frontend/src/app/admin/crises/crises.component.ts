@@ -621,6 +621,7 @@ export class CrisesComponent implements OnInit {
   submitActeurDirect(): void {
     if (!this.selectedCrisis) return;
     if (!this.acteurDirectInstitutionId) { this.showError("Choisissez d'abord une institution."); return; }
+    if (this.acteurDirectThemes.length === 0) { this.showError("Sélectionnez au moins un thème à l'écoute."); return; }
 
     const payload: any = {
       crise: this.selectedCrisis.id,
@@ -658,6 +659,8 @@ export class CrisesComponent implements OnInit {
     if (nonFieldErrors.some(m => typeof m === 'string' && m.includes('must make a unique set'))) {
       return 'Cette institution est déjà déclarée sur cette crise (voir la liste ci-dessus).';
     }
+    const themesErrors: string[] = err?.error?.themes ?? [];
+    if (themesErrors.length > 0) return themesErrors[0];
     return err?.error?.detail || fallback;
   }
 
@@ -718,7 +721,7 @@ export class CrisesComponent implements OnInit {
         if (idx !== -1) this.implications[idx] = updated;
         this.showSuccess('Thèmes mis à jour.');
       },
-      error: () => this.showError('Impossible de modifier les thèmes.'),
+      error: (err) => this.showError(this.implicationErrorMessage(err, 'Impossible de modifier les thèmes.')),
     });
   }
 

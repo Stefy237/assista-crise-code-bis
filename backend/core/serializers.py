@@ -37,7 +37,7 @@ from .models import (
     RecherchePersonneLecture, RecherchePersonneLectureHistorique,
     Document, RecherchePersonnePhoto, RecherchePersonneCommentairePhoto,
     DossierCommentaire, RecherchePersonne, RecherchePersonneCommentaire, RecherchePersonneHistorique,
-    DossierHistorique, Besoin, BesoinCompetence, BesoinMateriel, Dossier, Mission, RequestType, RequestTypeBesoin, OfferType, InformationType, Team, Competence, AffectationCompetence,
+    DossierHistorique, Besoin, BesoinCompetence, BesoinMateriel, Dossier, Mission, RequestType, RequestTypeBesoin, OfferType, InformationType, OfferTypeBesoin, InformationTypeBesoin, Team, Competence, AffectationCompetence,
     DernierePositionUtilisateur,
     DisponibiliteOffre,
     DisponibilitePointEquipe,
@@ -181,6 +181,38 @@ class RequestTypeBesoinSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RequestTypeBesoin
+        fields = "__all__"
+
+class OfferTypeBesoinSerializer(serializers.ModelSerializer):
+
+    offer_type_nom = serializers.CharField(
+        source='offer_type.type',
+        read_only=True
+    )
+
+    besoin_nom = serializers.CharField(
+        source='besoin.nom',
+        read_only=True
+    )
+
+    class Meta:
+        model = OfferTypeBesoin
+        fields = "__all__"
+
+class InformationTypeBesoinSerializer(serializers.ModelSerializer):
+
+    information_type_nom = serializers.CharField(
+        source='information_type.type',
+        read_only=True
+    )
+
+    besoin_nom = serializers.CharField(
+        source='besoin.nom',
+        read_only=True
+    )
+
+    class Meta:
+        model = InformationTypeBesoin
         fields = "__all__"
 
 class UserSerializer(serializers.ModelSerializer):

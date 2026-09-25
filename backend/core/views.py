@@ -167,7 +167,7 @@ from .models import (
     Document, DossierCommentaire, DossierHistorique, BesoinCompetence, BesoinMateriel, Competence, Dossier, Mission,
     AuditLog, AuditAction,
     RecherchePersonneHistorique, RecherchePersonnePhoto,
-    AffectationCompetence, RequestType, RequestTypeBesoin, OfferType, InformationType, Team,
+    AffectationCompetence, RequestType, RequestTypeBesoin, OfferType, InformationType, OfferTypeBesoin, InformationTypeBesoin, Team,
     TeamDelegation,
     EngagementRessource, StatutEngagementRessource,
     Status,
@@ -361,6 +361,8 @@ from .serializers import (
     RecherchePersonneLectureHistoriqueSerializer,
     CrisisSerializer,
     RequestTypeBesoinSerializer,
+    OfferTypeBesoinSerializer,
+    InformationTypeBesoinSerializer,
     RequestSerializer,
     RequestPhotoSerializer,
     OfferSerializer,
@@ -504,6 +506,56 @@ class BesoinMaterielViewSet(viewsets.ModelViewSet):
 class RequestTypeBesoinViewSet(viewsets.ModelViewSet):
     queryset = RequestTypeBesoin.objects.select_related('request_type', 'besoin').all()
     serializer_class = RequestTypeBesoinSerializer
+
+class OfferTypeBesoinViewSet(viewsets.ModelViewSet):
+    queryset = OfferTypeBesoin.objects.select_related('offer_type', 'besoin').all()
+    serializer_class = OfferTypeBesoinSerializer
+
+class InformationTypeBesoinViewSet(viewsets.ModelViewSet):
+    queryset = InformationTypeBesoin.objects.select_related('information_type', 'besoin').all()
+    serializer_class = InformationTypeBesoinSerializer
+
+
+_PONT_BESOIN_PAR_AXE = {
+    "request": (RequestTypeBesoin, "request_type_id"),
+    "offer": (OfferTypeBesoin, "offer_type_id"),
+    "information": (InformationTypeBesoin, "information_type_id"),
+}
+
+
+class TypesALecouteView(generics.GenericAPIView):
+    """Filtre le sélecteur de type des formulaires publics (Request/Offer/Information) aux
+    seuls thèmes qu'au moins une institution a déclarés "à l'écoute" pour la crise/commune
+    choisies -- voir besoins_ecoute.besoins_a_lecoute. AllowAny : consultée AVANT tout dépôt,
+    par un visiteur qui n'a pas forcément de compte (même logique que HabitationViewSet en
+    lecture, ou RattachementHabitationViewSet.create)."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .besoins_ecoute import besoins_a_lecoute
+
+        crise_id = request.query_params.get('crise')
+        commune_code = request.query_params.get('commune_code')
+        axe = request.query_params.get('axe')
+
+        if not crise_id or not commune_code:
+            return Response({"error": "crise et commune_code sont obligatoires."}, status=status.HTTP_400_BAD_REQUEST)
+        if axe not in _PONT_BESOIN_PAR_AXE:
+            return Response({"error": "axe doit être request, offer ou information."}, status=status.HTTP_400_BAD_REQUEST)
+
+        crise = Crisis.objects.filter(pk=crise_id).first()
+        if crise is None:
+            return Response({"error": "Crise introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+
+        besoins = besoins_a_lecoute(crise, commune_code)
+        pont_model, champ_type_id = _PONT_BESOIN_PAR_AXE[axe]
+        type_ids = pont_model.objects.filter(besoin__in=besoins).values_list(champ_type_id, flat=True).distinct()
+
+        return Response({
+            "besoins": BesoinSerializer(besoins, many=True).data,
+            "type_ids": [str(i) for i in type_ids],
+        })
 
 
 class EnvironmentScopedViewSetMixin:
@@ -10965,8 +11017,11 @@ class ImplicationInstitutionViewSet(
         # régulateur AUT_LOCALE de la crise : c'est le mandat légal exigé d'une association
         # n'intervenant pas sur délégation d'une collectivité. IMPLIQUE et ACTEUR déclaré par une
         # institution publique restent auto-validés (statut VALIDEE, valeur par défaut du modèle).
-        statut = StatutImplication.VALIDEE
         type_implication = serializer.validated_data.get("type_implication")
+        if type_implication == TypeImplication.ACTEUR and not serializer.validated_data.get("themes"):
+            raise ValidationError({"themes": "Déclarez au moins un thème à l'écoute pour devenir acteur opérationnel sur cette crise."})
+
+        statut = StatutImplication.VALIDEE
         if type_implication == TypeImplication.ACTEUR and not _institution_est_publique(institution):
             statut = StatutImplication.EN_ATTENTE
 
@@ -11053,6 +11108,14 @@ class ImplicationInstitutionViewSet(
         # déclarée par une institution tierce.
         if not self._can_manage(serializer.instance):
             raise PermissionDenied("Seul l'auteur de cette déclaration, un contact de l'institution ou un administrateur peut la modifier.")
+
+        type_implication = serializer.validated_data.get("type_implication", serializer.instance.type_implication)
+        if type_implication == TypeImplication.ACTEUR:
+            themes = serializer.validated_data.get("themes")
+            a_des_themes = bool(themes) if themes is not None else serializer.instance.themes.exists()
+            if not a_des_themes:
+                raise ValidationError({"themes": "Déclarez au moins un thème à l'écoute pour rester acteur opérationnel sur cette crise."})
+
         implication = serializer.save()
         # Couvre le cas d'une institution ACTEUR modifiée en IMPLIQUE (ou l'inverse) via un
         # simple PATCH de type_implication — décision utilisateur du 2026-09-18, voir la

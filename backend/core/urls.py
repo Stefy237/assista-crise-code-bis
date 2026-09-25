@@ -8,7 +8,7 @@ from .views import (
     RecherchePersonneCommentairePhotoViewSet,
     OfferViewSet, OfferPhotoViewSet, RequestPhotoViewSet, DisponibiliteOffreViewSet, InformationViewSet, RecherchePersonnePhotoViewSet,
     BesoinViewSet, RecherchePersonneCommentaireViewSet, RecherchePersonneViewSet,
-    BesoinCompetenceViewSet, BesoinMaterielViewSet, RequestTypeBesoinViewSet, RequestTypeViewSet, OfferTypeViewSet, InformationTypeViewSet,
+    BesoinCompetenceViewSet, BesoinMaterielViewSet, RequestTypeBesoinViewSet, OfferTypeBesoinViewSet, InformationTypeBesoinViewSet, TypesALecouteView, RequestTypeViewSet, OfferTypeViewSet, InformationTypeViewSet,
     DeleteRequestView, DeleteOfferView, DeleteInformationView, CompetenceViewSet,
     ConfirmerAffectationBenevoleView,
     EngagementRessourcePublicView,
@@ -179,6 +179,8 @@ router.register(r'besoins', BesoinViewSet)
 router.register(r'besoins-competences', BesoinCompetenceViewSet)
 router.register(r'besoins-materiels', BesoinMaterielViewSet)
 router.register(r'request-types-besoins', RequestTypeBesoinViewSet)
+router.register(r'offer-types-besoins', OfferTypeBesoinViewSet)
+router.register(r'information-types-besoins', InformationTypeBesoinViewSet)
 router.register(r'documents', DocumentViewSet)
 router.register(r'dossier-commentaires', DossierCommentaireViewSet)
 router.register(r'dossier-historique', DossierHistoriqueViewSet)
@@ -225,6 +227,7 @@ urlpatterns = [
     path('imports/personnel-communal/exemple/', ImportPersonnelCommunalExempleView.as_view(), name='import_personnel_communal_exemple'),
     path('imports/institutions/', ImportInstitutionsView.as_view(), name='import_institutions'),
     path('imports/institutions/exemple/', ImportInstitutionsExempleView.as_view(), name='import_institutions_exemple'),
+    path('types-a-lecoute/', TypesALecouteView.as_view(), name='types_a_lecoute'),
     path('imports/habitations/', ImportHabitationsView.as_view(), name='import_habitations'),
     path('imports/habitations/exemple/', ImportHabitationsExempleView.as_view(), name='import_habitations_exemple'),
     path('ma-position/', MaPositionView.as_view(), name='ma_position'),

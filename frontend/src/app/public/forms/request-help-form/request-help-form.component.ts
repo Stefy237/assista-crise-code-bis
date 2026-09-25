@@ -5,7 +5,6 @@ import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { forkJoin, Observable } from 'rxjs';
 import { RequestService } from '../../../services/request.service';
-import { CrisisService } from '../../../services/crisis.service';
 import { Crisis } from '../../../shared/models/crisis.model';
 import { Request } from '../../../shared/models/request.model';
 import { User } from '../../../shared/models/user.model';
@@ -17,6 +16,7 @@ import { ValidationSummaryComponent } from '../../../shared/components/public/va
 import { PhotoGalleryPickerComponent } from '../../../shared/components/public/photo-gallery-picker/photo-gallery-picker.component';
 import { TagSearchInputComponent } from '../../../shared/components/common/tag-search-input/tag-search-input.component';
 import { LocationService, Commune } from '../../../services/location.service';
+import { CriseLieuThemeComponent } from '../../../shared/components/public/crise-lieu-theme/crise-lieu-theme.component';
 
 const TYPE_HEBERGEMENT = 'Hébergement';
 
@@ -58,7 +58,7 @@ function emptyHebergementDetails(): HebergementDetails {
 @Component({
   selector: 'app-request-help-form',
   standalone: true,
-  imports: [ReactiveFormsModule, CommonModule, FormsModule, AddressPickerComponent, RgpdNoticeComponent, ValidationSummaryComponent, PhotoGalleryPickerComponent, TagSearchInputComponent],
+  imports: [ReactiveFormsModule, CommonModule, FormsModule, AddressPickerComponent, RgpdNoticeComponent, ValidationSummaryComponent, PhotoGalleryPickerComponent, TagSearchInputComponent, CriseLieuThemeComponent],
   templateUrl: './request-help-form.component.html',
   styleUrl: './request-help-form.component.scss'
 })
@@ -81,14 +81,33 @@ export class RequestHelpFormComponent implements OnInit {
     this.longitude = addr?.longitude ?? null;
   }
 
-  crisisOptions: { value: string; label: string }[] = [];
-  filteredCrisisOptions: { value: string; label: string }[] = [];
-  crisisSearch: string = 'Aucune crise en rapport';
-  showCrisisDropdown: boolean = false;
+  // Étape "crise + lieu + thèmes à l'écoute" (voir app-crise-lieu-theme) : remplace l'ancien
+  // crisis-autocomplete maison + l'ancienne section "Votre adresse" séparée plus bas.
+  criseSelectionnee: Crisis | null = null;
+  typesDemandeAutorises: string[] = [];
+
+  onCriseSelectionnee(crise: Crisis | null): void {
+    this.criseSelectionnee = crise;
+    this.requestForm.patchValue({ crisisId: crise?.id || '' });
+  }
+
+  onTypesAutorises(typeIds: string[]): void {
+    this.typesDemandeAutorises = typeIds;
+  }
 
   needTypeOptions: { value: string; label: string }[] = [
     { value: '', label: 'Dropdown' }
   ];
+
+  /** needTypeOptions (types de premier niveau) restreint aux thèmes à l'écoute -- les
+   * sous-catégories (childrenByParentType) d'un type déjà autorisé restent toutes visibles,
+   * simple précision d'un thème déjà validé, pas un axe à l'écoute séparé. */
+  get needTypeOptionsFiltrees(): { value: string; label: string }[] {
+    return this.needTypeOptions.slice(1).filter(opt => {
+      const id = this.typesDemandeMap.get(opt.value);
+      return id && this.typesDemandeAutorises.includes(id);
+    });
+  }
 
   personTypeOptions: { value: string; label: string }[] = [
     { value: '', label: 'Dropdown' },
@@ -101,7 +120,6 @@ export class RequestHelpFormComponent implements OnInit {
     private formBuilder: FormBuilder,
     private router: Router,
     private helpRequestService: RequestService,
-    private crisisService: CrisisService,
     private authService: AuthService,
     private locationService: LocationService
   ) {}
@@ -110,24 +128,6 @@ export class RequestHelpFormComponent implements OnInit {
     this.currentUser = this.authService.getCurrentUser();
     this.initForm();
     this.loadTypesDemande();
-    this.loadActiveCrises();
-  }
-
-  loadActiveCrises(): void {
-    this.crisisService.getAll().subscribe({
-      next: (crises: Crisis[]) => {
-        const activeCrises = crises.filter(c => c.is_open !== false);
-        this.crisisOptions = [
-          { value: '', label: 'Aucune crise en rapport' },
-          ...activeCrises.map(c => ({
-            value: c.id,
-            label: `${c.name} - ${c.type_display || c.type}`
-          }))
-        ];
-        this.filteredCrisisOptions = [...this.crisisOptions];
-      },
-      error: (err) => console.error('Erreur chargement crises:', err)
-    });
   }
 
   loadTypesDemande(): void {
@@ -287,7 +287,7 @@ export class RequestHelpFormComponent implements OnInit {
     if (this.formErrorsStep2.length > 0) return;
 
     const crisisId = this.requestForm.get('crisisId')?.value;
-    const crisisLabel = this.crisisOptions.find(c => c.value === crisisId)?.label || 'non liée à une crise';
+    const crisisLabel = this.criseSelectionnee ? `${this.criseSelectionnee.name} - ${this.criseSelectionnee.type_display || this.criseSelectionnee.type}` : 'non liée à une crise';
     const localisation = { type: 'Point', coordinates: [this.longitude, this.latitude] };
 
     const creations: Observable<Request>[] = this.needsType.controls.map((needControl, i) => {
@@ -377,21 +377,6 @@ export class RequestHelpFormComponent implements OnInit {
         }
       }
     });
-  }
-
-  onCrisisSearchChange(event: Event): void {
-    const input = event.target as HTMLInputElement;
-    this.crisisSearch = input.value;
-    this.filteredCrisisOptions = this.crisisOptions.filter(crisis =>
-      crisis.label.toLowerCase().includes(this.crisisSearch.toLowerCase())
-    );
-    this.showCrisisDropdown = true;
-  }
-
-  selectCrisis(crisis: { value: string; label: string }): void {
-    this.crisisSearch = crisis.label;
-    this.requestForm.patchValue({ crisisId: crisis.value });
-    this.showCrisisDropdown = false;
   }
 
   onContinue(): void {

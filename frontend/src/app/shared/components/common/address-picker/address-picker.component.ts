@@ -15,6 +15,12 @@ export class AddressPickerComponent implements OnInit {
   @Input() label = 'Adresse';
   @Input() placeholder = 'Rechercher une adresse…';
   @Input() required = false;
+  /** Préremplit le champ dès l'ouverture via la géolocalisation, plutôt que de ne l'utiliser
+   * que comme biais de recherche (comportement par défaut, voir ngOnInit) -- opt-in explicite
+   * par appelant : le préremplissage automatique ne convient pas partout (ex: signaler un
+   * danger vu ailleurs que chez soi), mais est souhaité pour l'étape "où êtes-vous" en tête des
+   * formulaires publics de dépôt. L'utilisateur reste toujours libre de remplacer l'adresse. */
+  @Input() autoPrefill = false;
   /** Émet l'adresse choisie, ou null si le champ est vidé après une sélection. */
   @Output() addressSelected = new EventEmitter<AddressResult | null>();
 
@@ -30,6 +36,10 @@ export class AddressPickerComponent implements OnInit {
   constructor(private geolocationService: GeolocationService) {}
 
   ngOnInit(): void {
+    if (this.autoPrefill) {
+      this.useMyLocation();
+      return;
+    }
     // Demande silencieuse : le navigateur affiche sa propre popup de permission. En cas de
     // refus/échec on continue simplement sans biais géographique — jamais bloquant, jamais
     // de préremplissage automatique du champ (l'utilisateur n'est pas forcément chez lui).

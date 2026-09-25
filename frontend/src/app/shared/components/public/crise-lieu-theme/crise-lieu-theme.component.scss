@@ -1,0 +1,62 @@
+.form-group { margin-bottom: 1.25rem; }
+
+.form-label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.required { color: #dc2626; }
+
+.select-wrapper {
+  position: relative;
+
+  .form-select {
+    width: 100%;
+    padding: 0.65rem 2rem 0.65rem 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    appearance: none;
+    font-size: 0.95rem;
+    background: #fff;
+  }
+
+  .select-arrow {
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #888;
+    pointer-events: none;
+  }
+}
+
+.bloc-themes {
+  margin: 1rem 0 1.5rem;
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.hint { color: #888; font-size: 0.85rem; margin: 0; }
+
+.alerte-bloquante {
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+.section-description { font-size: 0.85rem; color: #555; margin: 0 0 0.5rem; }
+
+.liste-themes {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.88rem;
+  color: #1f2937;
+
+  li { margin-bottom: 0.2rem; }
+}

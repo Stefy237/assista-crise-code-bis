@@ -19,36 +19,15 @@
     @if(state === 1) {
       <form [formGroup]="requestForm">
       
-        <!-- Étape 1 : Détails de la demande -->
-          <!-- Pour la crise -->
-            <div class="form-group">
-                <label for="crisisSearch" class="form-label">
-                Pour la crise
-                </label>
-                <div class="autocomplete-wrapper">
-                  <input
-                    type="text"
-                    id="crisisSearch"
-                    [(ngModel)]="crisisSearch"
-                    [ngModelOptions]="{standalone: true}"
-                    (input)="onCrisisSearchChange($event)"
-                    (focus)="showCrisisDropdown = true"
-                    placeholder="Rechercher une crise..."
-                    class="form-input"
-                    autocomplete="off"
-                  />
-                  @if(showCrisisDropdown && filteredCrisisOptions.length > 0) {
-                    <div class="autocomplete-dropdown">
-                      @for(crisis of filteredCrisisOptions; track crisis.value) {
-                        <div class="autocomplete-item" (click)="selectCrisis(crisis)">
-                          {{ crisis.label }}
-                        </div>
-                      }
-                    </div>
-                  }
-                </div>
-            </div>
+        <!-- Étape 1 : crise, lieu, puis thèmes à l'écoute -->
+        <app-crise-lieu-theme
+          axe="request"
+          (criseSelectionnee)="onCriseSelectionnee($event)"
+          (adresseSelectionnee)="onAddressSelected($event)"
+          (typesAutorises)="onTypesAutorises($event)">
+        </app-crise-lieu-theme>
 
+        @if (typesDemandeAutorises.length > 0) {
             <!-- De quoi avez-vous besoin -->
              @for(needType of needsType.controls; track needType; let i = $index) {
                 @if(i > 0){
@@ -71,7 +50,7 @@
                         [class.invalid]="needsType.at(i).invalid && needsType.at(i).touched"
                         (change)="onTopLevelTypeChange(i)">
                         <option value="">Choisissez votre besoin</option>
-                        @for(option of needTypeOptions.slice(1); track option.value) {
+                        @for(option of needTypeOptionsFiltrees; track option.value) {
                             <option [value]="option.value">
                                 {{ option.label }}
                             </option>
@@ -255,27 +234,12 @@
                 Demander un autre service ?
                 </a>
             </div>
+        }
 
-            <!-- Votre adresse : sans objet si tous les besoins sont des recherches de logement
-                 (voir la zone de recherche propre à Hébergement, ci-dessus). -->
-            @if (addressRequired()) {
+            <!-- Adresse visible : l'adresse elle-même est déjà connue (voir app-crise-lieu-theme
+                 en tête d'étape), seule la visibilité reste à choisir ici. -->
+            @if (selectedAddress) {
             <div class="form-section">
-                <h2 class="section-title">Votre adresse <span class="required">*</span></h2>
-
-                <div class="form-group">
-                  <app-address-picker
-                    label="Adresse"
-                    [required]="true"
-                    (addressSelected)="onAddressSelected($event)">
-                  </app-address-picker>
-                  @if (requestForm.touched && !selectedAddress) {
-                    <div class="error-message">
-                      Veuillez sélectionner une adresse dans la liste proposée
-                    </div>
-                  }
-                </div>
-
-                <!-- Checkbox adresse visible -->
                 <div class="form-group checkbox-group">
                 <label class="checkbox-label">
                     <input

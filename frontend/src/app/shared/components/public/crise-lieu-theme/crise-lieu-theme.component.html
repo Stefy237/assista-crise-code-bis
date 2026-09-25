@@ -1,0 +1,44 @@
+<div class="form-group">
+  <label for="crlt-crise" class="form-label">Pour la crise <span class="required">*</span></label>
+  <div class="select-wrapper">
+    <select id="crlt-crise" class="form-select" [(ngModel)]="criseId" (change)="onCriseChange()">
+      <option value="">Choisissez la crise concernée</option>
+      @for (crise of crises; track crise.id) {
+        <option [value]="crise.id">{{ crise.name }}</option>
+      }
+    </select>
+    <span class="material-icons select-arrow">arrow_drop_down</span>
+  </div>
+</div>
+
+@if (criseId) {
+  <div class="form-group">
+    <app-address-picker
+      label="Là où vous vous trouvez"
+      placeholder="Rechercher une adresse…"
+      [required]="true"
+      [autoPrefill]="true"
+      (addressSelected)="onAdresseSelectionnee($event)">
+    </app-address-picker>
+  </div>
+}
+
+@if (criseId && adresse) {
+  <div class="bloc-themes">
+    @if (chargementThemes) {
+      <p class="hint">Recherche des thèmes à l'écoute…</p>
+    } @else if (aucunTheme) {
+      <p class="alerte-bloquante">
+        Aucun thème à l'écoute pour cette zone actuellement — contactez l'institution locale
+        pour signaler votre besoin autrement.
+      </p>
+    } @else {
+      <p class="section-description">Thèmes actuellement à l'écoute pour cette crise, à cet endroit :</p>
+      <ul class="liste-themes">
+        @for (besoin of besoins; track besoin.id) {
+          <li>{{ besoin.nom }}</li>
+        }
+      </ul>
+    }
+  </div>
+}

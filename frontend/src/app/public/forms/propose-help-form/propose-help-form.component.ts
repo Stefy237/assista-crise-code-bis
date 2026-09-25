@@ -6,7 +6,6 @@ import { forkJoin, Observable } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { OfferService } from '../../../services/offer.service';
 import { DisponibiliteOffreService } from '../../../services/disponibilite-offre.service';
-import { CrisisService } from '../../../services/crisis.service';
 import { Crisis } from '../../../shared/models/crisis.model';
 import { Offer } from '../../../shared/models/offer.model';
 import { AuthService } from '../../../auth/services/auth.service';
@@ -22,6 +21,7 @@ import { MaterielCatalogue } from '../../../shared/models/materiel-catalogue.mod
 import { RgpdNoticeComponent } from '../../../shared/components/public/rgpd-notice/rgpd-notice.component';
 import { ValidationSummaryComponent } from '../../../shared/components/public/validation-summary/validation-summary.component';
 import { PhotoGalleryPickerComponent } from '../../../shared/components/public/photo-gallery-picker/photo-gallery-picker.component';
+import { CriseLieuThemeComponent } from '../../../shared/components/public/crise-lieu-theme/crise-lieu-theme.component';
 
 interface JourDispo {
   date: string;       // YYYY-MM-DD
@@ -102,7 +102,7 @@ function transportAnimauxPrecisionValidator(control: AbstractControl): Validatio
 @Component({
   selector: 'app-request-help-form',
   standalone: true,
-  imports: [ReactiveFormsModule, CommonModule, FormsModule, AddressPickerComponent, TagSearchInputComponent, RgpdNoticeComponent, ValidationSummaryComponent, PhotoGalleryPickerComponent],
+  imports: [ReactiveFormsModule, CommonModule, FormsModule, AddressPickerComponent, TagSearchInputComponent, RgpdNoticeComponent, ValidationSummaryComponent, PhotoGalleryPickerComponent, CriseLieuThemeComponent],
   templateUrl: './propose-help-form.component.html',
   styleUrl: './propose-help-form.component.scss'
 })
@@ -233,14 +233,34 @@ export class ProposeHelpFormComponent implements OnInit {
     this.longitude = addr?.longitude ?? null;
   }
 
-  crisisOptions: { value: string; label: string }[] = [];
-  filteredCrisisOptions: { value: string; label: string }[] = [];
-  crisisSearch: string = 'Aucune crise en rapport';
-  showCrisisDropdown: boolean = false;
+  // Étape "crise + lieu + thèmes à l'écoute" (voir app-crise-lieu-theme) : remplace l'ancien
+  // crisis-autocomplete maison + la section "Votre adresse" séparée plus bas dans le formulaire
+  // — l'adresse n'est désormais demandée qu'une fois, en tête.
+  criseSelectionnee: Crisis | null = null;
+  typesOffreAutorises: string[] = [];
+
+  onCriseSelectionnee(crise: Crisis | null): void {
+    this.criseSelectionnee = crise;
+    this.requestForm.patchValue({ crisisId: crise?.id || '' });
+  }
+
+  onTypesAutorises(typeIds: string[]): void {
+    this.typesOffreAutorises = typeIds;
+  }
 
   offerTypeOptions: { value: string; label: string }[] = [
     { value: '', label: 'Dropdown' }
   ];
+
+  /** offerTypeOptions restreint aux types dont l'id figure dans typesOffreAutorises (thèmes à
+   * l'écoute, voir onTypesAutorises) -- offerTypeOptions garde value=nom du type (pas l'id),
+   * d'où le passage par typesOffreMap pour la comparaison. */
+  get offerTypeOptionsFiltrees(): { value: string; label: string }[] {
+    return this.offerTypeOptions.slice(1).filter(opt => {
+      const id = this.typesOffreMap.get(opt.value);
+      return id && this.typesOffreAutorises.includes(id);
+    });
+  }
 
   personTypeOptions: { value: string; label: string }[] = [
     { value: '', label: 'Dropdown' },
@@ -287,7 +307,6 @@ export class ProposeHelpFormComponent implements OnInit {
     private router: Router,
     private offerService: OfferService,
     private disponibiliteOffreService: DisponibiliteOffreService,
-    private crisisService: CrisisService,
     private authService: AuthService,
     private competenceService: CompetenceService,
     private materielCatalogueService: MaterielCatalogueService,
@@ -445,7 +464,6 @@ export class ProposeHelpFormComponent implements OnInit {
     this.currentUser = this.authService.getCurrentUser();
     this.initForm();
     this.loadTypesOffre();
-    this.loadActiveCrises();
     this.buildJoursDispo();
     this.competenceService.getAll().subscribe({
       next: (list) => this.allCompetences = list,
@@ -507,23 +525,6 @@ export class ProposeHelpFormComponent implements OnInit {
         ];
       },
       error: (err: any) => console.error('Erreur chargement types offre:', err)
-    });
-  }
-
-  loadActiveCrises(): void {
-    this.crisisService.getAll().subscribe({
-      next: (crises: Crisis[]) => {
-        const activeCrises = crises.filter(c => c.is_open !== false);
-        this.crisisOptions = [
-          { value: '', label: 'Aucune crise en rapport' },
-          ...activeCrises.map(c => ({
-            value: c.id,
-            label: `${c.name} - ${c.type_display || c.type}`
-          }))
-        ];
-        this.filteredCrisisOptions = [...this.crisisOptions];
-      },
-      error: (err) => console.error('Erreur chargement crises:', err)
     });
   }
 
@@ -597,7 +598,7 @@ export class ProposeHelpFormComponent implements OnInit {
     if (this.formErrorsStep2.length > 0) return;
 
     const crisisId = this.requestForm.get('crisisId')?.value;
-    const crisisLabel = this.crisisOptions.find(c => c.value === crisisId)?.label || 'non liée à une crise';
+    const crisisLabel = this.criseSelectionnee ? `${this.criseSelectionnee.name} - ${this.criseSelectionnee.type_display || this.criseSelectionnee.type}` : 'non liée à une crise';
     const addressVisible = this.requestForm.get('addressVisible')?.value;
     const hasLocation = !!(addressVisible && this.latitude != null && this.longitude != null);
 
@@ -803,21 +804,6 @@ export class ProposeHelpFormComponent implements OnInit {
       return `[Bénévolat] ${rowValue.description || ''}`.trim();
     }
     return rowValue.description || '';
-  }
-
-  onCrisisSearchChange(event: Event): void {
-    const input = event.target as HTMLInputElement;
-    this.crisisSearch = input.value;
-    this.filteredCrisisOptions = this.crisisOptions.filter(crisis =>
-      crisis.label.toLowerCase().includes(this.crisisSearch.toLowerCase())
-    );
-    this.showCrisisDropdown = true;
-  }
-
-  selectCrisis(crisis: { value: string; label: string }): void {
-    this.crisisSearch = crisis.label;
-    this.requestForm.patchValue({ crisisId: crisis.value });
-    this.showCrisisDropdown = false;
   }
 
   /** La commune est obligatoire même pour un offreur d'aide (matching géographique avec les

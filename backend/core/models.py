@@ -1447,6 +1447,37 @@ class RequestTypeBesoin(models.Model):
     def __str__(self):
         return f"{self.request_type} -> {self.besoin}"
 
+
+class OfferTypeBesoin(models.Model):
+    """Pont OfferType -> Besoin, mirror de RequestTypeBesoin -- permet de filtrer les types
+    d'offre sélectionnables sur le formulaire public "proposer de l'aide" aux seuls thèmes
+    qu'au moins une institution a déclarés "à l'écoute" pour la crise/zone choisie (voir
+    besoins_ecoute.py)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    offer_type = models.ForeignKey(OfferType, on_delete=models.CASCADE, related_name="besoins")
+
+    besoin = models.ForeignKey(Besoin, on_delete=models.CASCADE, related_name="offer_types")
+
+    def __str__(self):
+        return f"{self.offer_type} -> {self.besoin}"
+
+
+class InformationTypeBesoin(models.Model):
+    """Pont InformationType -> Besoin, mirror de RequestTypeBesoin -- même rôle que
+    OfferTypeBesoin pour le formulaire public "signaler"."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    information_type = models.ForeignKey(InformationType, on_delete=models.CASCADE, related_name="besoins")
+
+    besoin = models.ForeignKey(Besoin, on_delete=models.CASCADE, related_name="information_types")
+
+    def __str__(self):
+        return f"{self.information_type} -> {self.besoin}"
+
+
 class AffectationCompetence(EnvironmentScopedModel):
     """
     Affecte une compétence à une équipe
