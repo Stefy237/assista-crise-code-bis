@@ -189,6 +189,7 @@ from .models import (
     TypeLienHabitation,
     StatutEvaluationHabitation,
     StatutChantierHabitation,
+    ModuleDegatsCrise,
 )
 
 
@@ -415,6 +416,7 @@ from .serializers import (
     HabitationCommentaireSerializer,
     HabitationHistoriqueSerializer,
     RattachementHabitationSerializer,
+    ModuleDegatsCriseSerializer,
 )
 
 class TagLikeViewSetMixin:
@@ -3962,6 +3964,84 @@ def _instancier_mission_modele(request, modele, team, crise):
     return dossier
 
 
+def _dossier_pour_habitation(habitation, request):
+    """Récupère (ou crée) l'unique Dossier lié à une Habitation -- déclenché soit par
+    l'acceptation d'un rattachement (RattachementHabitationViewSet._traiter), soit par une
+    évaluation constatant des dégâts (HabitationViewSet.evaluer). Sans équipe/demandeur
+    d'origine à la création (mêmes que _instancier_mission_modele/TeamViewSet.creer_dossier) --
+    populate_dossier_participants_and_notify s'occupe séparément d'ajouter le demandeur et de
+    notifier les régulateurs."""
+    dossier = Dossier.objects.filter(habitation=habitation).first()
+    if dossier is not None:
+        return dossier
+
+    from .habitations import NOM_COMPETENCE_EVALUATION_DEGATS
+    dossier = Dossier.objects.create(
+        numero=f"DOS-{uuid.uuid4().hex[:8].upper()}",
+        crise=habitation.crise,
+        habitation=habitation,
+        competence=Competence.objects.filter(nom=NOM_COMPETENCE_EVALUATION_DEGATS).first(),
+        titre=f"Dégâts — {habitation.adresse}",
+        description=f"Dossier ouvert automatiquement pour l'habitation « {habitation.adresse} ».",
+        statut=Dossier.Statut.NOUVEAU,
+        environment=habitation.environment,
+    )
+    audit_log(
+        request=request, action_code="CREATION", objet_type="Dossier", objet_id=dossier.id,
+        crise=habitation.crise,
+        commentaire=f"Dossier {dossier.numero} créé automatiquement depuis l'habitation « {habitation.adresse} »",
+    )
+    return dossier
+
+
+class ModuleDegatsCriseViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Activation du module "Estimation des dégâts" par crise (voir ModuleDegatsCrise.__doc__)
+    -- désactivé par défaut, une mairie/EPCI (même règle que ZoneViewSet, ce dispositif relève
+    du même domaine PCS/PICS) doit explicitement créer une ligne ici pour rendre le
+    référencement des dégâts accessible sur une crise. Lecture AllowAny : la page publique doit
+    pouvoir savoir si le module est actif sur une crise sans être authentifiée."""
+
+    queryset = ModuleDegatsCrise.objects.select_related('institution', 'crise', 'zone').all()
+    serializer_class = ModuleDegatsCriseSerializer
+    filterset_fields = ['crise', 'institution', 'actif']
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [IsInstitutionalActor()]
+
+    def perform_create(self, serializer):
+        institution = _resolve_institution_or_400(self.request)
+        if get_effective_role(self.request) != UserRole.ADMINISTRATOR and not _institution_est_autorite_locale(institution):
+            raise PermissionDenied(
+                "L'activation du référencement des dégâts est réservée aux mairies et intercommunalités."
+            )
+        module = serializer.save(
+            institution=institution, active_par=self.request.user,
+            environment=get_active_environment(self.request),
+        )
+        audit_log(
+            request=self.request, action_code="CREATION", objet_type="ModuleDegatsCrise",
+            objet_id=module.id,
+            commentaire=f"Module dégâts activé : {institution.nom} / {module.crise.name}",
+        )
+
+    def perform_update(self, serializer):
+        etait_actif = serializer.instance.actif
+        module = serializer.save()
+        if etait_actif and not module.actif:
+            module.date_desactivation = timezone.now()
+            module.save(update_fields=['date_desactivation'])
+        elif not etait_actif and module.actif:
+            module.date_desactivation = None
+            module.save(update_fields=['date_desactivation'])
+        audit_log(
+            request=self.request, action_code="MODIFICATION", objet_type="ModuleDegatsCrise",
+            objet_id=module.id,
+            commentaire=f"Module dégâts {'activé' if module.actif else 'désactivé'} : {module.institution.nom} / {module.crise.name}",
+        )
+
+
 class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     """Référencement des dégâts par bâtiment (voir Habitation.__doc__). Lecture publique
     (AllowAny) -- la carte et la recherche d'adresse pour le rattachement propriétaire/locataire
@@ -3983,23 +4063,44 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         recherche = self.request.query_params.get('recherche')
         if recherche:
             qs = qs.filter(adresse__icontains=recherche)
+        est_admin = self.request.user.is_authenticated and get_effective_role(self.request) == UserRole.ADMINISTRATOR
+        if self.action in ('list', 'retrieve') and not est_admin:
+            # Le module est désactivé par défaut (voir ModuleDegatsCrise.__doc__) : une
+            # habitation rattachée à une crise sans module actif pour aucune institution ne doit
+            # pas apparaître au public. Les habitations historiques (crise=null, avant ce
+            # module) restent visibles -- comportement inchangé pour elles.
+            qs = qs.exclude(
+                Q(crise__isnull=False) & ~Q(crise__modules_degats__actif=True)
+            )
         return qs
 
-    def _refuser_si_non_accede(self, commune_code):
+    def _refuser_si_non_accede(self, commune_code, crise=None):
         from .habitations import institution_accede_commune
-        if not institution_accede_commune(self.request, commune_code):
+        if not institution_accede_commune(self.request, commune_code, crise=crise):
             raise PermissionDenied(
-                "Vous n'avez pas de délégation pour gérer les habitations de cette commune."
+                "Vous n'avez pas de délégation pour gérer les habitations de cette commune, ou "
+                "le module d'estimation des dégâts n'est pas activé sur cette crise."
             )
 
     def perform_create(self, serializer):
+        crise = serializer.validated_data.get('crise')
+        if crise is None:
+            raise ValidationError({"crise": "Obligatoire : une habitation doit être rattachée à une crise."})
         commune_code = serializer.validated_data.get('commune_code')
-        if not commune_code:
-            location = serializer.validated_data.get('location')
-            if location:
-                commune_code = commune_code_from_point(location)
-                serializer.validated_data['commune_code'] = commune_code
-        self._refuser_si_non_accede(commune_code)
+        location = serializer.validated_data.get('location')
+        if not commune_code and location:
+            commune_code = commune_code_from_point(location)
+            serializer.validated_data['commune_code'] = commune_code
+        self._refuser_si_non_accede(commune_code, crise=crise)
+
+        from .habitations import commune_dans_zone_module
+        from .models import ModuleDegatsCrise
+        module = ModuleDegatsCrise.objects.filter(
+            crise=crise, institution=self.request.user.institution, actif=True,
+        ).first()
+        if module and not commune_dans_zone_module(commune_code, location, module):
+            raise PermissionDenied("Ce point est hors de la zone définie pour le module d'estimation des dégâts.")
+
         habitation = serializer.save(environment=get_active_environment(self.request))
         HabitationHistorique.objects.create(
             habitation=habitation, auteur=self.request.user, evenement="Habitation référencée",
@@ -4011,7 +4112,7 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         )
 
     def perform_update(self, serializer):
-        self._refuser_si_non_accede(serializer.instance.commune_code)
+        self._refuser_si_non_accede(serializer.instance.commune_code, crise=serializer.instance.crise)
         habitation = serializer.save()
         audit_log(
             request=self.request, action_code="MODIFICATION", objet_type="Habitation",
@@ -4019,7 +4120,7 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
-        self._refuser_si_non_accede(instance.commune_code)
+        self._refuser_si_non_accede(instance.commune_code, crise=instance.crise)
         audit_log(
             request=self.request, action_code="SUPPRESSION", objet_type="Habitation",
             objet_id=instance.id, commentaire=f"Suppression : {instance.adresse}",
@@ -4033,7 +4134,7 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         l'historique -- plutôt qu'un simple PATCH, pour ne jamais perdre le "qui/quand" d'une
         évaluation terrain au profit d'un champ modifié en silence."""
         habitation = self.get_object()
-        self._refuser_si_non_accede(habitation.commune_code)
+        self._refuser_si_non_accede(habitation.commune_code, crise=habitation.crise)
 
         statut_evaluation = request.data.get('statut_evaluation')
         if statut_evaluation not in StatutEvaluationHabitation.values:
@@ -4070,6 +4171,10 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_id=habitation.id,
             commentaire=f"Évaluation : {habitation.adresse} -> {statut_evaluation}",
         )
+
+        if statut_evaluation in (StatutEvaluationHabitation.DEGATS_FAIBLES, StatutEvaluationHabitation.DEGATS_FORTS):
+            _dossier_pour_habitation(habitation, request)
+
         return Response(HabitationSerializer(habitation, context={'request': request}).data)
 
     @action(detail=False, methods=['post'], url_path='estimation-ban')
@@ -4080,19 +4185,29 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         (Crisis.zone_secteurs), elle restreint encore le résultat. `zone` (optionnelle) désigne
         une Zone nommée du catalogue de l'institution (ex: "Quartier Nord") pour restreindre
         encore À L'INTÉRIEUR de la commune -- les deux se combinent, aucune n'élargit jamais."""
-        from .habitations import institution_accede_commune, perimetre_scan, scanner_ban_commune
+        from .habitations import commune_dans_zone_module, perimetre_scan, scanner_ban_commune
 
         commune_code = (request.data.get('commune_code') or '').strip()
         if not commune_code:
             return Response({"error": "commune_code est obligatoire."}, status=status.HTTP_400_BAD_REQUEST)
-        self._refuser_si_non_accede(commune_code)
 
-        crise = None
         crise_id = request.data.get('crise')
-        if crise_id:
-            crise = Crisis.objects.filter(pk=crise_id).first()
-            if crise is None:
-                return Response({"error": "Crise introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+        if not crise_id:
+            return Response({"error": "crise est obligatoire : le module d'estimation des dégâts est activé par crise."}, status=status.HTTP_400_BAD_REQUEST)
+        crise = Crisis.objects.filter(pk=crise_id).first()
+        if crise is None:
+            return Response({"error": "Crise introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+
+        self._refuser_si_non_accede(commune_code, crise=crise)
+
+        module = ModuleDegatsCrise.objects.filter(
+            crise=crise, institution=request.user.institution, actif=True,
+        ).first()
+        if module and not commune_dans_zone_module(commune_code, None, module):
+            return Response(
+                {"error": "Cette commune est hors de la zone définie pour le module d'estimation des dégâts."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         zone = None
         zone_id = request.data.get('zone')
@@ -4211,7 +4326,7 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
             h.commune_code for h in Habitation.objects.filter(
                 pk__in=qs.values_list('habitation_id', flat=True)
             ).distinct()
-            if institution_accede_commune(self.request, h.commune_code)
+            if institution_accede_commune(self.request, h.commune_code, crise=h.crise)
         ]
         return qs.filter(
             Q(habitation__commune_code__in=mes_communes) | Q(utilisateur=self.request.user)
@@ -4243,7 +4358,7 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
     def _traiter(self, request, pk, accepter: bool):
         from .habitations import institution_accede_commune
         rattachement = self.get_object()
-        if not institution_accede_commune(request, rattachement.habitation.commune_code):
+        if not institution_accede_commune(request, rattachement.habitation.commune_code, crise=rattachement.habitation.crise):
             raise PermissionDenied("Vous n'avez pas de délégation pour gérer cette commune.")
         if rattachement.statut != StatutRattachementHabitation.EN_ATTENTE:
             return Response({"error": "Cette demande a déjà été traitée."}, status=status.HTTP_400_BAD_REQUEST)
@@ -4270,6 +4385,17 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
                 )
             rattachement.utilisateur = utilisateur
             rattachement.save(update_fields=['utilisateur'])
+
+            dossier = _dossier_pour_habitation(rattachement.habitation, request)
+            populate_dossier_participants_and_notify(
+                dossier, demandeur=utilisateur,
+                notification_titre="Rattachement accepté sur un dossier dégâts",
+                notification_message=(
+                    f"Le rattachement de {rattachement.nom_demandeur} ({rattachement.get_type_lien_display()}) "
+                    f"à « {rattachement.habitation.adresse} » a été accepté : le dossier {dossier.numero} "
+                    "nécessite une affectation."
+                ),
+            )
 
             suivi_link = build_magic_link(
                 request, utilisateur, "magic-login", next_url=f"/habitation-suivi/{rattachement.habitation.id}"
@@ -4324,6 +4450,19 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
     @action(detail=True, methods=['post'])
     def refuser(self, request, pk=None):
         return self._traiter(request, pk, accepter=False)
+
+    @action(detail=True, methods=['get'])
+    def preview(self, request, pk=None):
+        from .habitations import institution_accede_commune
+        rattachement = self.get_object()
+        if not rattachement.justificatif:
+            return Response(status=404)
+        accede = institution_accede_commune(
+            request, rattachement.habitation.commune_code, crise=rattachement.habitation.crise,
+        ) or (request.user.is_authenticated and rattachement.utilisateur_id == request.user.id)
+        if not accede:
+            return Response(status=403)
+        return FileResponse(open(rattachement.justificatif.path, "rb"))
 
 
 class ImportHabitationsView(APIView):

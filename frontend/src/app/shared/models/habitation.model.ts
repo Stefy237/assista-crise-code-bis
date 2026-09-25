@@ -60,6 +60,23 @@ export interface RattachementHabitation {
   traite_par_nom: string | null;
   date_traitement: string | null;
   motif_refus: string | null;
+  /** justificatif est write_only côté API -- ce booléen indique juste sa présence, la photo
+   * elle-même se récupère via RattachementHabitationService.previewJustificatif. */
+  a_justificatif: boolean;
+}
+
+export interface ModuleDegatsCrise {
+  id: string;
+  crise: string;
+  crise_nom: string;
+  institution: string;
+  institution_nom: string;
+  actif: boolean;
+  zone: string | null;
+  zone_nom: string | null;
+  active_par: string | null;
+  date_activation: string;
+  date_desactivation: string | null;
 }
 
 export const LABELS_STATUT_EVALUATION: Record<StatutEvaluationHabitation, string> = {

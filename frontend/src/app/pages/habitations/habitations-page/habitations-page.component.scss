@@ -247,3 +247,18 @@ table {
 
   ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
 }
+
+.bandeau-module-inactif {
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.statut-module {
+  font-size: 0.85rem;
+  color: #444;
+  margin: 0.5rem 0;
+}

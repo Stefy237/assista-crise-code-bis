@@ -80,6 +80,7 @@ from .models import (
     HabitationHistorique,
     RattachementHabitation,
     StatutRattachementHabitation,
+    ModuleDegatsCrise,
 )
 
 class RecherchePersonneCommentairePhotoSerializer(
@@ -3212,7 +3213,7 @@ class HabitationSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return False
         from .habitations import institution_accede_commune
-        return institution_accede_commune(request, obj.commune_code)
+        return institution_accede_commune(request, obj.commune_code, crise=obj.crise)
 
     def create(self, validated_data):
         latitude = self.initial_data.get('latitude')
@@ -3235,6 +3236,7 @@ class RattachementHabitationSerializer(serializers.ModelSerializer):
 
     habitation_adresse = serializers.CharField(source="habitation.adresse", read_only=True)
     traite_par_nom = serializers.SerializerMethodField()
+    a_justificatif = serializers.SerializerMethodField()
 
     class Meta:
         model = RattachementHabitation
@@ -3242,10 +3244,29 @@ class RattachementHabitationSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'utilisateur', 'statut', 'traite_par', 'date_traitement', 'motif_refus', 'date_demande',
         ]
+        # justificatif : jamais exposé en lecture directe (URL media brute) -- même politique
+        # que Offer.photo, récupérable uniquement via RattachementHabitationViewSet.preview
+        # (contrôle d'accès : institution habilitée sur la commune, voir _refuser_si_non_accede).
+        extra_kwargs = {'justificatif': {'write_only': True}}
 
     def get_traite_par_nom(self, obj):
         if not obj.traite_par:
             return None
         return (f"{obj.traite_par.first_name} {obj.traite_par.last_name}").strip() or obj.traite_par.username
+
+    def get_a_justificatif(self, obj):
+        return bool(obj.justificatif)
+
+
+class ModuleDegatsCriseSerializer(serializers.ModelSerializer):
+
+    institution_nom = serializers.CharField(source="institution.nom", read_only=True)
+    zone_nom = serializers.CharField(source="zone.nom", read_only=True, default=None)
+    crise_nom = serializers.CharField(source="crise.name", read_only=True)
+
+    class Meta:
+        model = ModuleDegatsCrise
+        fields = "__all__"
+        read_only_fields = ['active_par', 'date_activation', 'date_desactivation']
 
 

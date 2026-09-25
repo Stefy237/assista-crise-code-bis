@@ -51,6 +51,7 @@ export class HabitationFicheComponent implements OnChanges {
   demandeEnvoyee = false;
   demandeEnCours = false;
   formRattachement = { nom_demandeur: '', email_demandeur: '', telephone_demandeur: '', type_lien: 'PROPRIETAIRE' as 'PROPRIETAIRE' | 'LOCATAIRE', message: '' };
+  justificatifChoisi: File | null = null;
 
   labelsEvaluation = LABELS_STATUT_EVALUATION;
   labelsChantier = LABELS_STATUT_CHANTIER;
@@ -126,17 +127,41 @@ export class HabitationFicheComponent implements OnChanges {
     this.rattachementService.refuser(r.id, motif).subscribe(() => this.chargerRattachements());
   }
 
+  voirJustificatif(r: RattachementHabitation): void {
+    this.rattachementService.previewJustificatif(r.id).subscribe(blob => {
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    });
+  }
+
+  onJustificatifChoisi(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    this.justificatifChoisi = input.files?.[0] || null;
+  }
+
   envoyerDemandeRattachement(): void {
     if (!this.formRattachement.nom_demandeur || !this.formRattachement.email_demandeur) return;
     this.demandeEnCours = true;
-    this.rattachementService.demander({
+
+    const payload = {
       habitation: this.habitation.id,
       nom_demandeur: this.formRattachement.nom_demandeur,
       email_demandeur: this.formRattachement.email_demandeur,
       telephone_demandeur: this.formRattachement.telephone_demandeur || undefined,
       type_lien: this.formRattachement.type_lien,
       message: this.formRattachement.message || undefined,
-    }).subscribe({
+    };
+
+    let corps: typeof payload | FormData = payload;
+    if (this.justificatifChoisi) {
+      const form = new FormData();
+      Object.entries(payload).forEach(([k, v]) => { if (v !== undefined) form.append(k, v); });
+      form.append('justificatif', this.justificatifChoisi);
+      corps = form;
+    }
+
+    this.rattachementService.demander(corps).subscribe({
       next: () => { this.demandeEnCours = false; this.demandeEnvoyee = true; },
       error: () => { this.demandeEnCours = false; },
     });

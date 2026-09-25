@@ -58,6 +58,7 @@ from .views import (
     HabitationCommentaireViewSet,
     HabitationHistoriqueViewSet,
     RattachementHabitationViewSet,
+    ModuleDegatsCriseViewSet,
     ImportHabitationsView,
     ImportHabitationsExempleView,
     SalonMatrixEquipeViewSet,
@@ -196,6 +197,7 @@ router.register(r'habitations', HabitationViewSet)
 router.register(r'habitations-commentaires', HabitationCommentaireViewSet)
 router.register(r'habitations-historique', HabitationHistoriqueViewSet)
 router.register(r'rattachements-habitations', RattachementHabitationViewSet)
+router.register(r'modules-degats', ModuleDegatsCriseViewSet)
 router.register(r'plans-missions-modeles', PlanMissionModeleViewSet)
 
 urlpatterns = [

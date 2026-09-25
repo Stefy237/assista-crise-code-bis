@@ -14,6 +14,8 @@ import { ZoneService } from '../../../services/zone.service';
 import { Zone } from '../../../shared/models/zone.model';
 import { LocationService, Commune } from '../../../services/location.service';
 import { TagSearchInputComponent } from '../../../shared/components/common/tag-search-input/tag-search-input.component';
+import { ModuleDegatsCriseService } from '../../../services/module-degats.service';
+import { ModuleDegatsCrise } from '../../../shared/models/habitation.model';
 
 type Vue = 'carte' | 'liste';
 
@@ -67,11 +69,28 @@ export class HabitationsPageComponent implements OnInit {
 
   communeSearchFn = (q: string) => this.locationService.searchCommunesByName(q);
 
+  // Activation du module (désactivé par défaut, voir ModuleDegatsCrise.__doc__) : une mairie/
+  // EPCI choisit une crise et, optionnellement, une zone restreignant où les points peuvent
+  // être chargés -- ne montre que le module de SON institution (une ligne existe par couple
+  // crise/institution).
+  panneauModuleOuvert = false;
+  moduleCriseId = '';
+  moduleZoneId = '';
+  moduleCourant: ModuleDegatsCrise | null = null;
+  moduleChargement = false;
+  moduleEnCours = false;
+
+  // Bandeau public : si la crise consultée (filtres.crise) n'a de module actif pour AUCUNE
+  // institution, la page reste consultable mais on le signale plutôt que de laisser une carte
+  // vide sans explication.
+  moduleActifPourCriseFiltree: boolean | null = null;
+
   constructor(
     private habitationService: HabitationService,
     private crisisService: CrisisService,
     private zoneService: ZoneService,
     private locationService: LocationService,
+    private moduleDegatsService: ModuleDegatsCriseService,
     private route: ActivatedRoute,
     public authService: AuthService,
   ) {}
@@ -79,6 +98,8 @@ export class HabitationsPageComponent implements OnInit {
   ngOnInit(): void {
     const communeCode = this.route.snapshot.queryParamMap.get('commune');
     if (communeCode) this.filtres.commune_code = communeCode;
+    const criseId = this.route.snapshot.queryParamMap.get('crise');
+    if (criseId) this.filtres.crise = criseId;
     this.charger();
   }
 
@@ -91,6 +112,15 @@ export class HabitationsPageComponent implements OnInit {
     this.habitationService.getAll(this.filtres).subscribe({
       next: (h) => { this.habitations = h; this.chargement = false; this.carte?.recharger(this.filtres); },
       error: () => { this.chargement = false; },
+    });
+    this.verifierModuleCriseFiltree();
+  }
+
+  private verifierModuleCriseFiltree(): void {
+    if (!this.filtres.crise) { this.moduleActifPourCriseFiltree = null; return; }
+    this.moduleDegatsService.getPourCrise(this.filtres.crise).subscribe({
+      next: (modules) => { this.moduleActifPourCriseFiltree = modules.some(m => m.actif); },
+      error: () => { this.moduleActifPourCriseFiltree = null; },
     });
   }
 
@@ -122,7 +152,11 @@ export class HabitationsPageComponent implements OnInit {
       if (!groupes.has(cle)) groupes.set(cle, []);
       groupes.get(cle)!.push(h);
     }
-    return Array.from(groupes.entries()).map(([nom, habitations]) => ({ nom, habitations }));
+    // Trié par adresse au sein de chaque zone -- demandé explicitement pour la validation des
+    // requêtes de rattachement (tableau institution "vue de suivi").
+    return Array.from(groupes.entries()).map(([nom, habitations]) => ({
+      nom, habitations: [...habitations].sort((a, b) => a.adresse.localeCompare(b.adresse)),
+    }));
   }
 
   ouvrirImport(): void {
@@ -192,6 +226,56 @@ export class HabitationsPageComponent implements OnInit {
         this.estimationEnCours = false;
         this.erreurEstimation = err.error?.error || 'Une erreur est survenue.';
       },
+    });
+  }
+
+  ouvrirModule(): void {
+    this.panneauModuleOuvert = true;
+    this.moduleCriseId = '';
+    this.moduleZoneId = '';
+    this.moduleCourant = null;
+    if (this.crises.length === 0) this.crisisService.getAll().subscribe(c => this.crises = c);
+    if (this.zones.length === 0) this.zoneService.getAll().subscribe(z => this.zones = z);
+  }
+
+  changerCriseModule(): void {
+    this.moduleCourant = null;
+    this.moduleZoneId = '';
+    if (!this.moduleCriseId) return;
+    this.moduleChargement = true;
+    const institutionId = this.authService.getCurrentUser()?.institution_id;
+    this.moduleDegatsService.getPourCrise(this.moduleCriseId).subscribe({
+      next: (modules) => {
+        this.moduleChargement = false;
+        this.moduleCourant = modules.find(m => m.institution === institutionId) || null;
+        this.moduleZoneId = this.moduleCourant?.zone || '';
+      },
+      error: () => { this.moduleChargement = false; },
+    });
+  }
+
+  activerModule(): void {
+    if (!this.moduleCriseId) return;
+    this.moduleEnCours = true;
+    this.moduleDegatsService.activer({ crise: this.moduleCriseId, zone: this.moduleZoneId || null }).subscribe({
+      next: (module) => { this.moduleEnCours = false; this.moduleCourant = module; this.charger(); },
+      error: () => { this.moduleEnCours = false; },
+    });
+  }
+
+  basculerModule(): void {
+    if (!this.moduleCourant) return;
+    this.moduleEnCours = true;
+    this.moduleDegatsService.modifier(this.moduleCourant.id, { actif: !this.moduleCourant.actif }).subscribe({
+      next: (module) => { this.moduleEnCours = false; this.moduleCourant = module; this.charger(); },
+      error: () => { this.moduleEnCours = false; },
+    });
+  }
+
+  changerZoneModule(): void {
+    if (!this.moduleCourant) return;
+    this.moduleDegatsService.modifier(this.moduleCourant.id, { zone: this.moduleZoneId || null }).subscribe(module => {
+      this.moduleCourant = module;
     });
   }
 

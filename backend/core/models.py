@@ -1587,6 +1587,16 @@ class Dossier(EnvironmentScopedModel):
         help_text="Signalement divers à l'origine de ce dossier, si affecté depuis un signalement.",
     )
 
+    habitation = models.ForeignKey(
+        "Habitation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dossiers",
+        help_text="Habitation à l'origine de ce dossier, si créé depuis le module "
+                   "d'estimation des dégâts (rattachement accepté ou dégâts constatés).",
+    )
+
     titre = models.CharField(
         max_length=255
     )
@@ -2096,8 +2106,62 @@ class RattachementHabitation(EnvironmentScopedModel):
     date_traitement = models.DateTimeField(null=True, blank=True)
     motif_refus = models.TextField(blank=True, null=True)
 
+    # Justificatif (photo) fourni par le demandeur -- titre de propriété, bail, facture à son
+    # adresse... Non requis à la création (déposable dès le formulaire public ou ajouté après
+    # coup), voir RattachementHabitationViewSet. Champ direct plutôt que le modèle Document
+    # générique : Document exige IsAuthenticated par défaut (voir DocumentViewSet), alors que ce
+    # dépôt doit rester possible sans compte, comme le reste de la demande -- même convention
+    # que Offer.photo pour le dépôt "proposer de l'aide".
+    justificatif = models.ImageField(
+        upload_to=secure_document_path, max_length=255, null=True, blank=True,
+        validators=[validate_image_file],
+    )
+
     def __str__(self):
         return f"{self.nom_demandeur} ({self.type_lien}) -> {self.habitation.adresse}"
+
+
+class ModuleDegatsCrise(EnvironmentScopedModel):
+    """Activation du module "Estimation des dégâts" par une institution, pour une crise précise
+    -- désactivé par défaut : sans ligne ici (ou actif=False), aucun accès public ni
+    institutionnel au référencement des dégâts pour cette crise (voir
+    habitations.institution_accede_commune). `zone` restreint où les bâtiments (Habitation)
+    peuvent être chargés en réutilisant le catalogue Zone existant -- laissée vide, aucune
+    restriction géographique au-delà de la commune/délégation déjà vérifiée par ailleurs (voir
+    habitations.commune_dans_zone_module)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    crise = models.ForeignKey("Crisis", on_delete=models.CASCADE, related_name="modules_degats")
+
+    institution = models.ForeignKey(
+        "Institution", on_delete=models.CASCADE, related_name="modules_degats_actives",
+    )
+
+    actif = models.BooleanField(default=True)
+
+    zone = models.ForeignKey(
+        Zone, on_delete=models.SET_NULL, null=True, blank=True, related_name="modules_degats",
+        help_text="Zone où les points doivent être chargés -- vide = pas de restriction posée.",
+    )
+
+    active_par = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+
+    date_activation = models.DateTimeField(auto_now_add=True)
+
+    date_desactivation = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["crise", "institution"], name="uq_module_degats_crise_institution",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.institution.nom} — {self.crise.name} ({'actif' if self.actif else 'inactif'})"
 
 
 class Team(EnvironmentScopedModel):

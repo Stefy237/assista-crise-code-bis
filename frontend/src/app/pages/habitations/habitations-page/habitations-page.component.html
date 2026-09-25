@@ -7,12 +7,21 @@
         <button [class.actif]="vue === 'carte'" (click)="changerVue('carte')">Carte</button>
         <button [class.actif]="vue === 'liste'" (click)="changerVue('liste')">Vue de suivi</button>
       </div>
+      @if (authService.isAutoriteLocaleCommunale()) {
+        <button class="btn-secondaire" (click)="ouvrirModule()">Activation du module</button>
+      }
       @if (authService.isAdmin()) {
         <button class="btn-secondaire" (click)="ouvrirEstimation()">Charger depuis la BAN / cadastre</button>
         <button class="btn-secondaire" (click)="ouvrirImport()">Importer un fichier</button>
       }
     </div>
   </div>
+
+  @if (moduleActifPourCriseFiltree === false) {
+    <p class="bandeau-module-inactif">
+      Le référencement des dégâts n'est pas activé pour cette crise actuellement.
+    </p>
+  }
 
   <div class="filtres">
     <input
@@ -159,6 +168,56 @@
         }
 
         <button class="btn-secondaire" (click)="panneauEstimationOuvert = false">Fermer</button>
+      </div>
+    </div>
+  }
+
+  @if (panneauModuleOuvert) {
+    <div class="import-overlay" (click)="panneauModuleOuvert = false">
+      <div class="import-panel" (click)="$event.stopPropagation()">
+        <h2>Activation du module « Estimation des dégâts »</h2>
+        <p class="explication">
+          Désactivé par défaut sur chaque crise : votre institution doit l'activer explicitement
+          pour rendre le référencement des dégâts accessible. La zone (optionnelle) restreint où
+          de nouveaux points peuvent ensuite être chargés.
+        </p>
+
+        <label class="champ-estimation">
+          Crise
+          <select [(ngModel)]="moduleCriseId" (change)="changerCriseModule()">
+            <option value="">— Choisir une crise —</option>
+            @for (crise of crises; track crise.id) {
+              <option [value]="crise.id">{{ crise.name }}</option>
+            }
+          </select>
+        </label>
+
+        @if (moduleCriseId && !moduleChargement) {
+          <label class="champ-estimation">
+            Zone où charger les points (optionnel)
+            <select [(ngModel)]="moduleZoneId" (change)="changerZoneModule()">
+              <option value="">— Pas de restriction —</option>
+              @for (zone of zones; track zone.id) {
+                <option [value]="zone.id">{{ zone.nom }}</option>
+              }
+            </select>
+          </label>
+
+          @if (moduleCourant) {
+            <p class="statut-module">
+              Module <strong>{{ moduleCourant.actif ? 'actif' : 'inactif' }}</strong> pour votre institution sur cette crise.
+            </p>
+            <button class="btn-primary" [disabled]="moduleEnCours" (click)="basculerModule()">
+              {{ moduleEnCours ? '…' : (moduleCourant.actif ? 'Désactiver' : 'Réactiver') }}
+            </button>
+          } @else {
+            <button class="btn-primary" [disabled]="moduleEnCours" (click)="activerModule()">
+              {{ moduleEnCours ? 'Activation…' : 'Activer le module pour cette crise' }}
+            </button>
+          }
+        }
+
+        <button class="btn-secondaire" (click)="panneauModuleOuvert = false">Fermer</button>
       </div>
     </div>
   }

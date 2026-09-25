@@ -158,6 +158,11 @@
                   <div class="rattachement-contact">{{ r.email_demandeur }} @if (r.telephone_demandeur) { · {{ r.telephone_demandeur }} }</div>
                   @if (r.message) { <div class="rattachement-message">{{ r.message }}</div> }
                   <div class="rattachement-date">Demandé le {{ r.date_demande | date:'dd/MM/yyyy' }}</div>
+                  @if (r.a_justificatif) {
+                    <a class="rattachement-justificatif" (click)="voirJustificatif(r)">
+                      <span class="material-icons">image</span> Voir le justificatif
+                    </a>
+                  }
                 </div>
                 @if (r.statut === 'EN_ATTENTE') {
                   <div class="rattachement-actions">
@@ -203,6 +208,10 @@
               <label>Message (optionnel)
                 <textarea [(ngModel)]="formRattachement.message" rows="2"></textarea>
               </label>
+              <label>Justificatif (photo, optionnel)
+                <input type="file" accept="image/*" (change)="onJustificatifChoisi($event)">
+              </label>
+              @if (justificatifChoisi) { <p class="hint-petit">{{ justificatifChoisi.name }}</p> }
               <button class="btn-primary" [disabled]="demandeEnCours" (click)="envoyerDemandeRattachement()">
                 {{ demandeEnCours ? 'Envoi…' : 'Envoyer la demande' }}
               </button>

@@ -47,10 +47,15 @@ def _delegation_couvre_commune(delegation: DelegationCompetence, commune_code: s
     return False
 
 
-def institution_accede_commune(request, commune_code: str) -> bool:
+def institution_accede_commune(request, commune_code: str, crise=None) -> bool:
     """True si l'institution de l'appelant peut gérer les habitations de `commune_code` --
     ADMINISTRATOR voit toujours tout, une AUT_LOCALE sur sa propre commune, une institution
-    (association comprise) avec une délégation active sur cette compétence pour cette commune."""
+    (association comprise) avec une délégation active sur cette compétence pour cette commune.
+
+    `crise`, si fourni, ajoute une condition supplémentaire : le module "Estimation des dégâts"
+    doit avoir été explicitement activé (ModuleDegatsCrise.actif=True) par CETTE institution
+    POUR CETTE crise -- désactivé par défaut, voir ModuleDegatsCrise.__doc__. ADMINISTRATOR
+    reste exempté (il doit pouvoir dépanner même un module non activé)."""
     from .permissions import get_effective_role
 
     user = getattr(request, "user", None)
@@ -67,6 +72,11 @@ def institution_accede_commune(request, commune_code: str) -> bool:
     if institution is None:
         return False
 
+    if crise is not None:
+        from .models import ModuleDegatsCrise
+        if not ModuleDegatsCrise.objects.filter(crise=crise, institution=institution, actif=True).exists():
+            return False
+
     if role == UserRole.LOCAL_AUTHORITY and institution.commune_code == commune_code:
         return True
 
@@ -76,6 +86,30 @@ def institution_accede_commune(request, commune_code: str) -> bool:
         active=True,
     ).filter(Q(date_fin__isnull=True) | Q(date_fin__gt=timezone.now()))
     return any(_delegation_couvre_commune(d, commune_code) for d in delegations)
+
+
+def commune_dans_zone_module(commune_code: str, location, module) -> bool:
+    """True si `commune_code`/`location` tombe dans la zone que `module` (ModuleDegatsCrise) a
+    définie pour restreindre où charger des points -- True si `module.zone` est vide (aucune
+    restriction posée, seule institution_accede_commune s'applique). Même logique de
+    containment que _delegation_couvre_commune (liste de communes, ou polygone dessiné avec le
+    point de l'habitation ou, à défaut, le centre de la commune)."""
+    zone = module.zone
+    if zone is None:
+        return True
+    if zone.communes and commune_code in zone.communes:
+        return True
+    polygone = perimetre_zone_nommee(zone)
+    if polygone is not None:
+        if location is not None:
+            return polygone.contains(location)
+        from .models import Commune
+        commune = Commune.objects.filter(code=commune_code).first()
+        if commune and commune.centre_latitude is not None and commune.centre_longitude is not None:
+            from django.contrib.gis.geos import Point
+            point = Point(commune.centre_longitude, commune.centre_latitude, srid=4326)
+            return polygone.contains(point)
+    return False
 
 
 def communes_accessibles(request) -> list | None:

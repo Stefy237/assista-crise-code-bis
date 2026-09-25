@@ -108,7 +108,7 @@ export class RattachementHabitationService {
   demander(data: {
     habitation: string; nom_demandeur: string; email_demandeur: string;
     telephone_demandeur?: string; type_lien: 'PROPRIETAIRE' | 'LOCATAIRE'; message?: string;
-  }): Observable<RattachementHabitation> {
+  } | FormData): Observable<RattachementHabitation> {
     return this.http.post<RattachementHabitation>(`${this.url}/`, data);
   }
 
@@ -118,5 +118,9 @@ export class RattachementHabitationService {
 
   refuser(id: string, motif?: string): Observable<RattachementHabitation> {
     return this.http.post<RattachementHabitation>(`${this.url}/${id}/refuser/`, { motif_refus: motif || undefined });
+  }
+
+  previewJustificatif(id: string): Observable<Blob> {
+    return this.http.get(`${this.url}/${id}/preview/`, { responseType: 'blob' });
   }
 }
