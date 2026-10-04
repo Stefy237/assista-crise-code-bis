@@ -1,0 +1,40 @@
+<div class="edition-container">
+  @if (loading) {
+    <p class="loading">Chargement…</p>
+  } @else if (notFound) {
+    <p class="error-message">Ce lien n'est plus valide.</p>
+  } @else if (info) {
+
+    <h1>Votre signalement</h1>
+    <p class="subtitle">Bonjour {{ info.first_name_information }}, voici votre signalement.</p>
+
+    @if (saveSuccess) {
+      <p class="success-message">Votre signalement a bien été mis à jour.</p>
+    }
+
+    @if (!editing) {
+      <div class="summary">
+        <p class="texte">{{ info.title }}</p>
+        <button type="button" class="btn-secondary" (click)="startEditing()">
+          <span class="material-icons">edit</span> Modifier mon signalement
+        </button>
+      </div>
+    } @else {
+      <form class="edit-form" (ngSubmit)="saveEdits()">
+        <div class="form-group">
+          <label>Texte du signalement</label>
+          <textarea [(ngModel)]="editForm.title" name="title" rows="4"></textarea>
+        </div>
+
+        @if (saveError) {
+          <p class="error-message">{{ saveError }}</p>
+        }
+
+        <div class="form-actions">
+          <button type="submit" class="btn-primary" [disabled]="saving || !editForm.title?.trim()">Enregistrer</button>
+          <button type="button" class="btn-secondary" (click)="cancelEditing()">Annuler</button>
+        </div>
+      </form>
+    }
+  }
+</div>

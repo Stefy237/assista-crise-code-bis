@@ -70,6 +70,16 @@ export const PUBLIC_ROUTES: Routes = [
           .then(m => m.OfferReponseComponent)
       },
       {
+        path: 'modifier-demande/:token',
+        loadComponent: () => import('./request-edition/request-edition.component')
+          .then(m => m.RequestEditionComponent)
+      },
+      {
+        path: 'modifier-signalement/:token',
+        loadComponent: () => import('./information-edition/information-edition.component')
+          .then(m => m.InformationEditionComponent)
+      },
+      {
         path: 'settings',
         canActivate: [authGuard],
         loadComponent: () => import('./settings/settings.component')

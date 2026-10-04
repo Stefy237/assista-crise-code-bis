@@ -17,6 +17,9 @@
           <div class="message-meta">
             @if (m.urgent) { <span class="material-icons badge-urgent" title="Urgent">priority_high</span> }
             {{ m.expediteur_nom }} · {{ m.horodatage | date:'short' }}
+            @if (m.source && m.source !== 'matrix') {
+              <span class="badge-source">via {{ m.source === 'meshcore' ? 'MeshCore' : 'Meshtastic' }}</span>
+            }
           </div>
           <div class="message-contenu">{{ m.texte }}</div>
           @if (m.vu_par.length > 0) {

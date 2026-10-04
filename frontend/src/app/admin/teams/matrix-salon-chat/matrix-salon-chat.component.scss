@@ -38,6 +38,14 @@
   .message-meta { font-size: .68rem; color: #6b7280; margin-bottom: .15rem; display: flex; align-items: center; gap: .2rem; }
   .message-contenu { font-size: .85rem; color: #1f2937; white-space: pre-wrap; }
   .badge-urgent { font-size: 14px; color: #dc2626; }
+  .badge-source {
+    font-size: .62rem;
+    padding: .05rem .4rem;
+    border-radius: 999px;
+    background: #e0e7ff;
+    color: #4338ca;
+    text-transform: none;
+  }
   .message-vu { font-size: .72rem; color: #15803d; margin-top: .2rem; }
 }
 

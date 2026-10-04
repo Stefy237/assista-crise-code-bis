@@ -4,6 +4,7 @@ import { CentresComponent } from './centres/centres.component';
 import { LogementIntervenantsComponent } from './logement-intervenants/logement-intervenants.component';
 import { StocksComparaisonComponent } from './stocks-comparaison/stocks-comparaison.component';
 import { ZonesComponent } from './zones/zones.component';
+import { SimulationInondationComponent } from './simulation-inondation/simulation-inondation.component';
 import { PlansComponent } from './plans/plans.component';
 import { Routes } from '@angular/router';
 import { DashboardComponent } from './dashboard/dashboard.component';
@@ -70,6 +71,7 @@ export const ADMIN_ROUTES: Routes = [
   { path: 'centres', component: CentresComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'logement-intervenants', component: LogementIntervenantsComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'zones', component: ZonesComponent, canActivate: [institutionalEffectiveGuard, zonesGuard] },
+  { path: 'simulation-inondation', component: SimulationInondationComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'plans', component: PlansComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'carte', component: MapComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'resultats', component: ResultsComponent, canActivate: [institutionalEffectiveGuard] },

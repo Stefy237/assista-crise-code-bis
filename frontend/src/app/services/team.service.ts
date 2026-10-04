@@ -134,6 +134,20 @@ export class TeamService {
     return this.http.post<{ status: string }>(`${this.url}/${id}/salon-matrix-reagir/`, { event_id: eventId });
   }
 
+  /** GET /api/teams/<id>/messagerie-unifiee/ — fenêtre de messagerie UNIQUE de l'équipe,
+   * fusionnant Matrix/MeshCore/Meshtastic (voir TeamViewSet.messagerie_unifiee). Remplace
+   * getSalonMatrixMessages pour la vue équipe (2026-10-05) -- le salon Matrix lui-même reste
+   * provisionné à la volée côté serveur, plus besoin de bouton manuel préalable. */
+  getMessagerieUnifiee(id: string): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.get<{ messages: MatrixMessage[] }>(`${this.url}/${id}/messagerie-unifiee/`);
+  }
+
+  /** POST /api/teams/<id>/messagerie-unifiee/ — envoie un message sur Matrix ET sur
+   * MeshCore/Meshtastic pour les membres équipés (automatique, sans action manuelle). */
+  envoyerMessageUnifie(id: string, texte: string, urgent = false): Observable<{ messages: MatrixMessage[] }> {
+    return this.http.post<{ messages: MatrixMessage[] }>(`${this.url}/${id}/messagerie-unifiee/`, { texte, urgent });
+  }
+
   /** POST /api/teams/<id>/demarrer-engagement/ — pose engagement_debut=maintenant si pas déjà
    * engagée (idempotent). Réservé aux cadres, voir Team.engagement_debut. */
   demarrerEngagement(id: string): Observable<Team> {

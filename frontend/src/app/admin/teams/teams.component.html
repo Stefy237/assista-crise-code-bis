@@ -524,17 +524,6 @@
             <span class="section-hint">Du plus large au plus précis</span>
           </div>
 
-          @if (selectedTeam.commune_centre?.latitude != null) {
-            <div class="commune-minimap">
-              <app-minimap
-                [latitude]="selectedTeam.commune_centre!.latitude!"
-                [longitude]="selectedTeam.commune_centre!.longitude!"
-                [zoom]="11">
-              </app-minimap>
-              <p class="section-hint">Centrée sur la commune de l'institution — pas la zone d'intervention précise.</p>
-            </div>
-          }
-
           <div class="chip-list">
             @for (code of (selectedTeam.communes || []); track code) {
               <span class="chip">
@@ -573,8 +562,14 @@
             </app-tag-search-input>
           </div>
 
-          <p class="section-hint">Zone précise (dessinée), optionnelle — la plus fine des trois niveaux :</p>
-          <app-zone-map [initialZone]="selectedTeam.zone_precise_geojson ?? null" (zoneChange)="onZoneChange($event)"></app-zone-map>
+          <p class="section-hint">Communes en transparence ; dessinez la zone précise (optionnelle, la plus fine des trois niveaux) par-dessus :</p>
+          <app-zone-map
+            [center]="zoneMapCenter"
+            [zoom]="12"
+            [communesGeojson]="zoneMapCommunesGeojson"
+            [initialZone]="selectedTeam.zone_precise_geojson ?? null"
+            (zoneChange)="onZoneChange($event)">
+          </app-zone-map>
           <button class="btn-secondary sm" (click)="saveZonePrecise()">Enregistrer la zone précise</button>
         </div>
 
@@ -750,41 +745,28 @@
               </button>
             </div>
           }
-
-          <!-- Messages du canal + DM des intervenants juste ici, plutôt qu'en bas de fiche
-               (loin, après Historique) — demandé explicitement pour privilégier leur
-               visibilité au même endroit que le statut du canal. -->
-          <app-equipe-messagerie-mesh [equipeId]="selectedTeam.id!" [canalId]="selectedTeam.canal_meshcore_id">
-          </app-equipe-messagerie-mesh>
         </div>
 
-        <!-- ── SALON MATRIX (messagerie Element, positionnement permanent) ────── -->
+        <!-- ── MESSAGERIE D'ÉQUIPE (unifiée Matrix + MeshCore + Meshtastic, 2026-10-05) ──
+             Une seule fenêtre : l'envoi part toujours sur Matrix (par défaut, provisionné à
+             la volée si besoin — voir TeamViewSet.messagerie_unifiee) et en plus sur
+             MeshCore/Meshtastic pour les membres équipés, sans action manuelle. Les réponses,
+             quel que soit le canal d'où elles arrivent, apparaissent ici — le régulateur n'a
+             plus à choisir où lire/écrire. -->
         <div class="detail-section">
           <div class="section-header">
             <h3>
               <span class="material-icons">forum</span>
-              Salon Matrix (Element)
+              Messagerie d'équipe
             </h3>
           </div>
 
-          @if (!selectedTeam.salon_matrix_id) {
-            <p class="no-missions">Aucun salon Matrix — les membres n'ont pas de messagerie d'équipe ni de partage de position permanent pendant les interventions.</p>
-            <button class="btn-secondary sm" [disabled]="provisionnantSalonMatrix" (click)="provisionnerSalonMatrix()">
-              <span class="material-icons">add</span> Activer le salon Matrix
-            </button>
-          } @else if (!selectedTeam.salon_matrix_room_id) {
-            <div class="mission-active-bar">
-              <span class="mission-active-label">
-                <span class="material-icons">forum</span>
-                · <span class="canal-attente">en attente de création par le pont</span>
-              </span>
-            </div>
-          } @else {
-            <app-matrix-salon-chat
-              [cle]="selectedTeam.id!"
-              [chargerMessages]="chargerMessagesSalonEquipe"
-              [envoyerMessage]="envoyerMessageSalonEquipe"
-            ></app-matrix-salon-chat>
+          <app-matrix-salon-chat
+            [cle]="selectedTeam.id!"
+            [chargerMessages]="chargerMessagesSalonEquipe"
+            [envoyerMessage]="envoyerMessageSalonEquipe"
+          ></app-matrix-salon-chat>
+          @if (selectedTeam.salon_matrix_room_id) {
             <a class="lien-element-externe" [href]="lienSalonMatrix(selectedTeam.salon_matrix_room_id)" target="_blank" rel="noopener">
               <span class="material-icons">open_in_new</span> Ouvrir dans Element (fonctions avancées : chiffrement, pièces jointes...)
             </a>
@@ -823,8 +805,7 @@
             </div>
             <p class="page-hint">
               Le DM envoyé à chaque membre est chiffré par clé publique (PKI) dès qu'elle est
-              connue pour lui, sinon par la PSK du canal principal — voir la page
-              « Messages Meshtastic » pour la conversation.
+              connue pour lui, sinon par la PSK du canal principal.
             </p>
           }
         </div>

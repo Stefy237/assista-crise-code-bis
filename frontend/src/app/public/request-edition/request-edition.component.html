@@ -1,0 +1,124 @@
+<div class="edition-container">
+  @if (loading) {
+    <p class="loading">Chargement…</p>
+  } @else if (notFound) {
+    <p class="error-message">Ce lien n'est plus valide.</p>
+  } @else if (demande) {
+
+    <h1>{{ demande.title }}</h1>
+    <p class="subtitle">Bonjour {{ demande.first_name_request }}, voici votre demande.</p>
+
+    @if (saveSuccess) {
+      <p class="success-message">Votre demande a bien été mise à jour.</p>
+    }
+
+    @if (!editing) {
+      <div class="summary">
+        <dl>
+          @if (demande.description) {
+            <dt>Description</dt><dd>{{ demande.description }}</dd>
+          }
+          @if (estHebergement) {
+            <dt>Type de logement</dt><dd>{{ demande.type_logement ? (typeLogementLabels[demande.type_logement] || demande.type_logement) : '—' }}</dd>
+            <dt>Loyer</dt><dd>{{ demande.type_loyer ? (typeLoyerLabels[demande.type_loyer] || demande.type_loyer) : '—' }}</dd>
+            <dt>Pièces / Chambres</dt><dd>{{ demande.nombre_pieces ?? '—' }} / {{ demande.nombre_chambres ?? '—' }}</dd>
+            <dt>Capacité</dt><dd>{{ demande.capacite_adultes ?? '—' }} adultes, {{ demande.capacite_enfants ?? 0 }} enfants</dd>
+          }
+          @if (demande.nombre_places_assises) {
+            <dt>Places assises nécessaires</dt><dd>{{ demande.nombre_places_assises }}</dd>
+          }
+        </dl>
+        <button type="button" class="btn-secondary" (click)="startEditing()">
+          <span class="material-icons">edit</span> Modifier ma demande
+        </button>
+      </div>
+    } @else {
+      <form class="edit-form" (ngSubmit)="saveEdits()">
+        <div class="form-group">
+          <label>Description</label>
+          <textarea [(ngModel)]="editForm.description" name="description" rows="3"></textarea>
+        </div>
+
+        @if (estHebergement) {
+          <div class="form-group">
+            <label>Durée recherchée</label>
+            <input type="text" [(ngModel)]="editForm.hebergement_duree" name="hebergement_duree">
+          </div>
+
+          <div class="form-group">
+            <label>Type de logement</label>
+            <select [(ngModel)]="editForm.type_logement" name="type_logement">
+              <option [ngValue]="null">—</option>
+              @for (key of typeLogementLabels | keyvalue; track key.key) {
+                <option [value]="key.key">{{ key.value }}</option>
+              }
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Loyer</label>
+            <select [(ngModel)]="editForm.type_loyer" name="type_loyer">
+              <option [ngValue]="null">—</option>
+              @for (key of typeLoyerLabels | keyvalue; track key.key) {
+                <option [value]="key.key">{{ key.value }}</option>
+              }
+            </select>
+            @if (editForm.type_loyer && editForm.type_loyer !== 'GRATUIT') {
+              <div class="inline-row">
+                <input type="number" min="0" [(ngModel)]="editForm.loyer_montant_min" name="loyer_montant_min" placeholder="Montant min (€/mois)">
+                <input type="number" min="0" [(ngModel)]="editForm.loyer_montant_max" name="loyer_montant_max" placeholder="Montant max (€/mois)">
+              </div>
+            }
+          </div>
+
+          <div class="form-group inline-row">
+            <div>
+              <label>Pièces</label>
+              <input type="number" min="0" [(ngModel)]="editForm.nombre_pieces" name="nombre_pieces">
+            </div>
+            <div>
+              <label>Chambres</label>
+              <input type="number" min="0" [(ngModel)]="editForm.nombre_chambres" name="nombre_chambres">
+            </div>
+          </div>
+
+          <div class="form-group inline-row">
+            <div>
+              <label>Capacité adultes</label>
+              <input type="number" min="0" [(ngModel)]="editForm.capacite_adultes" name="capacite_adultes">
+            </div>
+            <div>
+              <label>Capacité enfants</label>
+              <input type="number" min="0" [(ngModel)]="editForm.capacite_enfants" name="capacite_enfants">
+            </div>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label"><input type="checkbox" [(ngModel)]="editForm.animaux_acceptes" name="animaux_acceptes"> Animaux acceptés</label>
+            <label class="checkbox-label"><input type="checkbox" [(ngModel)]="editForm.jardin" name="jardin"> Jardin</label>
+            <label class="checkbox-label"><input type="checkbox" [(ngModel)]="editForm.pmr_compatible" name="pmr_compatible"> Compatible PMR</label>
+          </div>
+
+          <div class="form-group">
+            <label>Rayon de recherche (km)</label>
+            <input type="number" min="0" [(ngModel)]="editForm.zone_recherche_rayon_km" name="zone_recherche_rayon_km">
+          </div>
+        }
+
+        <div class="form-group">
+          <label>Places assises nécessaires (transport)</label>
+          <input type="number" min="0" [(ngModel)]="editForm.nombre_places_assises" name="nombre_places_assises">
+        </div>
+
+        @if (saveError) {
+          <p class="error-message">{{ saveError }}</p>
+        }
+
+        <div class="form-actions">
+          <button type="submit" class="btn-primary" [disabled]="saving">Enregistrer</button>
+          <button type="button" class="btn-secondary" (click)="cancelEditing()">Annuler</button>
+        </div>
+      </form>
+    }
+  }
+</div>

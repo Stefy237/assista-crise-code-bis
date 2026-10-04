@@ -4,6 +4,9 @@ import type { Polygon } from "geojson";
  * backend parle à Synapse via le jeton du bot, jamais un jeton exposé au navigateur -- voir
  * core/matrix.py). Consommé par MatrixSalonChatComponent. */
 export interface MatrixMessage {
+  /** `event_id` pour un message Matrix (voir TeamViewSet.salon_matrix_messages) -- reste
+   * nommé ainsi pour compat, mais contient l'UUID du message pour les sources mesh (voir
+   * `source`, TeamViewSet.messagerie_unifiee). */
   event_id:        string;
   texte:           string;
   horodatage:      number;
@@ -13,8 +16,13 @@ export interface MatrixMessage {
   /** Ouvert à tout le monde, y compris un intervenant isolé (décision utilisateur du 26/09). */
   urgent:          boolean;
   /** Noms des cadres ayant posé l'accusé "Vu" (réaction Matrix filtrée côté backend, voir
-   * TeamViewSet.salon_matrix_messages) -- vide si personne, jamais rempli par un non-cadre. */
+   * TeamViewSet.salon_matrix_messages) -- vide si personne, jamais rempli par un non-cadre.
+   * Toujours vide pour les sources mesh (pas de concept de "Vu" côté MeshCore/Meshtastic). */
   vu_par:          string[];
+  /** Canal d'origine du message -- absent (undefined) pour un message Matrix "classique" via
+   * salon_matrix_messages ; toujours posé par messagerie_unifiee (fenêtre d'équipe fusionnée,
+   * 2026-10-05), y compris 'matrix', pour afficher un badge discret par message. */
+  source?:         'matrix' | 'meshcore' | 'meshtastic';
 }
 
 export interface TeamMission {

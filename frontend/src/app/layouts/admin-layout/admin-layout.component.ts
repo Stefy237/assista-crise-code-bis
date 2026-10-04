@@ -85,6 +85,10 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
 
     { icon: 'layers', label: 'Zones', route: '/admin/zones' },
 
+    // Outil de planification préventive pour les mairies (demande explicite du 29/09) --
+    // visibilité restreinte comme Zones, voir isNavItemVisible.
+    { icon: 'water_drop', label: 'Simulation inondation', route: '/admin/simulation-inondation' },
+
     // Dispositif pré-enregistré (PCS) : équipes/points/zones préparés à l'avance, activables
     // en un geste sur une crise réelle — voir PlanViewSet.activer.
     { icon: 'fact_check', label: 'Plans', route: '/admin/plans' },
@@ -306,7 +310,7 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
     }
     // Zones = découpage PCS/PICS, réservé aux mairies/EPCI (voir zonesGuard, qui protège
     // aussi l'accès direct par URL) — inutile de montrer une entrée qui mènerait à un refus.
-    if (item.label === 'Zones') return this.authService.isAutoriteLocaleCommunale();
+    if (item.label === 'Zones' || item.label === 'Simulation inondation') return this.authService.isAutoriteLocaleCommunale();
     return this.isInstitutionalEffective;
   }
 

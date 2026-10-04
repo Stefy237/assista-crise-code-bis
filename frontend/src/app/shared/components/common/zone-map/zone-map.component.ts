@@ -3,7 +3,9 @@ import { CommonModule } from '@angular/common';
 import maplibregl from 'maplibre-gl';
 import { TerraDraw, TerraDrawPolygonMode, TerraDrawSelectMode } from 'terra-draw';
 import { TerraDrawMapLibreGLAdapter } from 'terra-draw-maplibre-gl-adapter';
-import type { Polygon } from 'geojson';
+import type { FeatureCollection, MultiPolygon, Polygon } from 'geojson';
+
+const COMMUNES_SOURCE_ID = 'zone-map-communes';
 
 /**
  * Carte de dessin de zone (polygone), autonome et volontairement séparée du MapComponent
@@ -24,6 +26,10 @@ export class ZoneMapComponent implements AfterViewInit, OnChanges, OnDestroy {
   @Input() center: [number, number] = [2.2137, 46.2276]; // France, par défaut
   @Input() zoom = 11;
   @Input() initialZone: Polygon | null = null;
+  /** Contours des communes de la zone (calque de référence transparent, sous l'outil de
+   * dessin) -- voir MinimapComponent.syncZonePolygon pour le même procédé, repris ici pour
+   * fusionner les deux cartes autrefois séparées de la vue équipe (2026-10-05). */
+  @Input() communesGeojson: FeatureCollection<Polygon | MultiPolygon> | null = null;
 
   @Output() zoneChange = new EventEmitter<string | null>();
 
@@ -43,6 +49,9 @@ export class ZoneMapComponent implements AfterViewInit, OnChanges, OnDestroy {
     if (changes['center'] || changes['zoom']) {
       this.map.flyTo({ center: this.center, zoom: this.zoom });
     }
+    if (changes['communesGeojson']) {
+      this.syncCommunesLayer();
+    }
   }
 
   ngAfterViewInit(): void {
@@ -60,6 +69,10 @@ export class ZoneMapComponent implements AfterViewInit, OnChanges, OnDestroy {
     this.map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
     this.map.on('load', () => {
+      // Calque de référence AVANT TerraDraw : reste sous l'outil de dessin, ne capte jamais ses
+      // clics (voir docstring de l'input communesGeojson).
+      this.syncCommunesLayer();
+
       this.draw = new TerraDraw({
         adapter: new TerraDrawMapLibreGLAdapter({ map: this.map as any }),
         modes: [new TerraDrawPolygonMode(), new TerraDrawSelectMode()],
@@ -84,6 +97,33 @@ export class ZoneMapComponent implements AfterViewInit, OnChanges, OnDestroy {
       if (this.initialZone) {
         this.loadInitialZone(this.initialZone);
       }
+    });
+  }
+
+  /** Calque de référence transparent des contours communaux -- même patron que
+   * MinimapComponent.syncZonePolygon (fill + outline), couleur distincte du polygone dessiné
+   * par TerraDraw pour ne jamais confondre "contour de référence" et "zone précise en cours
+   * d'édition". Ne fait rien tant que la carte n'est pas chargée (rappelé depuis ngOnChanges
+   * avant ngAfterViewInit lors du tout premier changement d'input, cas ignoré ici comme pour
+   * center/zoom). */
+  private syncCommunesLayer(): void {
+    if (!this.map || !this.map.isStyleLoaded()) return;
+    const data: FeatureCollection = this.communesGeojson ?? { type: 'FeatureCollection', features: [] };
+
+    const source = this.map.getSource(COMMUNES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+    if (source) {
+      source.setData(data as any);
+      return;
+    }
+    if (!this.communesGeojson) return;
+    this.map.addSource(COMMUNES_SOURCE_ID, { type: 'geojson', data: data as any });
+    this.map.addLayer({
+      id: `${COMMUNES_SOURCE_ID}-fill`, type: 'fill', source: COMMUNES_SOURCE_ID,
+      paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.15 },
+    });
+    this.map.addLayer({
+      id: `${COMMUNES_SOURCE_ID}-outline`, type: 'line', source: COMMUNES_SOURCE_ID,
+      paint: { 'line-color': '#2563eb', 'line-width': 1.5 },
     });
   }
 

@@ -4,6 +4,7 @@ import { FormsModule, ReactiveFormsModule, FormBuilder, FormGroup, Validators } 
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { forkJoin, of, map } from 'rxjs';
 import { catchError } from 'rxjs/operators';
+import type { Feature, FeatureCollection, MultiPolygon, Polygon } from 'geojson';
 
 import { TeamService }       from '../../services/team.service';
 import { UserService }       from '../../services/user.service';
@@ -27,7 +28,6 @@ import { ZoneMapComponent } from '../../shared/components/common/zone-map/zone-m
 import { MinimapComponent } from '../../shared/components/common/minimap/minimap.component';
 import { TagSearchInputComponent } from '../../shared/components/common/tag-search-input/tag-search-input.component';
 import { PointModalComponent } from '../crises/point-modal/point-modal.component';
-import { EquipeMessagerieMeshComponent } from './equipe-messagerie-mesh/equipe-messagerie-mesh.component';
 import { MatrixSalonChatComponent } from './matrix-salon-chat/matrix-salon-chat.component';
 import { environment } from '../../../environments/environment';
 
@@ -52,7 +52,7 @@ const COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#06b6d4','#3b82f6','#8b
 @Component({
   selector: 'app-teams',
   standalone: true,
-  imports: [CommonModule, FormsModule, ReactiveFormsModule, RouterLink, ZoneMapComponent, MinimapComponent, TagSearchInputComponent, PointModalComponent, EquipeMessagerieMeshComponent, MatrixSalonChatComponent],
+  imports: [CommonModule, FormsModule, ReactiveFormsModule, RouterLink, ZoneMapComponent, MinimapComponent, TagSearchInputComponent, PointModalComponent, MatrixSalonChatComponent],
   templateUrl: './teams.component.html',
   styleUrls: ['./teams.component.scss'],
 })
@@ -283,6 +283,10 @@ export class TeamsComponent implements OnInit {
     this.communeNoms = {};
     this.departementNoms = {};
     this.loadZoneCodeLabels(team);
+    this.syncZoneMapCommunes(team);
+    if (team.commune_centre?.latitude != null && team.commune_centre?.longitude != null) {
+      this.zoneMapCenter = [team.commune_centre.longitude, team.commune_centre.latitude];
+    }
     this.pendingZoneWkt = team.zone_precise ?? null;
     this.modal = 'detail';
     this.showInviteForm = false;
@@ -421,6 +425,14 @@ export class TeamsComponent implements OnInit {
   communePostaux: Record<string, string> = {};
   departementNoms: Record<string, string> = {};
   pendingZoneWkt: string | null = null;
+  /** Calque de référence (contours réels) des communes de la zone, pour la carte unique de la
+   * section "Zone d'intervention" (fusion des deux cartes, 2026-10-05) -- voir
+   * ZoneMapComponent.communesGeojson. */
+  zoneMapCommunesGeojson: FeatureCollection<Polygon | MultiPolygon> | null = null;
+  /** Centre initial de la carte -- recalé sur la commune de l'équipe à l'ouverture du détail
+   * (corrige un bug constaté le 2026-10-05 : la carte restait sur son centre par défaut, au
+   * milieu de la France, quelle que soit l'équipe). */
+  zoneMapCenter: [number, number] = [2.2137, 46.2276];
   communeSearchFn = (q: string) => this.locationService.searchCommunesByName(q);
   departementSearchFn = (q: string) => {
     const query = q.trim().toLowerCase();
@@ -444,6 +456,24 @@ export class TeamsComponent implements OnInit {
     });
   }
 
+  /** Recharge le calque de contours communaux de la carte unique de zone -- appelé à l'ouverture
+   * du détail et après chaque ajout/retrait de commune (voir docstring de
+   * `zoneMapCommunesGeojson`). Construit la collection au fur et à mesure que chaque contour
+   * arrive plutôt que d'attendre un forkJoin : une commune qui échoue (API indisponible) ne doit
+   * jamais empêcher l'affichage des autres. */
+  private syncZoneMapCommunes(team: Team): void {
+    const codes = team.communes ?? [];
+    const features: Feature<Polygon | MultiPolygon>[] = [];
+    this.zoneMapCommunesGeojson = codes.length ? { type: 'FeatureCollection', features: [] } : null;
+    codes.forEach(code => {
+      this.locationService.getCommuneContour(code).subscribe(c => {
+        if (!c.contour) return;
+        features.push({ type: 'Feature', properties: {}, geometry: c.contour });
+        this.zoneMapCommunesGeojson = { type: 'FeatureCollection', features: [...features] };
+      });
+    });
+  }
+
   addZoneCommune(commune: Commune): void {
     const team = this.selectedTeam;
     if (!team?.id || (team.communes ?? []).includes(commune.code)) return;
@@ -451,6 +481,7 @@ export class TeamsComponent implements OnInit {
     if (commune.codePostal) this.communePostaux[commune.code] = commune.codePostal;
     this.teamService.patch(team.id, { communes: [...(team.communes ?? []), commune.code] }).subscribe(updated => {
       this.selectedTeam = { ...updated, missions: this.selectedTeam!.missions };
+      this.syncZoneMapCommunes(this.selectedTeam);
       this.reloadTeams();
     });
   }
@@ -460,6 +491,7 @@ export class TeamsComponent implements OnInit {
     if (!team?.id) return;
     this.teamService.patch(team.id, { communes: (team.communes ?? []).filter(c => c !== code) }).subscribe(updated => {
       this.selectedTeam = { ...updated, missions: this.selectedTeam!.missions };
+      this.syncZoneMapCommunes(this.selectedTeam);
       this.reloadTeams();
     });
   }
@@ -1134,8 +1166,10 @@ export class TeamsComponent implements OnInit {
   // Propriétés fléchées (auto-liées) plutôt que des méthodes classiques : passées telles
   // quelles en [Input] à MatrixSalonChatComponent (voir sa docstring, générique Team/
   // Institution), qui les appelle sans connaître `this`.
-  chargerMessagesSalonEquipe = () => this.teamService.getSalonMatrixMessages(this.selectedTeam!.id!);
-  envoyerMessageSalonEquipe = (texte: string, urgent: boolean = false) => this.teamService.envoyerMessageSalonMatrix(this.selectedTeam!.id!, texte, urgent);
+  // Messagerie d'équipe unifiée (Matrix + MeshCore + Meshtastic fusionnés, 2026-10-05) --
+  // voir TeamViewSet.messagerie_unifiee. Remplace les anciens appels Matrix-seul.
+  chargerMessagesSalonEquipe = () => this.teamService.getMessagerieUnifiee(this.selectedTeam!.id!);
+  envoyerMessageSalonEquipe = (texte: string, urgent: boolean = false) => this.teamService.envoyerMessageUnifie(this.selectedTeam!.id!, texte, urgent);
 
   /** Crises ouvertes proposables pour la mission — une mission ne doit pas pouvoir se rattacher
    * à une crise déjà clôturée (voir validate_crisis_open côté backend). */

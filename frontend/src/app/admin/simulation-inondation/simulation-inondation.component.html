@@ -1,0 +1,170 @@
+<div class="simulation-page">
+  <div class="entete">
+    <h1>Simulation d'inondation</h1>
+    <p class="disclaimer">
+      ⚠️ Outil de planification préventive <strong>grossier</strong>, destiné aux collectivités,
+      fourni <strong>à titre indicatif seulement</strong> — pas une prévision hydraulique
+      précise. La zone de crue simulée part de l'hypothèse que l'eau entre par les bordures de
+      la commune (un risque isolé au centre, sans lien avec sa bordure, n'est pas représenté) ;
+      la couche "Ruissellement" suppose une pluie uniforme sur toute la commune, pas un épisode
+      orageux réel précis. Cette simulation ne doit en aucun cas être utilisée en situation
+      d'urgence réelle pour la protection des personnes et des biens, ni comme seule base d'une
+      décision d'évacuation.
+    </p>
+  </div>
+
+  <div class="selecteur-commune">
+    <app-tag-search-input
+      placeholder="Choisir une commune (nom, code postal ou code INSEE)…"
+      labelField="name"
+      subLabelField="codePostal"
+      [searchFn]="communeSearchFn"
+      emptyMessage="Aucune commune ne correspond."
+      (itemSelected)="choisirCommune($event)">
+    </app-tag-search-input>
+  </div>
+
+  @if (communeSelectionnee) {
+    <div class="bascule-mode">
+      <label class="case-couche">
+        <input type="checkbox" [ngModel]="coucheRiviereActive" (ngModelChange)="basculerCoucheRiviere()">
+        Crue de rivière
+      </label>
+      <label class="case-couche">
+        <input type="checkbox" [ngModel]="coucheRuissellementActive" (ngModelChange)="basculerCoucheRuissellement()">
+        Ruissellement (orage)
+      </label>
+    </div>
+  }
+
+  @if (enCours) {
+    <p class="hint">
+      Calcul du relief et du niveau d'eau en cours pour « {{ communeSelectionnee?.name }} » —
+      quelques secondes à quelques minutes, toujours borné quelle que soit la taille de la
+      commune. Le calcul continue en arrière-plan sur le serveur : il est possible de changer
+      de page et d'y revenir plus tard, la resélection de cette commune reprendra où le calcul
+      en était.
+    </p>
+  }
+
+  @if (erreur) {
+    <p class="erreur">{{ erreur }}</p>
+  }
+
+  <div #mapContainer class="carte-container"></div>
+
+  @if (coucheRuissellementActive) {
+    @if (ruissellementEnCours) {
+      <p class="hint">
+        Calcul de l'accumulation de ruissellement en cours pour « {{ communeSelectionnee?.name }} »
+        — toujours borné, quelques secondes à quelques minutes.
+      </p>
+    }
+    @if (ruissellementErreur) {
+      <p class="erreur">{{ ruissellementErreur }}</p>
+    }
+    @if (ruissellement?.statut === 'TERMINEE') {
+      <div class="legende-ruissellement">
+        <span>Accumulation relative (axes d'écoulement) :</span>
+        <span class="puce" style="background:#fef9c3">faible</span>
+        <span class="puce" style="background:#fde047"></span>
+        <span class="puce" style="background:#fb923c"></span>
+        <span class="puce" style="background:#dc2626"></span>
+        <span class="puce" style="background:#7f1d1d">forte</span>
+      </div>
+    }
+  }
+
+  @if (coucheRiviereActive && simulation?.statut === 'TERMINEE') {
+    <div class="curseur-niveau">
+      <label>
+        Niveau d'eau simulé : <strong>{{ niveauCourant }} m</strong>
+        @if (adresses?.statut === 'TERMINEE') {
+          ({{ nbAdressesTouchees }} adresse{{ nbAdressesTouchees > 1 ? 's' : '' }} touchée{{ nbAdressesTouchees > 1 ? 's' : '' }})
+        }
+      </label>
+      <input
+        type="range"
+        [min]="0"
+        [max]="niveauMax"
+        [step]="pasNiveau"
+        [(ngModel)]="niveauCourant"
+        (ngModelChange)="onNiveauChange()">
+      @if (niveauObserve?.disponible) {
+        @if (niveauObserve?.niveau_ngf !== undefined) {
+          <p class="hint-petit">
+            Niveau actuellement observé (station {{ niveauObserve?.station }}, {{ niveauObserve?.cours_eau }}) :
+            <strong>{{ niveauObserve?.niveau_ngf }} m NGF</strong> — même référentiel que ce curseur
+            (source : Hub'Eau), simple repère temps réel, pas une prévision.
+          </p>
+        }
+        @if (niveauObserve?.vigilance; as vigilance) {
+          <p class="hint-petit">
+            Vigilance crues officielle ({{ vigilance.troncon }}) :
+            <span class="badge-vigilance" [style.background]="vigilance.couleur">{{ vigilance.libelle }}</span>
+            (source : Vigicrues).
+          </p>
+        }
+      }
+    </div>
+
+    <div class="section-adresses">
+      @if (!adresses) {
+        <p class="hint">
+          Les adresses ne sont pas chargées automatiquement — une grande ville peut en compter
+          des dizaines de milliers, ce qui prend du temps ou peut échouer sans affecter la
+          simulation du niveau d'eau ci-dessus.
+        </p>
+        <button type="button" class="btn-secondary" [disabled]="adressesEnCours" (click)="chargerAdresses()">
+          Charger les adresses de la commune
+        </button>
+      }
+
+      @if (adressesEnCours) {
+        <p class="hint">
+          Chargement des adresses en cours pour « {{ communeSelectionnee?.name }} » — peut
+          prendre plusieurs minutes sur une grande ville. Il est possible de changer de page et
+          d'y revenir plus tard.
+        </p>
+      }
+
+      @if (adressesErreur) {
+        <p class="erreur">{{ adressesErreur }}</p>
+      }
+
+      @if (adresses?.statut === 'TERMINEE') {
+        <div class="liste-adresses">
+          <div class="liste-entete">
+            <h2>Adresses de la commune ({{ adresses?.adresses?.length ?? 0 }})</h2>
+            <button type="button" class="btn-secondary" (click)="exporterCsv()">Exporter en CSV</button>
+          </div>
+
+          <table class="table-dense">
+            <thead>
+              <tr>
+                <th class="sortable" (click)="trierPar('adresse')">Adresse</th>
+                <th class="sortable" (click)="trierPar('altitude')">Altitude</th>
+                <th class="sortable" (click)="trierPar('profondeur')">Profondeur simulée</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (adresse of adressesTriees; track adresse.adresse) {
+                <tr [class.touchee]="profondeurActuelle(adresse) !== null">
+                  <td>{{ adresse.adresse }}</td>
+                  <td>{{ adresse.altitude !== null ? (adresse.altitude + ' m') : '—' }}</td>
+                  <td>
+                    @if (profondeurActuelle(adresse) !== null) {
+                      <span class="badge-touchee">{{ profondeurActuelle(adresse) }} m</span>
+                    } @else {
+                      <span class="hint-petit">non touchée</span>
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+    </div>
+  }
+</div>
