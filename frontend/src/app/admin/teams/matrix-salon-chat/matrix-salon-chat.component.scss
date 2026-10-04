@@ -64,10 +64,14 @@
 
 .saisie {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: .5rem;
 
-  input[type="text"] { flex: 1; padding: .5rem .7rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: .85rem; }
+  // `min-width: 0` -- sans ça, un input garde sa largeur intrinsèque malgré flex:1 et pousse
+  // le bouton "Envoyer" hors de l'écran sur mobile (constaté le 2026-10-04, bouton visible
+  // uniquement coupé au bord de l'écran) plutôt que de passer à la ligne.
+  input[type="text"] { flex: 1 1 auto; min-width: 0; padding: .5rem .7rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: .85rem; }
 
   .case-urgent {
     display: inline-flex;
@@ -79,6 +83,7 @@
   }
 
   button {
+    flex-shrink: 0;
     padding: .5rem 1rem;
     border-radius: 6px;
     border: 1px solid #7c3aed;

@@ -67,7 +67,13 @@ def assurer_membre_salon(user, room_id, displayname=None) -> None:
     """Garantit que `user` a un compte Matrix provisionné et a rejoint `room_id` -- nécessaire
     pour qu'un régulateur qui gère l'équipe sans en être membre (matrix-bridge ne synchronise
     que les membres de l'équipe, voir boucle_positions/provisionner_salons dans bridge.py)
-    apparaisse comme membre du salon, même si ses messages transitent par le bot. Idempotent."""
+    apparaisse comme membre du salon, même si ses messages transitent par le bot. Idempotent --
+    y compris quand l'utilisateur a DÉJÀ rejoint le salon par un autre biais (ex: Element X en
+    direct) : contrairement à son nom, `/_synapse/admin/v1/join/` répond 403 M_FORBIDDEN "already
+    in the room" plutôt que de réussir silencieusement dans ce cas (constaté le 2026-10-04 sur
+    la Cellule de crise, dont l'équipe n'a formellement aucun membre Django -- est_membre est
+    donc toujours faux, ce qui déclenchait cet appel à CHAQUE accès, bloquant durablement la
+    page pour quiconque avait déjà rejoint une fois)."""
     mid = matrix_user_id(user)
     headers = _bot_headers()
     requests.put(
@@ -75,11 +81,14 @@ def assurer_membre_salon(user, room_id, displayname=None) -> None:
         headers=headers, json={"displayname": displayname or str(user)},
         timeout=10,
     ).raise_for_status()
-    requests.post(
+    reponse = requests.post(
         f"{SYNAPSE_URL}/_synapse/admin/v1/join/{room_id}",
         headers=headers, json={"user_id": mid},
         timeout=10,
-    ).raise_for_status()
+    )
+    if reponse.status_code == 403 and "already in the room" in reponse.text:
+        return
+    reponse.raise_for_status()
 
 
 def lister_messages_salon(room_id, limite=30) -> list:
