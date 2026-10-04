@@ -119,6 +119,44 @@ Autres limites connues :
   pas de sélection de passerelle par proximité géographique (voir discussion architecture plus
   large, hors scope de ce pont).
 
+## `proxy.py` — partager un nœud WiFi entre plusieurs clients (téléphone, Home Assistant, assista-crise)
+
+Contrairement à un companion MeshCore série (exclusif à une seule connexion), un vrai nœud
+Meshtastic WiFi accepte déjà nativement plusieurs connexions TCP simultanées sur son API (port
+`4403` par défaut) — `proxy.py` n'est donc pas nécessaire pour "débloquer" un partage autrement
+impossible. Il sert à donner à tous les clients une seule adresse stable à connaître (celle du
+proxy, pas celle du nœud) et à amortir une coupure réseau sans que chaque client gère sa propre
+reconnexion — même image Docker que `bridge.py`
+(`assista-crise-code-bis-meshtastic-bridge:latest`), `Cmd` différent, en miroir exact de
+`meshcore-bridge/proxy.py`/`ac_meshcore_proxy`.
+
+Le point délicat, propre au protocole Meshtastic (voir la docstring de `proxy.py` pour le
+détail) : la rafale de configuration initiale (`ToRadio.want_config_id` /
+`FromRadio.config_complete_id`) doit être livrée UNIQUEMENT au client qui l'a demandée, pas
+diffusée à tous — sans quoi chaque client recevrait le nodedb complet à chaque connexion d'un
+autre. Le proxy s'en charge en interceptant ces trames, le reste du trafic est diffusé à tous les
+clients connectés, exactement comme le ferait le firmware lui-même en multi-client.
+
+⚠️ **Non testé contre un vrai nœud WiFi à ce jour** — écrit à partir du protocole documenté dans
+le code source de la lib `meshtastic` déjà vendue dans ce projet (voir plus haut, mode TCP validé
+le 13/09), mais aucun nœud WiFi Meshtastic n'est configuré dans cet environnement pour vérifier
+bout en bout la logique de rafale de configuration. À valider avec un vrai appareil avant un
+usage en cellule de crise réelle.
+
+```bash
+docker build -t assista-crise-code-bis-meshtastic-bridge:latest -f meshtastic-bridge/Dockerfile meshtastic-bridge/
+
+docker run -d --name ac_meshtastic_proxy \
+  -e MESHTASTIC_TCP_HOST=<IP du nœud réel> -e MESHTASTIC_TCP_PORT=4403 \
+  -e PROXY_LISTEN_PORT=4403 -e LOG_LEVEL=DEBUG \
+  --restart unless-stopped \
+  assista-crise-code-bis-meshtastic-bridge:latest python -u proxy.py
+```
+
+Puis reconfigurer CHAQUE client (app officielle, intégration Home Assistant, le `CompagnonMeshtastic`
+d'assista-crise en mode TCP — `tcp_host`/`tcp_port` pointant sur l'IP/port de CE proxy, pas sur le
+nœud réel directement) — sinon rien n'est mutualisé.
+
 ## Préparer un companion de test
 
 1. Créer une ligne `CompagnonMeshtastic` via l'API (`POST /api/compagnons-meshtastic/`) ou la
