@@ -157,11 +157,7 @@ def attach_user_with_role(user, institution, role_code, request=None, fonction='
     if not role:
         raise ValueError(f"Rôle inconnu : {role_code}")
 
-    contact, contact_created = ContactInstitution.objects.get_or_create(
-        institution=institution,
-        utilisateur=user,
-        defaults={'fonction': fonction, 'contact_principal': contact_principal, 'actif': True},
-    )
+    contact, contact_created = _get_or_create_contact_institution(institution, user, fonction, contact_principal)
     if contact_created and request is not None:
         audit_log(
             request=request,
@@ -279,9 +275,8 @@ def attach_secours_user_to_institution(user, request=None):
         # assign_default_institution_role pose l'affectation opérationnelle (RESPONSABLE en
         # premier), mais ne crée jamais de ContactInstitution — à faire nous-même, comme
         # find_or_create_institution_from_annuaire le fait pour le rattachement mairie.
-        contact, contact_created = ContactInstitution.objects.get_or_create(
-            institution=matched_institution, utilisateur=user,
-            defaults={'fonction': 'Créateur', 'contact_principal': institution_created, 'actif': True},
+        contact, contact_created = _get_or_create_contact_institution(
+            matched_institution, user, 'Créateur', institution_created,
         )
         if contact_created and request is not None:
             audit_log(
@@ -300,10 +295,7 @@ def attach_secours_user_to_institution(user, request=None):
                 type__code__iexact='mairie', commune_code=user.pending_commune_code, actif=True,
             ).first()
         if matched_institution:
-            contact, contact_created = ContactInstitution.objects.get_or_create(
-                institution=matched_institution, utilisateur=user,
-                defaults={'fonction': 'Réserviste RCSC', 'actif': True},
-            )
+            contact, contact_created = _get_or_create_contact_institution(matched_institution, user, 'Réserviste RCSC')
             if contact_created and request is not None:
                 audit_log(
                     request=request,
@@ -316,6 +308,25 @@ def attach_secours_user_to_institution(user, request=None):
 
     _clear_pending_institution_fields(user)
     return matched_institution
+
+
+def _get_or_create_contact_institution(institution, utilisateur, fonction, contact_principal=False):
+    """Équivalent de `ContactInstitution.objects.get_or_create(institution=, utilisateur=,
+    defaults={...})`, mais tolérant aux doublons déjà en base (constaté le 2026-10-02 sur
+    l'institution "Mairie de Tests." : un même utilisateur peut déjà avoir plusieurs
+    ContactInstitution actifs pour la même institution -- pas de contrainte d'unicité sur
+    (institution, utilisateur) dans le modèle, voir ContactInstitution). `get_or_create` plante
+    avec MultipleObjectsReturned dès qu'un doublon préexiste ; on prend le premier trouvé plutôt
+    que de faire échouer toute la déclaration d'implication pour un problème de données
+    sans rapport avec la demande de l'utilisateur. `fonction`/`contact_principal` ne s'appliquent
+    qu'à la création -- un contact déjà existant n'est jamais modifié ici."""
+    contact = ContactInstitution.objects.filter(institution=institution, utilisateur=utilisateur).first()
+    if contact is not None:
+        return contact, False
+    return ContactInstitution.objects.create(
+        institution=institution, utilisateur=utilisateur, fonction=fonction,
+        contact_principal=contact_principal, actif=True,
+    ), True
 
 
 def resolve_or_invite_responsable(responsable_id, responsable_email, institution, request=None):
@@ -340,10 +351,7 @@ def resolve_or_invite_responsable(responsable_id, responsable_email, institution
         if user.type == UserRole.SIMPLE_USER:
             user.type = UserRole.REGULATEUR
             user.save(update_fields=['type'])
-        contact, contact_created = ContactInstitution.objects.get_or_create(
-            institution=institution, utilisateur=user,
-            defaults={'fonction': 'Régulateur de crise', 'actif': True},
-        )
+        contact, contact_created = _get_or_create_contact_institution(institution, user, 'Régulateur de crise')
         if contact_created and request is not None:
             audit_log(
                 request=request,
@@ -364,10 +372,7 @@ def resolve_or_invite_responsable(responsable_id, responsable_email, institution
         if existing.type == UserRole.SIMPLE_USER:
             existing.type = UserRole.REGULATEUR
             existing.save(update_fields=['type'])
-        contact, contact_created = ContactInstitution.objects.get_or_create(
-            institution=institution, utilisateur=existing,
-            defaults={'fonction': 'Régulateur de crise', 'actif': True},
-        )
+        contact, contact_created = _get_or_create_contact_institution(institution, existing, 'Régulateur de crise')
         if contact_created and request is not None:
             audit_log(
                 request=request,
