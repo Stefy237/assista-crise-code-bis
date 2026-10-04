@@ -277,10 +277,18 @@ async def boucle_provisionnement_salons(django, synapse):
                     if matrix_id not in actuels:
                         await synapse.rejoindre_de_force(room_id, matrix_id)
                         logger.info("Membre %s ajouté au salon de « %s ».", matrix_id, salon["equipe_nom"])
-                for matrix_id in actuels:
-                    if matrix_id != synapse.user_id and matrix_id not in cibles:
-                        await synapse.expulser(room_id, matrix_id)
-                        logger.info("Membre %s retiré du salon de « %s ».", matrix_id, salon["equipe_nom"])
+                # `expulsion_activee=False` (équipe "cellule de crise", voir
+                # SalonMatrixEquipeSerializer.get_expulsion_activee côté Django) : n'importe qui
+                # peut y entrer via assurer_membre_salon au premier accès (matrix.py), jamais
+                # expulsé au cycle suivant faute d'être un membre formel de l'équipe -- constaté
+                # en direct le 2026-09-28 (rejoint puis aussitôt exclu "Ne fait plus partie de
+                # l'équipe"), corrigé ici plutôt que de rendre ce salon un cas particulier
+                # ailleurs dans le pont.
+                if salon.get("expulsion_activee", True):
+                    for matrix_id in actuels:
+                        if matrix_id != synapse.user_id and matrix_id not in cibles:
+                            await synapse.expulser(room_id, matrix_id)
+                            logger.info("Membre %s retiré du salon de « %s ».", matrix_id, salon["equipe_nom"])
         except Exception:
             logger.exception("Échec du cycle de provisionnement des salons.")
         await asyncio.sleep(SALONS_POLL_INTERVAL_SECONDS)
