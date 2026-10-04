@@ -31,7 +31,7 @@ SECRET_KEY = os.environ.get(
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
-    'localhost', '172.16.1.113', '172.16.1.114', '127.0.0.1',
+    'localhost', '172.16.1.114', '127.0.0.1',
     'assista-crise.fr', 'www.assista-crise.fr', 'demo.assista-crise.fr', 'assista-crise.duckdns.org',
     # Nom réseau Docker interne : nécessaire pour qu'un service du même réseau (ex: le
     # service-pont meshcore-bridge/) puisse appeler l'API via http://backend:8000/ plutôt
@@ -47,10 +47,10 @@ CSRF_TRUSTED_ORIGINS = [
     "https://demo.assista-crise.fr:4200",
     "https://assista-crise.duckdns.org",
 
-    "http://172.16.1.113",
-    "https://172.16.1.113",
-    "http://172.16.1.113:4200",
-    "http://172.16.1.113:8085",  # SSO Matrix (login/authorize en clair, voir proxy/nginx.conf)
+    "http://172.16.1.114",
+    "https://172.16.1.114",
+    "http://172.16.1.114:4200",
+    "http://172.16.1.114:8085",  # SSO Matrix (login/authorize en clair, voir proxy/nginx.conf)
 
     "http://localhost",
     "http://localhost:4200",
@@ -184,13 +184,13 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 CORS_ALLOWED_ORIGINS = [
-    "http://172.16.1.113:4200",
+    "http://172.16.1.114:4200",
     "http://assista-crise.duckdns.org",
     "http://demo.assista-crise.fr",
     "http://localhost:4200",
     "http://127.0.0.1:4200",
     "http://frontend:4200",  # Pour Docker
-    "https://172.16.1.113:4200",
+    "https://172.16.1.114:4200",
     "https://assista-crise.duckdns.org",
     "https://assista-crise.fr",
     "https://demo.assista-crise.fr",
@@ -288,7 +288,7 @@ OAUTH2_PROVIDER = {
     # qui a atteint /o/token/, et Synapse (discover: false) appelle ce endpoint en interne via
     # "backend:8000" (réseau docker), jamais via l'URL publique -- le claim "iss" de l'id_token
     # ne correspondrait alors jamais à l'`issuer` configuré côté Synapse (rejeté).
-    "OIDC_ISS_ENDPOINT": os.environ.get("OIDC_ISS_ENDPOINT", "https://172.16.1.113/o"),
+    "OIDC_ISS_ENDPOINT": os.environ.get("OIDC_ISS_ENDPOINT", "https://www.assista-crise.fr/o"),
     "SCOPES": {
         "openid": "Identification (OpenID Connect)",
         "profile": "Nom affiché",
@@ -380,4 +380,16 @@ if not DEBUG:
     cookies_secure = os.environ.get('COOKIES_SECURE_OVERRIDE', 'True') == 'True'
     SESSION_COOKIE_SECURE = cookies_secure
     CSRF_COOKIE_SECURE = cookies_secure
+
+
+# Celery -- pour l'instant uniquement la simulation d'inondation (voir core/tasks.py), dont le
+# calcul (scan BAN + tests géométriques) peut dépasser largement le timeout gunicorn sur une
+# grande commune. Concurrence du worker volontairement limitée (voir la commande de lancement du
+# conteneur, pas ici) pour qu'une rafale de mairies cliquant en même temps ne bouffe pas toutes
+# les ressources de la VM -- les demandes en trop patientent simplement dans la file Redis.
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
+CELERY_TASK_TIME_LIMIT = 600  # 10 min, garde-fou dur pour une très grande commune pathologique
+CELERY_TASK_SOFT_TIME_LIMIT = 540
+CELERY_TASK_ACKS_LATE = True  # un worker tué en plein calcul (redéploiement) relance la tâche
 

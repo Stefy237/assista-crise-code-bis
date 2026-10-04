@@ -527,11 +527,11 @@ class RequestSerializer(serializers.ModelSerializer):
         fields = '__all__'
         # actif : jamais modifiable via un PATCH générique, uniquement via destroy/reactiver
         # (qui journalisent l'action, voir RequestViewSet.perform_destroy/reactiver).
-        # deletion_token : jamais exposé en lecture, sinon n'importe quel visiteur du détail
-        # public de la demande pourrait la supprimer lui-même via ce jeton.
+        # deletion_token/edition_token : jamais exposés en lecture, sinon n'importe quel
+        # visiteur du détail public de la demande pourrait la désactiver/modifier lui-même.
         extra_kwargs = {
             'photo': {'write_only': True}, 'actif': {'read_only': True},
-            'deletion_token': {'write_only': True},
+            'deletion_token': {'write_only': True}, 'edition_token': {'write_only': True},
         }
 
     def _location_visible(self, obj) -> bool:
@@ -615,6 +615,26 @@ class RequestSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         validated_data = strip_masked_fields_in_demo(request, validated_data, ('email_request', 'phone_request'))
         return super().update(instance, validated_data)
+
+
+class RequestPublicEditSerializer(serializers.ModelSerializer):
+    """Modification d'une demande par son auteur, via le lien reçu par email
+    (Request.edition_token, voir RequestEditionPublicView) — SANS compte, SANS authentification.
+    Allow-list volontairement restreinte au contenu du post (compléter une information,
+    changer une disponibilité…) : jamais `status` (état de TRAITEMENT interne, pas une
+    disponibilité comme pour Offer), jamais `request_type` (changer de catégorie casserait le
+    rattachement déjà fait à une compétence/Dossier/équipe), jamais les champs d'identité
+    (même choix déjà fait côté Offer, absent de son formulaire d'édition public)."""
+
+    class Meta:
+        model = Request
+        fields = [
+            'description', 'hebergement_duree', 'type_loyer', 'loyer_montant_min',
+            'loyer_montant_max', 'type_logement', 'niveau_logement', 'acces_etage',
+            'nombre_pieces', 'nombre_chambres', 'capacite_adultes', 'capacite_enfants',
+            'animaux_acceptes', 'jardin', 'pmr_compatible', 'zone_recherche_rayon_km',
+            'nombre_places_assises',
+        ]
 
 
 class RequestPhotoSerializer(serializers.ModelSerializer):
@@ -766,6 +786,24 @@ class OfferSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         validated_data = strip_masked_fields_in_demo(request, validated_data, ('email_offer', 'phone_offer'))
         return super().update(instance, validated_data)
+
+
+class OfferPublicEditSerializer(serializers.ModelSerializer):
+    """Modification d'une offre par son auteur, via le lien reçu par email (Offer.reponse_token,
+    voir OfferReponsePublicView) — SANS compte, SANS authentification. Allow-list reprenant
+    exactement les champs déjà exposés par le formulaire d'édition public existant
+    (offer-reponse.component.ts) : resserre ce que l'API accepte en écriture pour correspondre à
+    ce que le frontend envoie réellement, plutôt que le OfferSerializer complet (fields='__all__',
+    utilisé jusqu'ici) qui laissait techniquement n'importe quel champ (crisis, status
+    administratif des AUTRES usages de ce champ, etc.) modifiable par qui tient ce jeton."""
+
+    class Meta:
+        model = Offer
+        fields = [
+            'description', 'type_logement', 'type_loyer', 'loyer_montant_min',
+            'loyer_montant_max', 'nombre_pieces', 'nombre_chambres', 'capacite_adultes',
+            'capacite_enfants', 'animaux_acceptes', 'jardin', 'pmr_compatible', 'status',
+        ]
 
 
 class OfferNationalPartialSerializer(serializers.ModelSerializer):
@@ -1052,11 +1090,11 @@ class InformationSerializer(serializers.ModelSerializer):
         fields = '__all__'
         # actif : jamais modifiable via un PATCH générique, uniquement via destroy/reactiver
         # (qui journalisent l'action, voir InformationViewSet.perform_destroy/reactiver).
-        # deletion_token : jamais exposé en lecture, sinon n'importe quel visiteur du détail
-        # public du signalement pourrait le supprimer lui-même via ce jeton.
+        # deletion_token/edition_token : jamais exposés en lecture, sinon n'importe quel
+        # visiteur du détail public du signalement pourrait le désactiver/modifier lui-même.
         extra_kwargs = {
             'photo': {'write_only': True}, 'actif': {'read_only': True},
-            'deletion_token': {'write_only': True},
+            'deletion_token': {'write_only': True}, 'edition_token': {'write_only': True},
         }
 
     def _location_visible(self, obj) -> bool:
@@ -1133,6 +1171,20 @@ class InformationSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         validated_data = strip_masked_fields_in_demo(request, validated_data, ('email_information', 'phone_information'))
         return super().update(instance, validated_data)
+
+
+class InformationPublicEditSerializer(serializers.ModelSerializer):
+    """Modification d'un signalement par son auteur, via le lien reçu par email
+    (Information.edition_token, voir InformationEditionPublicView) — SANS compte, SANS
+    authentification. Allow-list volontairement réduite au seul `title` (= le texte du
+    signalement, Information n'a pas de champ `description` séparé) : azimuth/location/photo
+    laissés hors scope pour cette première version (nécessiteraient un sélecteur carte/boussole
+    ou un upload multipart sur cette page minimale) — à étendre si besoin réel identifié."""
+
+    class Meta:
+        model = Information
+        fields = ['title']
+
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Serializer personnalisé pour l'authentification JWT"""
@@ -2930,10 +2982,19 @@ class SalonMatrixEquipeSerializer(serializers.ModelSerializer):
     # canal"). None si l'équipe n'a pas de régulateur désigné : le pont laisse alors le sujet
     # tel quel plutôt que d'écraser par une chaîne vide.
     sujet_salon = serializers.SerializerMethodField()
+    # L'équipe "cellule de crise" (voir CelluleCriseView._get_or_create_cellule) est créée SANS
+    # membres formels ni régulateur -- n'importe quel acteur institutionnel doit pouvoir y entrer
+    # (rejoint via assurer_membre_salon au premier accès, voir TeamViewSet.salon_matrix_messages).
+    # Si le pont expulsait quiconque n'est pas dans `membres` (comportement historique, voir
+    # boucle_provisionnement_salons), il rejetait cette personne au cycle suivant -- constaté en
+    # direct le 2026-09-28 (rejoint puis aussitôt "Ne fait plus partie de l'équipe"). Ce champ
+    # dit au pont de ne JAMAIS expulser personne de ce salon précis (l'ajout via `membres` reste
+    # inchangé pour les équipes normales).
+    expulsion_activee = serializers.SerializerMethodField()
 
     class Meta:
         model = SalonMatrixEquipe
-        fields = ['id', 'equipe', 'equipe_nom', 'room_id', 'membres', 'sujet_salon', 'date_creation', 'derniere_synchronisation']
+        fields = ['id', 'equipe', 'equipe_nom', 'room_id', 'membres', 'sujet_salon', 'expulsion_activee', 'date_creation', 'derniere_synchronisation']
         read_only_fields = ['id', 'equipe', 'date_creation']
 
     def get_sujet_salon(self, obj):
@@ -2951,6 +3012,10 @@ class SalonMatrixEquipeSerializer(serializers.ModelSerializer):
              "nom": f"{m.first_name} {m.last_name}".strip() or m.email}
             for m in obj.equipe.members.filter(is_active=True)
         ]
+
+    def get_expulsion_activee(self, obj):
+        from .models import PointOperationnel
+        return not PointOperationnel.objects.filter(equipe=obj.equipe, type__code="CELLULE_CRISE").exists()
 
 
 # Rôles considérés "permanents" d'une institution (personnel institutionnel), par opposition

@@ -47,6 +47,7 @@ from .export import build_crisis_export_zip
 from .institution_attachment import (
     find_institution_for_pending_user, attach_user_with_role,
     attach_secours_user_to_institution, resolve_or_invite_responsable,
+    _get_or_create_contact_institution,
 )
 from .permissions import (
     IsInstitutionalActor, IsAdministrator, IsOwnDeclarationOrInstitutional, IsOwnerOrInstitutional,
@@ -366,7 +367,9 @@ from .serializers import (
     InformationTypeBesoinSerializer,
     RequestSerializer,
     RequestPhotoSerializer,
+    RequestPublicEditSerializer,
     OfferSerializer,
+    OfferPublicEditSerializer,
     OfferNationalPartialSerializer,
     OfferPhotoSerializer,
     OfferMessageSerializer,
@@ -399,6 +402,7 @@ from .serializers import (
     DeclarationSecuriteSerializer,
     AffectationPointBenevoleSerializer,
     InformationSerializer,
+    InformationPublicEditSerializer,
     RequestTypeSerializer,
     OfferTypeSerializer,
     InformationTypeSerializer,
@@ -3307,10 +3311,16 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # Générer un token de suppression unique
         deletion_token = secrets.token_urlsafe(32)
+        # Distinct de deletion_token (portées différentes : celui-ci ne permet que de modifier
+        # la demande, jamais de la désactiver) — même patron que Offer.reponse_token.
+        edition_token = secrets.token_urlsafe(32)
 
         # Définir l'auteur si authentifié, sinon None
         author = self.request.user if self.request.user.is_authenticated else None
-        demande = serializer.save(author=author, deletion_token=deletion_token, environment=get_active_environment(self.request))
+        demande = serializer.save(
+            author=author, deletion_token=deletion_token, edition_token=edition_token,
+            environment=get_active_environment(self.request),
+        )
 
         # Résout commune_code/epci_code/departement_code/region_code une seule fois ici plutôt
         # qu'à chaque consultation (même correctif que OfferViewSet.perform_create) : sans
@@ -3464,12 +3474,34 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         except Exception as e:
             print(f"Erreur création dossier automatique : {e}")
 
-        # Construire l'URL de suppression (automatique selon l'environnement)
+        # Construire les URLs de modification/désactivation (automatique selon l'environnement)
+        edit_url = f"{settings.SERVER_URL.rstrip('/')}/modifier-demande/{edition_token}/"
         deletion_url = f"{settings.SERVER_URL.rstrip('/')}/api/delete-request/{deletion_token}/"
-        
+
+        # Récapitulatif des éléments saisis -- seulement les champs effectivement renseignés
+        # (voir RequestPublicEditSerializer pour la même liste côté modification).
+        recap_lignes = [f"- Titre : {demande.title}"]
+        if demande.description:
+            recap_lignes.append(f"- Description : {demande.description}")
+        champs_hebergement = [
+            ("Durée recherchée", demande.hebergement_duree),
+            ("Type de logement", demande.type_logement),
+            ("Loyer", demande.type_loyer),
+            ("Nombre de pièces", demande.nombre_pieces),
+            ("Nombre de chambres", demande.nombre_chambres),
+            ("Capacité adultes", demande.capacite_adultes),
+            ("Capacité enfants", demande.capacite_enfants),
+        ]
+        for libelle, valeur in champs_hebergement:
+            if valeur:
+                recap_lignes.append(f"- {libelle} : {valeur}")
+        if demande.nombre_places_assises:
+            recap_lignes.append(f"- Places assises nécessaires : {demande.nombre_places_assises}")
+        recap = "\n".join(recap_lignes)
+
         try:
             print(f"Tentative d'envoi de mail à {demande.email_request}...")
-            
+
             send_mail_env_aware(
                 self.request,
                 subject="Confirmation de votre demande",
@@ -3477,8 +3509,10 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"Bonjour {demande.first_name_request},\n\n"
                     f"Nous accusons réception de votre demande d'aide : {demande.title}.\n"
                     "Elle est actuellement en attente de traitement par nos services.\n\n"
-                    f"Si vous souhaitez annuler cette demande, cliquez sur le lien suivant :\n"
-                    f"{deletion_url}\n\n"
+                    f"Récapitulatif de votre demande :\n{recap}\n\n"
+                    f"Pour modifier votre demande (compléter une information, changer une "
+                    f"disponibilité…) :\n{edit_url}\n\n"
+                    f"Pour la désactiver (elle ne sera plus visible) :\n{deletion_url}\n\n"
                     "Cordialement,\n"
                     "L'équipe Assista-Crise"
                 ),
@@ -3487,7 +3521,7 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 fail_silently=False,
             )
             print("Succès : Email de confirmation envoyé.")
-            
+
         except Exception as e:
             print(f"Erreur critique : L'envoi de l'email a échoué. Détails : {e}")
 
@@ -3987,6 +4021,43 @@ def _assurer_canal_meshtastic_et_notifier(request, team, user):
     )
 
 
+def _assurer_canal_meshcore_et_notifier(request, team, user):
+    """Miroir exact de `_assurer_canal_meshtastic_et_notifier` (voir sa docstring) pour
+    MeshCore : si `user` a un nœud MeshCore personnel actif, s'assure que l'équipe a déjà un
+    canal (le crée s'il n'existe pas encore -- ne le régénère JAMAIS ici, voir
+    TeamViewSet.provisionner_canal_meshcore pour la régénération/notification groupée) et
+    envoie ses informations en DM à CE seul membre. Même convention de nom de canal que
+    provisionner_canal_meshcore (`nom=f"Équipe {team.name}"[:32]`)."""
+    noeud = NoeudMeshUtilisateur.objects.filter(utilisateur=user, actif=True).first()
+    if noeud is None:
+        return
+
+    canal = getattr(team, 'canal_meshcore', None)
+    if canal is None:
+        canal = CanalMeshCore.objects.create(
+            equipe=team, institution=team.institution,
+            nom=f"Équipe {team.name}"[:32],
+            cle_partagee_hex=secrets.token_hex(16),
+            environment=get_active_environment(request),
+        )
+
+    compagnon = CompagnonMeshCore.objects.filter(actif=True, principal=True).first() \
+        or CompagnonMeshCore.objects.filter(actif=True).first()
+    if compagnon is None:
+        return
+
+    MessageMeshLog.objects.create(
+        compagnon=compagnon,
+        direction=DirectionMessageMesh.SORTANT,
+        contact_pubkey_hex=noeud.pubkey_hex,
+        contenu=f"{canal.cle_partagee_hex} - {canal.nom}",
+        statut=StatutMessageMesh.EN_ATTENTE,
+        expediteur=request.user if request.user.is_authenticated else None,
+        equipe=team,
+        environment=get_active_environment(request),
+    )
+
+
 def _institutions_liees(team):
     """Institutions considérées comme "déjà liées" à l'institution de `team` : celles co-
     impliquées avec elle (ImplicationInstitution, au sens le plus large — peu importe le type
@@ -4061,6 +4132,153 @@ def _resolve_institution_or_400(request):
             {"institution": "Impossible de déterminer l'institution : précisez-la explicitement."}
         )
     return institution
+
+
+def _lancer_ou_consulter_tache(request, commune_code, type_tache, lire_cache_fn, tache_celery, forcer):
+    """Factorise le patron commun aux deux vues de simulation d'inondation (paliers et adresses,
+    voir docstrings respectives) : lit le cache si prêt, sinon consulte/déclenche la tâche Celery
+    correspondante -- jamais de calcul synchrone ici (voir core/inondation.py)."""
+    from .models import StatutTacheInondation, TacheSimulationInondation
+
+    environment = get_active_environment(request)
+
+    if not forcer:
+        resultat = lire_cache_fn(commune_code, environment=environment)
+        if resultat is not None:
+            return Response({"statut": StatutTacheInondation.TERMINEE, **resultat})
+
+    tache = TacheSimulationInondation.objects.filter(
+        commune_code=commune_code, environment=environment, type_tache=type_tache,
+    ).first()
+    if tache is not None and tache.statut == StatutTacheInondation.EN_COURS and not forcer:
+        return Response({"statut": StatutTacheInondation.EN_COURS}, status=status.HTTP_202_ACCEPTED)
+    if tache is not None and tache.statut == StatutTacheInondation.ECHEC and not forcer:
+        return Response(
+            {"statut": StatutTacheInondation.ECHEC, "erreur": tache.erreur},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    TacheSimulationInondation.objects.update_or_create(
+        commune_code=commune_code, environment=environment, type_tache=type_tache,
+        defaults={"statut": StatutTacheInondation.EN_COURS, "date_fin": None, "erreur": None},
+    )
+    tache_celery.delay(commune_code, environment, forcer)
+    return Response({"statut": StatutTacheInondation.EN_COURS}, status=status.HTTP_202_ACCEPTED)
+
+
+class SimulationInondationView(generics.GenericAPIView):
+    """Simulation grossière du niveau d'eau par commune (grille d'altitude + paliers, voir
+    core/inondation.py) -- planification préventive pour les mairies, PAS liée à une crise
+    (contrairement à HabitationViewSet.estimation_ban) : utilisable en dehors de tout contexte
+    de crise active.
+
+    Volontairement SÉPARÉE du chargement des adresses (voir SimulationInondationAdressesView) :
+    toujours bornée (grille plafonnée), ne dépend jamais de la taille de la commune en nombre
+    d'adresses -- demande explicite du 2026-09-30, suite à l'échec du chargement complet des
+    adresses sur Bordeaux, qui ne doit plus jamais empêcher la simulation du niveau d'eau de
+    fonctionner. Calcul TOUJOURS asynchrone (Celery, voir core/tasks.py), réponse
+    `{statut: 'EN_COURS'}` (202) tant que ce n'est pas prêt -- le frontend interroge à nouveau
+    cette même URL, ce qui permet à l'utilisateur de changer de page et revenir : l'état vit en
+    base (TacheSimulationInondation), jamais dans le navigateur. `?recalculer=1` force un
+    nouveau calcul même si déjà en cache."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request, commune_code):
+        from .habitations import institution_accede_commune
+        from .inondation import paliers_en_cache
+        from .models import TypeTacheInondation
+        from .tasks import calculer_paliers_task
+
+        if not institution_accede_commune(request, commune_code):
+            return Response(
+                {"error": "Vous n'avez pas accès à cette commune pour cet outil."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        forcer = request.query_params.get("recalculer") == "1"
+        return _lancer_ou_consulter_tache(
+            request, commune_code, TypeTacheInondation.PALIERS, paliers_en_cache, calculer_paliers_task, forcer,
+        )
+
+
+class SimulationInondationAdressesView(generics.GenericAPIView):
+    """Chargement des adresses BAN d'une commune et de leur seuil d'inondation simulé --
+    volontairement séparé de SimulationInondationView (voir sa docstring) : appelé
+    explicitement par l'utilisateur ("charger les adresses"), jamais automatiquement à la
+    sélection d'une commune. Peut échouer clairement (SEUIL_VOIES_MAX dans core/inondation.py)
+    sur une très grande ville sans affecter la simulation du niveau d'eau elle-même."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request, commune_code):
+        from .habitations import institution_accede_commune
+        from .inondation import adresses_en_cache
+        from .models import TypeTacheInondation
+        from .tasks import charger_adresses_task
+
+        if not institution_accede_commune(request, commune_code):
+            return Response(
+                {"error": "Vous n'avez pas accès à cette commune pour cet outil."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        forcer = request.query_params.get("recalculer") == "1"
+        return _lancer_ou_consulter_tache(
+            request, commune_code, TypeTacheInondation.ADRESSES, adresses_en_cache, charger_adresses_task, forcer,
+        )
+
+
+class SimulationRuissellementView(generics.GenericAPIView):
+    """Simulation grossière de ruissellement (crue éclair, voir core/ruissellement.py) --
+    accumulation de flux sur la même grille d'altitude que SimulationInondationView, mais
+    algorithme différent (pas de curseur de niveau). Toujours bornée comme les paliers, jamais
+    comme le chargement des adresses."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request, commune_code):
+        from .habitations import institution_accede_commune
+        from .models import TypeTacheInondation
+        from .ruissellement import ruissellement_en_cache
+        from .tasks import calculer_ruissellement_task
+
+        if not institution_accede_commune(request, commune_code):
+            return Response(
+                {"error": "Vous n'avez pas accès à cette commune pour cet outil."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        forcer = request.query_params.get("recalculer") == "1"
+        return _lancer_ou_consulter_tache(
+            request, commune_code, TypeTacheInondation.RUISSELLEMENT, ruissellement_en_cache, calculer_ruissellement_task, forcer,
+        )
+
+
+class SimulationInondationNiveauObserveView(generics.GenericAPIView):
+    """Dernier niveau d'eau RÉELLEMENT mesuré (Hub'Eau, station la plus proche) sur le MÊME
+    référentiel NGF que le curseur de SimulationInondationView -- repère informatif seulement,
+    jamais utilisé pour piloter la simulation elle-même (qui reste calée sur la crue historique
+    de référence, voir core/inondation.py). Synchrone (pas de tâche Celery) : un seul appel
+    externe léger, mis en cache 5 min (voir core/hydrometrie.py), jamais bloquant -- répond
+    `{disponible: false}` plutôt qu'une erreur si aucune station n'est exploitable à proximité."""
+
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request, commune_code):
+        from .habitations import institution_accede_commune
+        from .hydrometrie import niveau_observe_commune
+
+        if not institution_accede_commune(request, commune_code):
+            return Response(
+                {"error": "Vous n'avez pas accès à cette commune pour cet outil."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        resultat = niveau_observe_commune(commune_code)
+        if resultat is None:
+            return Response({"disponible": False})
+        return Response({"disponible": True, **resultat})
 
 
 class ZoneViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
@@ -5193,6 +5411,15 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         new_members = team.members.filter(id__in=current_member_ids - previous_member_ids)
         for membre in new_members:
             _notify_new_team_member(team, membre, self.request)
+            # Chemin RÉEL d'ajout de membre utilisé par l'écran de sélection (PATCH
+            # member_ids) -- contrairement à inviter_membre (action séparée), ce chemin
+            # n'envoyait jusqu'ici ni les infos MeshCore/Meshtastic ni rien côté Matrix (le
+            # salon, une fois provisionné, se synchronise de toute façon tout seul via
+            # matrix-bridge, voir _assurer_salon_matrix). Demande explicite du 2026-10-05 :
+            # "si je rajoute un intervenant à l'équipe, ça lui envoie les informations de
+            # connexion mt/mc".
+            _assurer_canal_meshtastic_et_notifier(self.request, team, membre)
+            _assurer_canal_meshcore_et_notifier(self.request, team, membre)
 
         # Journalise l'ajout/retrait de membres — jusqu'ici la seule action de TeamViewSet non
         # tracée dans la main courante (voir AuditLogViewSet, onglet Historique de l'équipe).
@@ -5465,10 +5692,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             )
             invited = True
 
-        ContactInstitution.objects.get_or_create(
-            institution=target_institution, utilisateur=user,
-            defaults={'fonction': role.libelle, 'actif': True},
-        )
+        _get_or_create_contact_institution(target_institution, user, role.libelle)
         AffectationRoleOperationnel.objects.get_or_create(
             utilisateur=user, institution=target_institution, role=role, competence=None,
             defaults={'actif': True},
@@ -6177,6 +6401,154 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         return Response({"messages": messages})
 
+    def _resoudre_expediteur_mesh(self, message, noms_membres) -> str:
+        """Nom à afficher pour un message de canal MeshCore/Meshtastic -- si `expediteur`
+        (app) est posé (message SORTANT composé ici), réutilise `noms_membres` comme pour
+        Matrix. Sinon (message ENTRANT reçu du pont, jamais d'`expediteur` posé par construction
+        — voir MessageCanalMeshCore/MessageCanalMeshtastic), retrouve le compte à partir de
+        `contact_pubkey_hex`/`contact_node_num` si son propriétaire a revendiqué ce nœud (voir
+        NoeudMeshUtilisateur/NoeudUtilisateurMeshtastic), sinon reste anonyme -- même filet que
+        Matrix pour un expéditeur non reconnu."""
+        if message.expediteur_id:
+            return noms_membres.get(str(message.expediteur_id), 'Compte externe')
+        noeud = None
+        if isinstance(message, MessageCanalMeshCore) and message.contact_pubkey_hex:
+            noeud = NoeudMeshUtilisateur.objects.filter(
+                pubkey_hex=message.contact_pubkey_hex, actif=True,
+            ).select_related('utilisateur').first()
+        elif isinstance(message, MessageCanalMeshtastic) and message.contact_node_num:
+            noeud = NoeudUtilisateurMeshtastic.objects.filter(
+                node_num=message.contact_node_num, actif=True,
+            ).select_related('utilisateur').first()
+        if noeud is None:
+            return 'Compte externe'
+        u = noeud.utilisateur
+        return f"{u.first_name} {u.last_name}".strip() or u.email
+
+    @action(detail=True, methods=['get', 'post'], url_path='messagerie-unifiee')
+    def messagerie_unifiee(self, request, pk=None):
+        """Fenêtre de messagerie UNIQUE pour l'équipe (demande explicite du 2026-10-05 : "le
+        régulateur n'a pas à se poser la question" du canal) -- fusionne Matrix (toujours,
+        canal par défaut, provisionné à la volée si besoin) et les canaux de diffusion
+        MeshCore/Meshtastic de l'équipe (déjà provisionnés OU auto-provisionnés ici si au moins
+        un membre équipé n'en a pas encore un) en UNE liste triée par date, chaque message
+        portant un `source`. L'envoi part sur les trois à la fois. Remplace les anciennes
+        fenêtres séparées de la vue équipe (salon_matrix_messages reste disponible tel quel,
+        inchangé, pour compat -- rien d'autre ne l'utilise plus après ce changement).
+
+        Portée volontairement exclue : les DM privés 1-à-1 (MessageMeshLog/
+        MessageMeshtasticLog, utilisés pour l'envoi de la clé de canal et les échanges
+        bilatéraux hors équipe) ne sont PAS mélangés ici -- seuls les messages du canal de
+        DIFFUSION de l'équipe le sont (mélanger du 1-à-1 privé dans une vue d'équipe partagée
+        serait un problème de confidentialité distinct, pas demandé)."""
+        from .matrix import assurer_membre_salon, envoyer_message_salon, lister_messages_salon
+
+        team = self.get_object()
+        est_membre = team.members.filter(id=request.user.id).exists()
+        if not est_membre and not _appartient_a_equipe(request, team):
+            return Response(
+                {"error": "Vous devez appartenir à cette équipe (ou à son institution) pour accéder à sa messagerie."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        environment = get_active_environment(request)
+        nom = f"{request.user.first_name} {request.user.last_name}".strip() or request.user.email
+
+        # Matrix "par défaut" : provisionné à la volée, jamais besoin du bouton manuel
+        # (provisionner_salon_matrix reste utilisable séparément, idempotent). room_id reste
+        # vide tant que matrix-bridge ne l'a pas créé côté Synapse (poll ~30s) -- dans ce cas
+        # on continue quand même (les canaux mesh, eux, n'ont pas cette latence).
+        salon, _ = SalonMatrixEquipe.objects.get_or_create(
+            equipe=team, defaults={"environment": environment},
+        )
+        if salon.room_id and not est_membre:
+            assurer_membre_salon(request.user, salon.room_id, displayname=nom)
+
+        # Résolus via une requête fraîche (pas `getattr(team, 'canal_meshtastic'/'canal_meshcore')`,
+        # qui mettrait en cache "aucun canal" sur CET objet `team` dès le premier accès -- si ce
+        # canal est créé plus bas dans la même requête (provisionnement à la volée), cette même
+        # instance `team` continuerait sinon de répondre "aucun canal" pour le reste de la
+        # requête, empêchant silencieusement le tout premier message de partir sur mesh).
+        canal_meshtastic = CanalMeshtastic.objects.filter(equipe=team).first()
+        canal_meshcore = CanalMeshCore.objects.filter(equipe=team).first()
+
+        if request.method == 'POST':
+            texte = (request.data.get('texte') or '').strip()
+            if not texte:
+                return Response({"error": "texte requis."}, status=status.HTTP_400_BAD_REQUEST)
+            urgent = bool(request.data.get('urgent'))
+
+            if salon.room_id:
+                envoyer_message_salon(salon.room_id, request.user, nom, texte, urgent=urgent)
+
+            # Provisionne les canaux mesh à la volée SEULEMENT s'ils n'existent pas encore --
+            # sans ça, le PREMIER message envoyé sur une équipe dont les membres viennent tout
+            # juste d'être équipés ne partirait que sur Matrix. Le garde-fou `is None` est
+            # essentiel : _assurer_canal_mesh*_et_notifier ENVOIE un DM à chaque appel, pas
+            # seulement à la création du canal -- sans lui, chaque message de la fenêtre
+            # unifiée aurait spammé tous les membres équipés de la clé du canal en boucle.
+            if canal_meshtastic is None:
+                for membre in team.members.all():
+                    _assurer_canal_meshtastic_et_notifier(request, team, membre)
+                canal_meshtastic = CanalMeshtastic.objects.filter(equipe=team).first()
+            if canal_meshcore is None:
+                for membre in team.members.all():
+                    _assurer_canal_meshcore_et_notifier(request, team, membre)
+                canal_meshcore = CanalMeshCore.objects.filter(equipe=team).first()
+
+            if canal_meshtastic is not None:
+                MessageCanalMeshtastic.objects.create(
+                    canal=canal_meshtastic, direction=DirectionMessageMesh.SORTANT,
+                    expediteur=request.user, contenu=texte,
+                    statut=StatutMessageMesh.EN_ATTENTE, environment=environment,
+                )
+            if canal_meshcore is not None:
+                MessageCanalMeshCore.objects.create(
+                    canal=canal_meshcore, direction=DirectionMessageMesh.SORTANT,
+                    expediteur=request.user, contenu=texte,
+                    statut=StatutMessageMesh.EN_ATTENTE, environment=environment,
+                )
+
+        noms = {str(m.id): f"{m.first_name} {m.last_name}".strip() or m.email for m in team.members.all()}
+        noms[str(request.user.id)] = nom
+
+        resultat = []
+        if salon.room_id:
+            for m in lister_messages_salon(salon.room_id):
+                resultat.append({
+                    "event_id": m["event_id"], "source": "matrix",
+                    "texte": m["texte"], "horodatage": m["horodatage"],
+                    "expediteur_id": m["expediteur_id"],
+                    "expediteur_nom": noms.get(m["expediteur_id"], "Compte externe"),
+                    "moi": m["expediteur_id"] == str(request.user.id),
+                    "urgent": m["urgent"], "vu_par": [],
+                })
+
+        if canal_meshtastic is not None:
+            for m in canal_meshtastic.messages.select_related('expediteur').order_by('date_creation'):
+                resultat.append({
+                    "event_id": str(m.id), "source": "meshtastic",
+                    "texte": m.contenu, "horodatage": int(m.date_creation.timestamp() * 1000),
+                    "expediteur_id": str(m.expediteur_id) if m.expediteur_id else None,
+                    "expediteur_nom": self._resoudre_expediteur_mesh(m, noms),
+                    "moi": str(m.expediteur_id) == str(request.user.id) if m.expediteur_id else False,
+                    "urgent": False, "vu_par": [],
+                })
+
+        if canal_meshcore is not None:
+            for m in canal_meshcore.messages.select_related('expediteur').order_by('date_creation'):
+                resultat.append({
+                    "event_id": str(m.id), "source": "meshcore",
+                    "texte": m.contenu, "horodatage": int(m.date_creation.timestamp() * 1000),
+                    "expediteur_id": str(m.expediteur_id) if m.expediteur_id else None,
+                    "expediteur_nom": self._resoudre_expediteur_mesh(m, noms),
+                    "moi": str(m.expediteur_id) == str(request.user.id) if m.expediteur_id else False,
+                    "urgent": False, "vu_par": [],
+                })
+
+        resultat.sort(key=lambda m: m["horodatage"])
+        return Response({"messages": resultat})
+
     def _est_cadre_user(self, user, team) -> bool:
         """Variante de _est_cadre pour un utilisateur ARBITRAIRE (pas forcément l'appelant de la
         requête courante) -- sert à filtrer, à l'affichage, quelles réactions "Vu" comptent
@@ -6754,12 +7126,45 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             commentaire=f"Création offre : {offre.title}",
         )
 
-        # Construire l'URL de suppression (automatique selon l'environnement)
+        # Construire les URLs de modification/désactivation (automatique selon l'environnement)
+        # -- reponse_url pointe vers la MÊME page que le lien envoyé plus tard sur réponse
+        # d'équipe (voir _notify_equipes_hebergement), désormais aussi incluse dès ce premier
+        # mail pour que l'auteur puisse éditer son offre sans attendre une réponse.
+        reponse_url = f"{settings.SERVER_URL.rstrip('/')}/repondre-offre/{reponse_token}/"
         deletion_url = f"{settings.SERVER_URL.rstrip('/')}/api/delete-offer/{deletion_token}/"
+
+        # Récapitulatif des éléments saisis -- seulement les champs effectivement renseignés
+        # (voir OfferPublicEditSerializer pour la liste des champs modifiables côté hébergement).
+        recap_lignes = [f"- Titre : {offre.title}"]
+        if offre.offer_type_id:
+            recap_lignes.append(f"- Catégorie : {offre.offer_type.type}")
+        if offre.description:
+            recap_lignes.append(f"- Description : {offre.description}")
+        champs_divers = [
+            ("Type de logement", offre.type_logement),
+            ("Loyer", offre.type_loyer),
+            ("Nombre de pièces", offre.nombre_pieces),
+            ("Nombre de chambres", offre.nombre_chambres),
+            ("Capacité adultes", offre.capacite_adultes),
+            ("Capacité enfants", offre.capacite_enfants),
+            ("Type de transport", offre.transport_type),
+            ("Immatriculation", offre.immatriculation),
+            ("Type de matériel", offre.materiel_type),
+            ("Contenu de la cuve", offre.cuve_contenu),
+            ("Type de soutien", offre.soutien_type),
+        ]
+        for libelle, valeur in champs_divers:
+            if valeur:
+                recap_lignes.append(f"- {libelle} : {valeur}")
+        if offre.diplome_secourisme:
+            recap_lignes.append("- Diplôme de secourisme : oui")
+        if offre.ancien_sapeur_pompier:
+            recap_lignes.append("- Ancien sapeur-pompier : oui")
+        recap = "\n".join(recap_lignes)
 
         try:
             print(f"Tentative d'envoi de mail à {offre.email_offer}...")
-            
+
             send_mail_env_aware(
                 self.request,
                 subject=f"Confirmation : Votre offre '{offre.title}' a bien été enregistrée",
@@ -6767,8 +7172,10 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"Bonjour {offre.first_name_offer},\n\n"
                     f"Nous vous remercions pour votre offre d'aide : {offre.title}.\n"
                     "Elle est maintenant visible et disponible pour les personnes dans le besoin.\n\n"
-                    f"Si vous souhaitez retirer cette offre, cliquez sur le lien suivant :\n"
-                    f"{deletion_url}\n\n"
+                    f"Récapitulatif de votre offre :\n{recap}\n\n"
+                    f"Pour modifier votre offre (compléter une information, changer une "
+                    f"disponibilité…) :\n{reponse_url}\n\n"
+                    f"Pour la désactiver (elle ne sera plus visible) :\n{deletion_url}\n\n"
                     "Cordialement,\n"
                     "L'équipe Assista-Crise"
                 ),
@@ -6777,7 +7184,7 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 fail_silently=False,
             )
             print("Succès : Email de confirmation envoyé.")
-            
+
         except Exception as e:
             print(f"Erreur critique : L'envoi de l'email a échoué. Détails : {e}")
 
@@ -7127,14 +7534,23 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # Générer un token de suppression unique
         deletion_token = secrets.token_urlsafe(32)
-        
+        # Distinct de deletion_token (portées différentes : celui-ci ne permet que de modifier
+        # le signalement, jamais de le désactiver) — même patron que Offer.reponse_token.
+        edition_token = secrets.token_urlsafe(32)
+
         # Si l'utilisateur est authentifié, on l'assigne comme auteur
         environment = get_active_environment(self.request)
         if self.request.user.is_authenticated:
-            info = serializer.save(author=self.request.user, deletion_token=deletion_token, environment=environment)
+            info = serializer.save(
+                author=self.request.user, deletion_token=deletion_token,
+                edition_token=edition_token, environment=environment,
+            )
         else:
             # Sinon on sauvegarde sans auteur (None)
-            info = serializer.save(author=None, deletion_token=deletion_token, environment=environment)
+            info = serializer.save(
+                author=None, deletion_token=deletion_token,
+                edition_token=edition_token, environment=environment,
+            )
         
         # Dossier de suivi auto-créé, avec affectation automatique d'équipe par compétence --
         # même logique que RequestViewSet.perform_create (voir sa docstring pour le détail du
@@ -7180,12 +7596,13 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         except Exception as e:
             print(f"Erreur création dossier automatique (signalement) : {e}")
 
-        # Construire l'URL de suppression (automatique selon l'environnement)
+        # Construire les URLs de modification/désactivation (automatique selon l'environnement)
+        edit_url = f"{settings.SERVER_URL.rstrip('/')}/modifier-signalement/{edition_token}/"
         deletion_url = f"{settings.SERVER_URL.rstrip('/')}/api/delete-information/{deletion_token}/"
 
         try:
             print(f"Tentative d'envoi de mail à {info.email_information}...")
-            
+
             send_mail_env_aware(
                 self.request,
                 subject=f"Confirmation : Votre information '{info.title}' a bien été partagée",
@@ -7193,8 +7610,9 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"Bonjour {info.first_name_information},\n\n"
                     f"Nous vous remercions pour le partage de cette information : {info.title}.\n"
                     "Elle est maintenant visible par la communauté.\n\n"
-                    f"Si vous souhaitez retirer cette information, cliquez sur le lien suivant :\n"
-                    f"{deletion_url}\n\n"
+                    f"Récapitulatif de votre signalement :\n- {info.title}\n\n"
+                    f"Pour modifier votre signalement :\n{edit_url}\n\n"
+                    f"Pour le désactiver (il ne sera plus visible) :\n{deletion_url}\n\n"
                     "Cordialement,\n"
                     "L'équipe Assista-Crise"
                 ),
@@ -7368,12 +7786,12 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 
 class DeleteRequestView(View):
-    """Vue pour supprimer une demande via token"""
+    """Vue pour désactiver une demande via token -- désactive plutôt que supprimer (politique de
+    désactivation, voir RequestViewSet.perform_destroy) : reste visible dans l'historique
+    jusqu'à la clôture de la crise rattachée, où elle est définitivement purgée. Le texte
+    retourné dit "désactivée" (pas "supprimée", corrigé le 2026-10-03 -- l'ancien texte laissait
+    croire à tort à une suppression réelle)."""
     def get(self, request, token):
-        # Désactive plutôt que supprimer (politique de désactivation, voir RequestViewSet.
-        # perform_destroy) : le message affiché reste "supprimée" pour l'expéditeur, la
-        # distinction technique est invisible pour lui — purge réelle seulement à la clôture
-        # de la crise rattachée.
         demande = get_object_or_404(Request, deletion_token=token)
         titre = demande.title
         demande.actif = False
@@ -7383,12 +7801,12 @@ class DeleteRequestView(View):
             objet_id=demande.id, crise=demande.crisis,
             commentaire=f"Désactivation demande (lien email) : {titre}",
         )
-        return HttpResponse(f"<h1>Demande supprimée</h1><p>La demande '{titre}' a bien été supprimée.</p>")
+        return HttpResponse(f"<h1>Demande désactivée</h1><p>La demande '{titre}' a bien été désactivée et n'est plus visible.</p>")
 
 class DeleteOfferView(View):
-    """Vue pour supprimer une offre via token"""
+    """Vue pour désactiver une offre via token -- voir le commentaire équivalent sur
+    DeleteRequestView."""
     def get(self, request, token):
-        # Voir le commentaire équivalent sur DeleteRequestView.
         offre = get_object_or_404(Offer, deletion_token=token)
         titre = offre.title
         offre.actif = False
@@ -7398,7 +7816,7 @@ class DeleteOfferView(View):
             objet_id=offre.id, crise=offre.crisis,
             commentaire=f"Désactivation offre (lien email) : {titre}",
         )
-        return HttpResponse(f"<h1>Offre supprimée</h1><p>L'offre '{titre}' a bien été supprimée.</p>")
+        return HttpResponse(f"<h1>Offre désactivée</h1><p>L'offre '{titre}' a bien été désactivée et n'est plus visible.</p>")
 
 class ConfirmerAffectationBenevoleView(View):
     """Confirmation par lien (oui/non) de l'affectation d'un bénévole individuel sur un point
@@ -7564,8 +7982,12 @@ class OfferReponsePublicView(APIView):
         return Response(OfferMessageSerializer(message).data, status=status.HTTP_201_CREATED)
 
     def patch(self, request, token):
+        # OfferPublicEditSerializer (allow-list), pas OfferSerializer complet (fields='__all__')
+        # -- ce lien est désormais envoyé dès le mail de confirmation initial (plus seulement
+        # sur réponse d'équipe), donc plus largement diffusé : on resserre l'écriture à ce que
+        # le formulaire public envoie réellement (voir son docstring).
         offre = get_object_or_404(Offer, reponse_token=token)
-        serializer = OfferSerializer(offre, data=request.data, partial=True, context={'request': request})
+        serializer = OfferPublicEditSerializer(offre, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         _notify_equipes_hebergement(
@@ -7577,10 +7999,56 @@ class OfferReponsePublicView(APIView):
         return Response(OfferSerializer(offre, context={'request': request}).data)
 
 
-class DeleteInformationView(View):
-    """Vue pour supprimer une information via token"""
+class RequestEditionPublicView(APIView):
+    """Page publique (jeton opaque, pas de compte requis) permettant à l'auteur d'une demande de
+    la consulter/modifier — voir Request.edition_token. Même esprit qu'OfferReponsePublicView,
+    mais sans fil de messages (pas de messagerie pour les demandes)."""
+    permission_classes = [AllowAny]
+
     def get(self, request, token):
-        # Voir le commentaire équivalent sur DeleteRequestView.
+        demande = get_object_or_404(Request, edition_token=token)
+        return Response(RequestSerializer(demande, context={'request': request}).data)
+
+    def patch(self, request, token):
+        demande = get_object_or_404(Request, edition_token=token)
+        serializer = RequestPublicEditSerializer(demande, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="Request",
+            objet_id=demande.id, crise=demande.crisis,
+            commentaire=f"Modification demande (lien email) : {demande.title}",
+        )
+        return Response(RequestSerializer(demande, context={'request': request}).data)
+
+
+class InformationEditionPublicView(APIView):
+    """Page publique (jeton opaque, pas de compte requis) permettant à l'auteur d'un signalement
+    de le consulter/modifier — voir Information.edition_token. Même esprit
+    qu'OfferReponsePublicView, mais sans fil de messages."""
+    permission_classes = [AllowAny]
+
+    def get(self, request, token):
+        info = get_object_or_404(Information, edition_token=token)
+        return Response(InformationSerializer(info, context={'request': request}).data)
+
+    def patch(self, request, token):
+        info = get_object_or_404(Information, edition_token=token)
+        serializer = InformationPublicEditSerializer(info, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="Information",
+            objet_id=info.id, crise=info.crisis,
+            commentaire=f"Modification signalement (lien email) : {info.title}",
+        )
+        return Response(InformationSerializer(info, context={'request': request}).data)
+
+
+class DeleteInformationView(View):
+    """Vue pour désactiver une information via token -- voir le commentaire équivalent sur
+    DeleteRequestView."""
+    def get(self, request, token):
         info = get_object_or_404(Information, deletion_token=token)
         titre = info.title
         info.actif = False
@@ -7590,7 +8058,7 @@ class DeleteInformationView(View):
             objet_id=info.id, crise=info.crisis,
             commentaire=f"Désactivation signalement (lien email) : {titre}",
         )
-        return HttpResponse(f"<h1>Information supprimée</h1><p>L'information '{titre}' a bien été supprimée.</p>")
+        return HttpResponse(f"<h1>Information désactivée</h1><p>L'information '{titre}' a bien été désactivée et n'est plus visible.</p>")
 
     #  --------------------------- add by Laura ------------------------------------
 

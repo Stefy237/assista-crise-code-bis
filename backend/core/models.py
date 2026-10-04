@@ -546,6 +546,10 @@ class Request(HebergementDetailsMixin, EnvironmentScopedModel):
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     deletion_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    # Distinct de deletion_token (portées différentes : celui-ci ne permet que de modifier la
+    # demande, jamais de la désactiver) — même patron que Offer.reponse_token. Généré à la
+    # création, même patron que deletion_token.
+    edition_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -636,6 +640,10 @@ class Information(EnvironmentScopedModel):
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     deletion_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    # Distinct de deletion_token (portées différentes : celui-ci ne permet que de modifier le
+    # signalement, jamais de le désactiver) — même patron que Offer.reponse_token. Généré à la
+    # création, même patron que deletion_token.
+    edition_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -2212,6 +2220,180 @@ class ModuleDegatsCrise(EnvironmentScopedModel):
 
     def __str__(self):
         return f"{self.institution.nom} — {self.crise.name} ({'actif' if self.actif else 'inactif'})"
+
+
+# --- Simulation d'inondation par commune (outil de planification préventive pour les mairies,
+# distinct du référencement des dégâts ci-dessus) -----------------------------------------------
+#
+# Ces trois modèles sont un CACHE de résultat de calcul (relief, paliers, adresses testées),
+# jamais des faits constatés -- ne JAMAIS écrire dans Habitation.statut_evaluation depuis ce
+# calcul : une simulation reste une hypothèse, un statut d'évaluation est un constat de terrain.
+# Voir core/inondation.py pour le calcul lui-même.
+
+
+class GrilleAltimetrieCommune(EnvironmentScopedModel):
+    """Grille régulière de points (altitude IGN) couvrant une commune -- le relief ne change
+    jamais, un seul calcul par commune suffit durablement (voir inondation.grille_altitude_commune)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    commune_code = models.CharField(max_length=10)
+
+    points = models.JSONField(help_text="[{lon, lat, altitude}] -- grille régulière, voir pas_metres.")
+
+    pas_metres = models.IntegerField()
+
+    date_calcul = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["commune_code", "environment"], name="uq_grille_altimetrie_commune_environment",
+            )
+        ]
+
+    def __str__(self):
+        return f"Grille altimétrique — {self.commune_code}"
+
+
+class GrilleRuissellementCommune(EnvironmentScopedModel):
+    """Grille d'accumulation de flux (ruissellement) d'une commune -- une seule ligne par
+    commune, pas de dimension "niveau" contrairement à PalierInondationSimule (une crue éclair
+    n'a pas de niveau d'eau absolu à faire varier, voir core/ruissellement.py). Calculée à
+    partir de la MÊME grille d'altitude que GrilleAltimetrieCommune, jamais un nouvel appel
+    externe."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    commune_code = models.CharField(max_length=10)
+
+    points = models.JSONField(help_text="[{lon, lat, accumulation}] -- grille régulière, voir pas_metres.")
+
+    pas_metres = models.IntegerField()
+
+    date_calcul = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["commune_code", "environment"], name="uq_grille_ruissellement_commune_environment",
+            )
+        ]
+
+    def __str__(self):
+        return f"Grille ruissellement — {self.commune_code}"
+
+
+class PalierInondationSimule(EnvironmentScopedModel):
+    """Polygone de zone inondée simulée pour UN niveau d'eau (mètres) sur une commune --
+    précalculé par paliers (voir inondation.calculer_paliers_inondation) pour que le curseur
+    còté frontend n'ait qu'à changer de couche déjà chargée, jamais recalculer en direct.
+    `polygone` vide/null = rien d'inondé à ce niveau (relief entièrement hors d'eau)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    commune_code = models.CharField(max_length=10)
+
+    niveau_metres = models.FloatField()
+
+    polygone = gis_models.MultiPolygonField(srid=4326, null=True, blank=True)
+
+    date_calcul = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["commune_code", "niveau_metres", "environment"],
+                name="uq_palier_inondation_commune_niveau_environment",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.commune_code} — {self.niveau_metres}m"
+
+
+class AdresseSimuleeInondation(EnvironmentScopedModel):
+    """Une adresse BAN d'une commune scannée pour la simulation, avec son altitude et le plus
+    petit niveau d'eau simulé qui l'atteint (`seuil_inondation_metres`, null = jamais atteinte
+    dans la plage testée) -- voir inondation.seuils_inondation_adresses. Séparé d'Habitation à
+    dessein : ceci n'est jamais un constat, seulement une hypothèse de planification."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    commune_code = models.CharField(max_length=10)
+
+    ban_id = models.CharField(max_length=64, null=True, blank=True)
+
+    adresse = models.TextField()
+
+    location = gis_models.PointField(srid=4326)
+
+    altitude_metres = models.FloatField(null=True, blank=True)
+
+    seuil_inondation_metres = models.FloatField(null=True, blank=True)
+
+    date_calcul = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.adresse
+
+
+class StatutTacheInondation(models.TextChoices):
+    EN_COURS = "EN_COURS", "En cours"
+    TERMINEE = "TERMINEE", "Terminée"
+    ECHEC = "ECHEC", "Échec"
+
+
+class TypeTacheInondation(models.TextChoices):
+    # Grille d'altitude + paliers (niveau d'eau simulé, futur ruissellement) -- toujours borné
+    # (grille plafonnée, voir inondation.py:MAX_COTE), ne dépend jamais de la taille de la
+    # commune en nombre d'adresses.
+    PALIERS = "PALIERS", "Relief et paliers d'eau"
+    # Scan BAN + seuil par adresse -- NON borné (une grande ville peut avoir des dizaines de
+    # milliers d'adresses), volontairement séparé de PALIERS pour que la simulation du niveau
+    # d'eau reste utilisable même sur une commune où le chargement des adresses échouerait ou
+    # serait trop long (demande explicite du 2026-09-30, suite à l'échec du chargement complet
+    # sur Bordeaux -- voir docstring de seuils_inondation_adresses).
+    ADRESSES = "ADRESSES", "Adresses BAN"
+    # Accumulation de flux (crue éclair/ruissellement, voir core/ruissellement.py) -- même
+    # grille que PALIERS, toujours bornée, mais algorithme différent (pas de remplissage par
+    # connexité : une crue éclair n'a pas de "niveau d'eau absolu"). Demande explicite du
+    # 2026-09-30, au regard de l'épisode de vigilance rouge Gard/Hérault de ce jour-là.
+    RUISSELLEMENT = "RUISSELLEMENT", "Ruissellement"
+
+
+class TacheSimulationInondation(EnvironmentScopedModel):
+    """État d'UNE tâche Celery (paliers OU adresses, voir `type_tache`) pour une commune -- UNE
+    ligne par (commune, environment, type_tache), écrasée à chaque nouveau lancement (jamais un
+    historique) : sert uniquement à savoir si un calcul est déjà en cours pour éviter d'en
+    relancer un second en double (deux mairies, ou un même utilisateur qui revient sur la
+    page), et à permettre à l'utilisateur de changer de page puis revenir -- l'état vit en
+    base, pas dans le navigateur (voir SimulationInondationView)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    commune_code = models.CharField(max_length=10)
+
+    type_tache = models.CharField(max_length=20, choices=TypeTacheInondation.choices, default=TypeTacheInondation.PALIERS)
+
+    statut = models.CharField(max_length=20, choices=StatutTacheInondation.choices, default=StatutTacheInondation.EN_COURS)
+
+    erreur = models.TextField(blank=True, null=True)
+
+    date_lancement = models.DateTimeField(auto_now_add=True)
+
+    date_fin = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["commune_code", "environment", "type_tache"],
+                name="uq_tache_simulation_inondation_commune_environment_type",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.commune_code} — {self.type_tache} — {self.statut}"
 
 
 class Team(EnvironmentScopedModel):
