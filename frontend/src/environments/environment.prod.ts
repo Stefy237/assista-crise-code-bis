@@ -2,8 +2,8 @@ export const environment = {
   production: true,
   apiUrl: '/api',
   apiAdresseUrl: 'https://api-adresse.data.gouv.fr/search',
-  // Element Web (messagerie Matrix, voir doc de conception "Matrix / Element") -- port dédié,
-  // hors proxy/WAF (usage LAN interne). À reparamétrer si un jour déployé sur un autre hôte
-  // que .113 (pas encore le cas, voir doc de conception).
-  elementWebUrl: 'http://172.16.1.113:8082',
+  // Element Web (messagerie Matrix, voir doc de conception "Matrix / Element") -- servi
+  // publiquement via son propre sous-domaine (voir proxy/nginx.conf, server_name
+  // chat.assista-crise.fr), plus d'IP LAN en dur depuis le retrait de .113 (2026-09-28).
+  elementWebUrl: 'https://chat.assista-crise.fr',
 };

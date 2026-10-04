@@ -1,8 +1,8 @@
 {
   "default_server_config": {
     "m.homeserver": {
-      "base_url": "http://172.16.1.113:8008",
-      "server_name": "matrix.assista-crise.local"
+      "base_url": "https://matrix.assista-crise.fr",
+      "server_name": "matrix.assista-crise.fr"
     }
   },
   "brand": "Assista-Crise Messagerie",
