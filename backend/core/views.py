@@ -247,6 +247,11 @@ def send_institution_account_email(request, user):
         f"- Activation du compte : {activation_link}\n\n"
         f"Vous pourrez ensuite vous reconnecter à tout moment via : {login_link}\n\n"
         "Ces liens sont valables pendant 7 jours.\n\n"
+        "La messagerie d'équipe intégrée à Assista-Crise s'appuie sur Element X : pour en "
+        "profiter pleinement sur votre téléphone (notifications comprises), installez "
+        "l'application dès maintenant :\n"
+        "- Android : https://play.google.com/store/apps/details?id=io.element.android.x\n"
+        "- iPhone : https://apps.apple.com/us/app/element-x-secure-chat-call/id1631335820\n\n"
         "Cordialement,\n"
         "L'équipe Assista-Crise"
     )
