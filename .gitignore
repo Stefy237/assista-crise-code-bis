@@ -36,6 +36,7 @@ __pycache__/
 satellite/.env
 satellite/.profil
 satellite/.satellite_id
+satellite/.sans_noeud
 *.pyo
 *.pyd
 
