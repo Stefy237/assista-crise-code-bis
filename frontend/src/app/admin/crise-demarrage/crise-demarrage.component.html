@@ -10,6 +10,65 @@
     <span class="step-dot" [class.active]="step === 3">3. Récap</span>
   </div>
 
+  @if (notificationsPCS.length > 0) {
+    <div class="pcs-panel">
+      <h3><span class="material-icons">campaign</span> Interlocuteurs à prévenir (PCS/PICS)</h3>
+
+      @if (notificationsAuto.length > 0) {
+        <div class="pcs-section">
+          <h4>Envoi automatique (email / Matrix)</h4>
+
+          <ul class="pcs-liste">
+            @for (n of notificationsAuto; track n.id) {
+              <li>
+                @if (n.statut === 'EN_ATTENTE' || n.statut === 'ECHEC_AUTO') {
+                  <label class="pcs-checkbox">
+                    <input type="checkbox" [checked]="selectionEnvoiPCS.has(n.id)" (change)="toggleSelectionEnvoiPCS(n.id)">
+                  </label>
+                }
+                <span class="pcs-nom">{{ n.nom_snapshot }}</span>
+                <span class="pcs-organisme">{{ n.organisme_snapshot }}</span>
+                <span class="pcs-statut" [class]="classeStatutPCS(n.statut)">{{ libelleStatutPCS(n.statut) }}</span>
+                @if (n.statut === 'CONFIRME_PAR_CONTACT' && n.reponse_contact) {
+                  <span class="pcs-reponse-contact">« {{ libelleReponseContactPCS(n) }} »</span>
+                }
+              </li>
+            }
+          </ul>
+
+          @if (notificationsAutoEnAttente.length > 0) {
+            <label class="pcs-message-label">
+              Message (modifiable pour cette fois uniquement)
+              <textarea [(ngModel)]="messagePCS" rows="3"></textarea>
+            </label>
+            @if (erreurEnvoiPCS) { <p class="error-message">{{ erreurEnvoiPCS }}</p> }
+            <button type="button" class="btn-primary sm" [disabled]="envoiPCSEnCours || selectionEnvoiPCS.size === 0" (click)="envoyerSelectionPCS()">
+              Envoyer à la sélection ({{ selectionEnvoiPCS.size }})
+            </button>
+          }
+        </div>
+      }
+
+      @if (notificationsManuelles.length > 0) {
+        <div class="pcs-section">
+          <h4>À prévenir par téléphone</h4>
+          <ul class="pcs-liste">
+            @for (n of notificationsManuelles; track n.id) {
+              <li>
+                <span class="pcs-nom">{{ n.nom_snapshot }}</span>
+                <span class="pcs-organisme">{{ n.organisme_snapshot }}</span>
+                <span class="pcs-statut" [class]="classeStatutPCS(n.statut)">{{ libelleStatutPCS(n.statut) }}</span>
+                @if (n.statut !== 'CONFIRME_MANUEL' && n.statut !== 'CONFIRME_PAR_CONTACT') {
+                  <button type="button" class="btn-secondary sm" (click)="confirmerNotificationPCS(n)">Marquer prévenu</button>
+                }
+              </li>
+            }
+          </ul>
+        </div>
+      }
+    </div>
+  }
+
   @if (errorMessage) {
     <p class="error-message">{{ errorMessage }}</p>
   }
@@ -211,12 +270,14 @@
         <div class="save-plan">
           <p>
             Pour retrouver ces centres et équipes en un clic lors d'une prochaine crise, vous
-            pouvez les enregistrer comme dispositif pré-enregistré (page « Plans »).
+            pouvez les enregistrer comme dispositif pré-enregistré (page « Mon plan de
+            sauvegarde »).
           </p>
           @if (planSaved) {
             <p class="disclaimer ok">
               <span class="material-icons">check_circle</span>
-              Dispositif enregistré — retrouvable et activable depuis la page « Plans ».
+              Dispositif enregistré — retrouvable et activable depuis la page « Mon plan de
+              sauvegarde ».
             </p>
           } @else {
             <button type="button" class="btn-secondary" (click)="enregistrerCommeDispositif()" [disabled]="savingPlan">

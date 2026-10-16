@@ -288,11 +288,28 @@
         </div>
       </div>
 
+      <!-- "Rejoindre la réserve" : uniquement visible pour un compte Particulier inscrit via
+           une institution marque blanche avec sa propre réserve (voir BrandingService,
+           afficherCaseReserve) -- invisible sur le site généraliste. -->
+      @if (afficherCaseReserve) {
+        <div class="form-group checkbox-group">
+          <label class="checkbox-label">
+            <input
+              type="checkbox"
+              formControlName="souhaiteRejoindreReserve"
+              class="form-checkbox">
+            <span class="checkbox-text">
+              Je souhaite rejoindre la réserve {{ branding?.nom_affichage }}
+            </span>
+          </label>
+        </div>
+      }
+
       <!-- Accepter les conditions -->
       <div class="form-group checkbox-group">
         <label class="checkbox-label">
-          <input 
-            type="checkbox" 
+          <input
+            type="checkbox"
             formControlName="acceptTerms"
             class="form-checkbox"
             [class.invalid]="isFieldInvalid('acceptTerms')">

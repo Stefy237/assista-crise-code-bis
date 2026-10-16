@@ -29,6 +29,97 @@
   }
 }
 
+.pcs-panel {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+
+  h3 {
+    margin: 0 0 .75rem;
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: 1rem;
+  }
+}
+
+.pcs-section {
+  margin-bottom: 1rem;
+
+  h4 { margin: 0 0 .5rem; font-size: .85rem; color: #6b7280; text-transform: uppercase; letter-spacing: .3px; }
+}
+
+.pcs-liste {
+  list-style: none;
+  margin: 0 0 .75rem;
+  padding: 0;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .5rem 0;
+    border-bottom: 1px solid #f3f4f6;
+    flex-wrap: wrap;
+
+    &:last-child { border-bottom: none; }
+  }
+}
+
+.pcs-nom { font-weight: 600; }
+.pcs-organisme { color: #6b7280; font-size: .85rem; }
+.pcs-reponse-contact { color: #4b5563; font-size: .85rem; font-style: italic; }
+
+.pcs-statut {
+  font-size: .75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  padding: .15rem .55rem;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #6b7280;
+
+  &.statut-attente { background: #fef3c7; color: #92400e; }
+  &.statut-envoye  { background: #dbeafe; color: #1e40af; }
+  &.statut-echec   { background: #fee2e2; color: #991b1b; }
+  &.statut-confirme { background: #dcfce7; color: #166534; }
+}
+
+.pcs-message-label {
+  display: block;
+  font-size: .85rem;
+  color: #374151;
+  margin-bottom: .6rem;
+
+  textarea {
+    display: block;
+    width: 100%;
+    margin-top: .4rem;
+    padding: .6rem;
+    border-radius: 8px;
+    border: 1px solid #d1d5db;
+    font-family: inherit;
+    font-size: .9rem;
+    resize: vertical;
+  }
+}
+
+.pcs-panel {
+  .btn-primary.sm, .btn-secondary.sm {
+    font-size: .82rem;
+    padding: .4rem .8rem;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+  }
+  .btn-primary.sm { background: #2563eb; color: #fff; }
+  .btn-primary.sm:disabled { opacity: .6; cursor: not-allowed; }
+  .btn-secondary.sm { background: #f9fafb; color: #374151; border: 1px solid #d1d5db; margin-left: auto; }
+}
+
 .step-panel {
   background: #fff;
   border: 1px solid #e5e7eb;

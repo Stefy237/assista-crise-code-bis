@@ -8,6 +8,7 @@ import { UserRole } from '../../../shared/models/user.model';
 import { LocationService, Department, Commune } from '../../../services/location.service';
 import { InstitutionTypeService } from '../../../services/institution-type.service';
 import { InstitutionType } from '../../../shared/models/institution.model';
+import { BrandingService, Branding } from '../../../services/branding.service';
 
 @Component({
   selector: 'app-register',
@@ -54,12 +55,19 @@ export class RegisterComponent implements OnInit, OnDestroy {
   // ce sélecteur générique (voir toggleFieldsBasedOnUserType/onSubmit).
   institutionTypeOptions: InstitutionType[] = [];
 
+  // Case "Je souhaite rejoindre la réserve" (voir User.souhaite_rejoindre_reserve) : affichée
+  // uniquement quand le Host visité résout vers une institution marque blanche avec sa propre
+  // réserve (Institution.reserve_active) -- invisible sur le site généraliste
+  // assista-crise.fr, où `branding` reste les valeurs par défaut (reserve_active=false).
+  branding: Branding | null = null;
+
   constructor(
     private formBuilder: FormBuilder,
     private authService: AuthService,
     private router: Router,
     private locationService: LocationService,
-    private institutionTypeService: InstitutionTypeService
+    private institutionTypeService: InstitutionTypeService,
+    private brandingService: BrandingService,
   ) {}
 
   ngOnInit(): void {
@@ -67,6 +75,7 @@ export class RegisterComponent implements OnInit, OnDestroy {
     this.setupUserTypeListener();
     this.loadDepartments();
     this.loadInstitutionTypes();
+    this.brandingService.branding$.subscribe(b => this.branding = b);
   }
 
   private loadInstitutionTypes(): void {
@@ -114,6 +123,7 @@ export class RegisterComponent implements OnInit, OnDestroy {
       // toggleFieldsBasedOnUserType). Mutuellement exclusives.
       isAasc: [false],
       isRcsc: [false],
+      souhaiteRejoindreReserve: [false],
       acceptTerms: [false, Validators.requiredTrue]
     });
   }
@@ -304,6 +314,14 @@ export class RegisterComponent implements OnInit, OnDestroy {
       enabled: !requiresValidation
     };
 
+    // Uniquement envoyé quand la case est réellement affichée (particulier + branding réserve
+    // active) -- même si un payload falsifié la cochait ailleurs, RegisterView.perform_create
+    // revérifie côté serveur que le Host résout vers une institution reserve_active=True avant
+    // d'en tenir compte (voir son commentaire).
+    if (userType === UserRole.SIMPLE_USER && this.branding?.reserve_active && formValue.souhaiteRejoindreReserve) {
+      registerData.souhaite_rejoindre_reserve = true;
+    }
+
     if (formValue.userType !== UserRole.SIMPLE_USER) {
       registerData.institution_name = effectiveInstitutionName;
       registerData.institution_type = effectiveInstitutionType;
@@ -404,5 +422,9 @@ export class RegisterComponent implements OnInit, OnDestroy {
 
   get isIndividual(): boolean {
     return this.registerForm.get('userType')?.value === UserRole.SIMPLE_USER;
+  }
+
+  get afficherCaseReserve(): boolean {
+    return this.isIndividual && !!this.branding?.reserve_active;
   }
 }

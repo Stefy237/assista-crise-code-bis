@@ -13,6 +13,8 @@ import { RoleOperationnelService } from '../../services/role-operationnel.servic
 import { BesoinService } from '../../services/besoin.service';
 import { CompetenceService } from '../../services/competence.service';
 import { UserService } from '../../services/user.service';
+import { NotificationAlertePCSService } from '../../services/notification-alerte-pcs.service';
+import { NotificationAlertePCS } from '../../shared/models/notification-alerte-pcs.model';
 import { Crisis } from '../../shared/models/crisis.model';
 import { PointOperationnel, PointType } from '../../shared/models/point-operationnel.model';
 import { Team } from '../../shared/models/team.model';
@@ -139,11 +141,18 @@ export class CriseDemarrageComponent implements OnInit {
     private besoinService: BesoinService,
     private competenceService: CompetenceService,
     private userService: UserService,
+    private notificationAlertePCSService: NotificationAlertePCSService,
   ) {}
 
   ngOnInit(): void {
     this.criseId = this.route.snapshot.paramMap.get('id')!;
-    this.crisisService.getById(this.criseId).subscribe(c => (this.crise = c));
+    this.crisisService.getById(this.criseId).subscribe(c => {
+      this.crise = c;
+      if (!this.messagePCS) {
+        this.messagePCS = `La crise « ${c.name} » vient d'être déclarée, ce qui active le plan `
+          + `communal/intercommunal de sauvegarde. Merci de prendre contact avec la cellule de crise.`;
+      }
+    });
     this.crisisService.getCommune(this.criseId).subscribe({
       next: (res) => (this.criseCommuneCode = res.commune_code),
       error: () => {},
@@ -153,6 +162,82 @@ export class CriseDemarrageComponent implements OnInit {
     this.roleOperationnelService.getAll().subscribe(roles => (this.roles = roles));
     this.besoinService.getAll().subscribe(besoins => (this.besoins = besoins));
     this.competenceService.getAll().subscribe(competences => (this.competences = competences));
+    this.chargerNotificationsPCS();
+  }
+
+  // ══ Checklist d'alerte PCS/PICS (interlocuteurs à prévenir) ═══════════════
+  notificationsPCS: NotificationAlertePCS[] = [];
+  messagePCS = '';
+  selectionEnvoiPCS = new Set<string>();
+  envoiPCSEnCours = false;
+  erreurEnvoiPCS = '';
+
+  private chargerNotificationsPCS(): void {
+    this.notificationAlertePCSService.getForCrise(this.criseId).subscribe(notifs => {
+      this.notificationsPCS = notifs;
+      // Toutes les lignes envoyables (pas encore dans un état terminal) cochées par défaut.
+      this.selectionEnvoiPCS = new Set(this.notificationsAutoEnAttente.map(n => n.id));
+    });
+  }
+
+  get notificationsAuto(): NotificationAlertePCS[] {
+    return this.notificationsPCS.filter(n => n.canal_tente === 'EMAIL' || n.canal_tente === 'MATRIX');
+  }
+
+  get notificationsAutoEnAttente(): NotificationAlertePCS[] {
+    return this.notificationsAuto.filter(n => n.statut === 'EN_ATTENTE' || n.statut === 'ECHEC_AUTO');
+  }
+
+  get notificationsManuelles(): NotificationAlertePCS[] {
+    return this.notificationsPCS.filter(n => n.canal_tente !== 'EMAIL' && n.canal_tente !== 'MATRIX');
+  }
+
+  toggleSelectionEnvoiPCS(id: string): void {
+    if (this.selectionEnvoiPCS.has(id)) this.selectionEnvoiPCS.delete(id);
+    else this.selectionEnvoiPCS.add(id);
+  }
+
+  envoyerSelectionPCS(): void {
+    if (this.selectionEnvoiPCS.size === 0 || !this.messagePCS.trim()) return;
+    this.envoiPCSEnCours = true;
+    this.erreurEnvoiPCS = '';
+    this.notificationAlertePCSService.envoyerLot(this.criseId, Array.from(this.selectionEnvoiPCS), this.messagePCS.trim()).subscribe({
+      next: () => {
+        this.envoiPCSEnCours = false;
+        this.chargerNotificationsPCS();
+      },
+      error: () => {
+        this.envoiPCSEnCours = false;
+        this.erreurEnvoiPCS = "Échec de l'envoi — réessayez.";
+      },
+    });
+  }
+
+  confirmerNotificationPCS(notif: NotificationAlertePCS): void {
+    this.notificationAlertePCSService.confirmer(notif.id).subscribe(updated => {
+      this.notificationsPCS = this.notificationsPCS.map(n => (n.id === updated.id ? updated : n));
+    });
+  }
+
+  libelleStatutPCS(statut: string): string {
+    return {
+      EN_ATTENTE: 'En attente', ENVOYE_AUTO: 'Envoyé', ECHEC_AUTO: "Échec d'envoi",
+      CONFIRME_PAR_CONTACT: 'Confirmé par le contact', CONFIRME_MANUEL: 'Confirmé (manuel)',
+    }[statut] || statut;
+  }
+
+  classeStatutPCS(statut: string): string {
+    return {
+      EN_ATTENTE: 'statut-attente', ENVOYE_AUTO: 'statut-envoye', ECHEC_AUTO: 'statut-echec',
+      CONFIRME_PAR_CONTACT: 'statut-confirme', CONFIRME_MANUEL: 'statut-confirme',
+    }[statut] || '';
+  }
+
+  libelleReponseContactPCS(notif: NotificationAlertePCS): string {
+    if (!notif.reponse_contact) return '';
+    return {
+      PAS_DE_RAPPEL: 'Pas besoin de rappeler', MERCI_RAPPELER: 'Merci de rappeler', AUTRE: 'Autre',
+    }[notif.reponse_contact] || '';
   }
 
   /** Résout les membres candidats depuis l'institution RÉELLE de l'équipe tout juste créée
@@ -388,7 +473,7 @@ export class CriseDemarrageComponent implements OnInit {
       },
       error: () => {
         this.savingPlan = false;
-        this.planErrorMessage = "Impossible d'enregistrer ce dispositif. Réessayez depuis la page Plans.";
+        this.planErrorMessage = "Impossible d'enregistrer ce dispositif. Réessayez depuis la page Mon plan de sauvegarde.";
       },
     });
   }
