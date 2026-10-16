@@ -546,7 +546,10 @@
               <tbody>
                 @for (centre of centresTries; track centre.id) {
                   <tr>
-                    <td class="cell-nom">{{ centre.nom }}</td>
+                    <td class="cell-nom">
+                      {{ centre.nom }}
+                      @if (centre.accepte_animaux) { <span title="Accepte les animaux">🐾</span> }
+                    </td>
                     <td>{{ centre.adresse || '—' }}</td>
                     <td>{{ centre.distanceKm != null ? (centre.distanceKm + ' km') : '—' }}</td>
                     <td>{{ centre.capacite_accueil != null ? (centre.personnes_presentes + ' / ' + centre.capacite_accueil) : '—' }}</td>

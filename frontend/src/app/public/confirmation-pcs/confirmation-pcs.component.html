@@ -1,0 +1,57 @@
+<div class="confirmation-page">
+  <div class="confirmation-card">
+
+    @if (loading) {
+      <p class="state-message">Chargement…</p>
+    } @else if (notFound) {
+      <p class="state-message error">Ce lien n'est plus valide.</p>
+    } @else if (accuse) {
+      <h1>Alerte PCS/PICS</h1>
+      <p class="sub">
+        La commune de <strong>{{ accuse.institution_nom }}</strong> vous informe de l'activation
+        de son plan de sauvegarde pour la crise « <strong>{{ accuse.crise_nom }}</strong> »
+        @if (accuse.organisme) { (destinataire : {{ accuse.organisme }}) }.
+      </p>
+
+      @if (accuse.deja_confirme) {
+        <div class="statut-badge confirme">Réception déjà confirmée</div>
+        @if (accuse.reponse_contact) {
+          <p class="reponse-enregistree">
+            Votre réponse : <strong>{{
+              accuse.reponse_contact === 'MERCI_RAPPELER' ? 'Merci de me rappeler pour échanger sur la situation'
+              : accuse.reponse_contact === 'PAS_DE_RAPPEL' ? 'Pas besoin de me rappeler'
+              : 'Autre'
+            }}</strong>
+          </p>
+        }
+        @if (accuse.commentaire_contact) {
+          <p class="commentaire-enregistre">« {{ accuse.commentaire_contact }} »</p>
+        }
+      } @else {
+        <p class="instruction">Merci de confirmer que vous avez bien reçu cette alerte :</p>
+
+        <div class="actions">
+          <button type="button" class="btn-action" [disabled]="submitting" (click)="repondre('PAS_DE_RAPPEL')">
+            Pas besoin de me rappeler
+          </button>
+          <button type="button" class="btn-action primary" [disabled]="submitting" (click)="repondre('MERCI_RAPPELER')">
+            Merci de me rappeler pour échanger sur la situation
+          </button>
+        </div>
+
+        <label class="commentaire-label">
+          Commentaire (optionnel)
+          <textarea
+            [(ngModel)]="commentaire" rows="3"
+            placeholder="Une précision à transmettre à la mairie..."
+          ></textarea>
+        </label>
+
+        @if (errorMessage) {
+          <p class="state-message error">{{ errorMessage }}</p>
+        }
+      }
+    }
+
+  </div>
+</div>
