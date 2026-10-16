@@ -22,6 +22,25 @@ Testé pour de vrai contre `.113` le 2026-09-17 (voir le commit qui l'introduit)
 API fonctionne de bout en bout. **Non testé sur un vrai Raspberry Pi** — l'installation Docker
 et la détection série sont les points à vérifier en priorité au premier essai réel.
 
+#### Installer sans nœud MeshCore connecté (demande utilisateur du 16/10)
+
+À l'étape `demarrer`, la question "Connexion MeshCore" accepte un troisième choix, **AUCUN** —
+en plus de SERIE/TCP — pour installer sans nœud branché : `meshcore-proxy` est alors gardé à 0
+réplique (`docker compose up --scale meshcore-proxy=0`) plutôt que de planter au démarrage sur
+un `/dev/ttyUSB0` qui n'existe pas encore. Le reste du satellite (détection série en continu,
+assista-crise local en profil `full`, etc.) fonctionne normalement pendant ce temps.
+
+Une fois le nœud branché (le jour même ou bien plus tard, pas besoin de refaire l'enrôlement) :
+
+```bash
+./installer.sh connecter-noeud
+```
+
+Relance la détection ponctuelle (même outil que `detecter-noeud`), écrit le device et
+l'identifiant `CompagnonMeshCore` trouvés dans `.env`, puis recrée `meshcore-proxy` (qui
+démarre cette fois pour de vrai) et `appliquer-config-proxy` (pour qu'il reparte avec le bon
+`MESHCORE_COMPAGNON_ID`).
+
 ### Manuellement
 
 ```bash
@@ -40,7 +59,8 @@ administrateur valide → identifiants affichés **une seule fois**) — voir
 
 | Service | Profil | Rôle |
 |---|---|---|
-| `detecter-noeud` | outillage (un coup, pas en continu) | Détecte et différencie MeshCore/Meshtastic sur les devices série candidats, enregistre le nœud auprès du central. |
+| `detecter-noeud` | outillage (un coup, pas en continu) | Détecte et différencie MeshCore/Meshtastic sur les devices série candidats, enregistre le nœud auprès du central — pour un sondage manuel ponctuel. |
+| `surveiller-noeuds` | gw, full (en continu) | Équivalent automatique de `detecter-noeud` : relance le même sondage toutes les `INTERVALLE_DETECTION_SECONDES` (30s par défaut) — un nœud branché après coup est reconnu sans commande manuelle. |
 | `meshcore-proxy` | gw, full | Détient la connexion réelle au nœud MeshCore (USB/série ou TCP), s'annonce en mDNS sur le LAN — voir `meshcore-bridge/proxy.py`. |
 | `meshcore-bridge` | gw, full | Relaie les messages entre le proxy et `assista-crise.fr` (ou le central configuré). Bascule vers l'assista-crise local si le central passe hors-ligne (profil full, voir `meshcore-bridge/README.md`). |
 | `etat-connectivite` | gw, full | Vérifie périodiquement si le central répond, écrit l'état dans un volume partagé (`etat_connectivite.py`) — source de vérité unique pour tout futur composant qui en a besoin (bannière, écran de statut). |
@@ -108,6 +128,20 @@ docker compose --profile outillage run --rm detecter-noeud
 
 Si le central est injoignable au moment du sondage, la détection locale reste valable
 (persistée quand même) — seul l'enregistrement central est différé au prochain passage.
+
+**Détection automatique (ajouté le 15/10, demande utilisateur)** : les profils `gw`/`full`
+démarrent aussi `surveiller-noeuds`, le même script en boucle (`DETECTION_CONTINUE=true`, voir
+`detecter_noeud_serie.py:boucle`) — brancher un nœud après le démarrage du satellite suffit, il
+est reconnu et enregistré au prochain passage (30s par défaut,
+`INTERVALLE_DETECTION_SECONDES` dans `.env`), sans commande manuelle. `detecter-noeud` (profil
+`outillage`) reste disponible tel quel pour un sondage ponctuel immédiat (ex: juste après avoir
+branché, sans attendre le prochain passage de la boucle).
+
+⚠️ **Compromis sécurité assumé** : `detecter-noeud` n'était privilégié/`/dev` entier monté que
+le temps d'une seule commande — `surveiller-noeuds` garde ce même niveau d'accès **en
+permanence** (nécessaire : on ne sait jamais à l'avance sur quel device un nouveau nœud va
+apparaître). Choix délibéré (discuté le 15/10) plutôt qu'une règle udev hôte (qui aurait gardé
+l'accès ponctuel d'origine, mais plus complexe à installer et moins portable selon l'OS).
 
 ## `telecharger_tuiles.py`
 

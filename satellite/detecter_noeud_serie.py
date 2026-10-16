@@ -24,6 +24,7 @@ logger = logging.getLogger("detecter-noeud-serie")
 FICHIER_ETAT = os.environ.get("FICHIER_ETAT_NOEUD_SERIE", "/var/run/satellite/noeud_serie.json")
 MOTIFS_DEVICES = ["/dev/ttyUSB*", "/dev/ttyACM*"]
 TIMEOUT_SONDAGE_SECONDES = float(os.environ.get("TIMEOUT_SONDAGE_SECONDES", "5"))
+INTERVALLE_DETECTION_SECONDES = int(os.environ.get("INTERVALLE_DETECTION_SECONDES", "30"))
 
 
 def lister_devices_candidats():
@@ -207,14 +208,43 @@ async def decouvrir_identifier_et_enregistrer(central_url, email, password, fich
     return identite
 
 
+async def boucle(central_url=None, email=None, password=None, fichier_etat=None, client=None, une_seule_iteration=False):
+    """Surveillance continue (service "surveiller-noeuds", profils gw/full) : ré-exécute le
+    même enchaînement que l'exécution ponctuelle (profil "outillage", conservée telle quelle
+    pour un sondage manuel à la demande) à intervalle régulier — AUCUNE action humaine requise
+    après le branchement d'un nouveau nœud. La découverte reste bon marché quand une config
+    est déjà persistée (config_verifiee_ou_redecouverte ne re-sonde TOUS les devices candidats
+    que si le device persisté a disparu/ne répond plus, voir sa docstring) : cette boucle ne
+    fait donc pas un sondage complet à chaque itération dans le cas courant."""
+    while True:
+        if central_url and email and password:
+            resultat = await decouvrir_identifier_et_enregistrer(
+                central_url, email, password, fichier_etat=fichier_etat, client=client,
+            )
+        else:
+            resultat = await config_verifiee_ou_redecouverte(fichier_etat)
+        if une_seule_iteration:
+            return resultat
+        await asyncio.sleep(INTERVALLE_DETECTION_SECONDES)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     central_url = os.environ.get("CENTRAL_URL")
     email = os.environ.get("SATELLITE_EMAIL")
     password = os.environ.get("SATELLITE_PASSWORD")
-    if central_url and email and password:
-        resultat = asyncio.run(decouvrir_identifier_et_enregistrer(f"{central_url}/api", email, password))
-    else:
+    central_api = f"{central_url}/api" if central_url else None
+    if not (central_api and email and password):
         logger.warning("CENTRAL_URL/SATELLITE_EMAIL/SATELLITE_PASSWORD absents — détection locale seule, pas d'enregistrement.")
-        resultat = asyncio.run(config_verifiee_ou_redecouverte())
-    print(json.dumps(resultat) if resultat else "null")
+
+    if os.environ.get("DETECTION_CONTINUE", "false").lower() == "true":
+        # Service continu (surveiller-noeuds) : ne s'arrête jamais, pas de sortie JSON unique à
+        # produire — voir boucle() pour le détail de ce qui est journalisé à chaque passage.
+        asyncio.run(boucle(central_api, email, password))
+    else:
+        # Comportement historique, un seul passage (profil "outillage", sondage manuel ponctuel).
+        if central_api and email and password:
+            resultat = asyncio.run(decouvrir_identifier_et_enregistrer(central_api, email, password))
+        else:
+            resultat = asyncio.run(config_verifiee_ou_redecouverte())
+        print(json.dumps(resultat) if resultat else "null")

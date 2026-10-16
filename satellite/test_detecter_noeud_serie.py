@@ -204,3 +204,51 @@ async def test_decouvrir_identifier_et_enregistrer_ne_reappelle_pas_si_deja_enre
 
     assert resultat["compagnon_id"] == "deja-la"
     appel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_boucle_une_iteration_sans_identifiants_central_fait_juste_la_detection_locale(monkeypatch):
+    locale = AsyncMock(return_value={"device": "/dev/ttyUSB0", "protocole": "meshcore", "pubkey_hex": "abc"})
+    monkeypatch.setattr(dns, "config_verifiee_ou_redecouverte", locale)
+    centrale = AsyncMock()
+    monkeypatch.setattr(dns, "decouvrir_identifier_et_enregistrer", centrale)
+
+    resultat = await dns.boucle(une_seule_iteration=True)
+
+    assert resultat["device"] == "/dev/ttyUSB0"
+    locale.assert_called_once()
+    centrale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_boucle_une_iteration_avec_identifiants_tente_lenregistrement_central(monkeypatch):
+    centrale = AsyncMock(return_value={"device": "/dev/ttyUSB0", "protocole": "meshcore", "compagnon_id": "c1"})
+    monkeypatch.setattr(dns, "decouvrir_identifier_et_enregistrer", centrale)
+    locale = AsyncMock()
+    monkeypatch.setattr(dns, "config_verifiee_ou_redecouverte", locale)
+
+    resultat = await dns.boucle("https://assista-crise.fr/api", "x@x.fr", "pw", une_seule_iteration=True)
+
+    assert resultat["compagnon_id"] == "c1"
+    centrale.assert_called_once()
+    locale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_boucle_sans_une_seule_iteration_repasse_apres_le_sleep(monkeypatch):
+    # Vérifie que la boucle appelle bien asyncio.sleep entre deux passages (pas juste une seule
+    # fois) -- s'arrête au 2e passage en levant une exception depuis le mock de sleep, seul
+    # moyen de sortir d'un `while True` dans un test sans attendre pour de vrai.
+    appels = AsyncMock(side_effect=[
+        {"device": "/dev/ttyUSB0", "protocole": "meshcore"},
+        {"device": "/dev/ttyUSB0", "protocole": "meshcore"},
+    ])
+    monkeypatch.setattr(dns, "config_verifiee_ou_redecouverte", appels)
+    sleep_appele = AsyncMock(side_effect=[None, StopAsyncIteration])
+    monkeypatch.setattr(dns.asyncio, "sleep", sleep_appele)
+
+    with pytest.raises(StopAsyncIteration):
+        await dns.boucle()
+
+    assert appels.call_count == 2
+    assert sleep_appele.call_count == 2

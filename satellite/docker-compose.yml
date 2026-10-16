@@ -44,6 +44,33 @@ services:
     privileged: true
     profiles: ["outillage"]
 
+  # Équivalent continu de detecter-noeud ci-dessus (demande utilisateur du 15/10) : même image,
+  # même script (DETECTION_CONTINUE=true bascule detecter_noeud_serie.py en boucle, voir
+  # detecter_noeud_serie.py:boucle) -- un nœud fraîchement branché est reconnu sans commande
+  # manuelle, au prochain passage (INTERVALLE_DETECTION_SECONDES, 30s par défaut). Compromis
+  # sécurité assumé (discuté avec Sylvain le 15/10) : contrairement à detecter-noeud (accès
+  # privilégié/`/dev` entier le temps d'une seule commande), ce service tourne en continu avec
+  # ce même niveau d'accès -- même patron que etat-connectivite/appliquer-config-proxy
+  # ci-dessous, préféré à une règle udev (plus fidèle à l'accès ponctuel d'origine, mais plus
+  # complexe à installer et moins portable selon l'OS de l'hôte).
+  surveiller-noeuds:
+    build:
+      context: .
+      dockerfile: Dockerfile.detection
+    volumes:
+      - /dev:/dev
+      - etat_satellite:/var/run/satellite
+    environment:
+      - CENTRAL_URL=${CENTRAL_URL:-https://assista-crise.fr}
+      - SATELLITE_EMAIL=${SATELLITE_EMAIL}
+      - SATELLITE_PASSWORD=${SATELLITE_PASSWORD}
+      - DETECTION_CONTINUE=true
+      - INTERVALLE_DETECTION_SECONDES=${INTERVALLE_DETECTION_SECONDES:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    privileged: true
+    restart: unless-stopped
+    profiles: ["gw", "full"]
+
   # --- Commun aux deux profils ---
 
   meshcore-proxy:
