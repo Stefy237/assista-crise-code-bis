@@ -7,27 +7,46 @@ import { PlanMissionModeleService } from '../../../services/plan-mission-modele.
 import { ZoneService } from '../../../services/zone.service';
 import { TeamService } from '../../../services/team.service';
 import { PointOperationnelService } from '../../../services/point-operationnel.service';
+import { PointTypeService } from '../../../services/point-type.service';
 import { UserService } from '../../../services/user.service';
 import { AuthService } from '../../../auth/services/auth.service';
+import { RisqueMajeurTypeService, RisqueCommunalService } from '../../../services/risque-majeur.service';
+import { ContactInstitutionService } from '../../../services/contact-institution.service';
+import { InterlocuteurAlertePCSService } from '../../../services/interlocuteur-alerte-pcs.service';
+import { MaterielPointService } from '../../../services/materiel-point.service';
 import { Plan, PlanMissionModele } from '../../../shared/models/plan.model';
 import { Zone } from '../../../shared/models/zone.model';
-import { Team } from '../../../shared/models/team.model';
-import { PointOperationnel } from '../../../shared/models/point-operationnel.model';
+import { Team, teamDisplayName } from '../../../shared/models/team.model';
+import { PointOperationnel, PointType } from '../../../shared/models/point-operationnel.model';
 import { User } from '../../../shared/models/user.model';
+import { RisqueMajeurType, RisqueCommunal } from '../../../shared/models/risque-majeur.model';
+import { ContactInstitution } from '../../../shared/models/institution.model';
+import { InterlocuteurAlertePCS } from '../../../shared/models/interlocuteur-alerte-pcs.model';
+import { MaterielPoint } from '../../../shared/models/materiel-point.model';
+import { TagSearchInputComponent } from '../../../shared/components/common/tag-search-input/tag-search-input.component';
+import { PointModalComponent } from '../../crises/point-modal/point-modal.component';
+import { ZoneModalComponent } from '../../zones/zone-modal/zone-modal.component';
 
 /**
  * Créer/éditer un plan (dispositif pré-enregistré, voir Plan) : sélection par chip-toggle des
- * zones/équipes/points déjà existants de mon institution — même patron d'accumulation locale
- * puis submit unique que ZoneModalComponent (un plan en création n'a pas encore d'id).
+ * zones/équipes/points/risques/contacts/interlocuteurs déjà existants de mon institution — même
+ * patron d'accumulation locale puis submit unique que ZoneModalComponent (un plan en création
+ * n'a pas encore d'id). Risques et interlocuteurs PCS réutilisent le même patron "chercher ou
+ * créer" déjà en place dans la fiche Institution (onglets Mes risques/Annuaire PCS, voir
+ * institutions.component.ts) plutôt que de dupliquer cette logique -- les contacts internes, eux,
+ * ne se créent pas depuis ce flux (choisir un utilisateur + une fonction est un sous-flux à part
+ * entière, déjà couvert par l'onglet Contacts de la fiche Institution).
  */
 @Component({
   selector: 'app-plan-modal',
   standalone: true,
-  imports: [CommonModule, ReactiveFormsModule, FormsModule],
+  imports: [CommonModule, ReactiveFormsModule, FormsModule, TagSearchInputComponent, PointModalComponent, ZoneModalComponent],
   templateUrl: './plan-modal.component.html',
   styleUrl: './plan-modal.component.scss',
 })
 export class PlanModalComponent implements OnChanges {
+  teamDisplayName = teamDisplayName;
+
   @Input() plan: Plan | null = null; // null = création
 
   @Output() saved = new EventEmitter<Plan>();
@@ -38,10 +57,17 @@ export class PlanModalComponent implements OnChanges {
   teams: Team[] = [];
   points: PointOperationnel[] = [];
   users: User[] = [];
+  risquesCommunaux: RisqueCommunal[] = [];
+  contactsInstitution: ContactInstitution[] = [];
+  interlocuteursPCS: InterlocuteurAlertePCS[] = [];
+  pointTypes: PointType[] = [];
 
   selectedZoneIds: string[] = [];
   selectedTeamIds: string[] = [];
   selectedPointIds: string[] = [];
+  selectedRisqueIds: string[] = [];
+  selectedContactIds: string[] = [];
+  selectedInterlocuteurIds: string[] = [];
 
   saving = false;
   errorMessage = '';
@@ -66,8 +92,14 @@ export class PlanModalComponent implements OnChanges {
     private zoneService: ZoneService,
     private teamService: TeamService,
     private pointService: PointOperationnelService,
+    private pointTypeService: PointTypeService,
     private userService: UserService,
     private authService: AuthService,
+    private risqueMajeurTypeService: RisqueMajeurTypeService,
+    private risqueCommunalService: RisqueCommunalService,
+    private contactInstitutionService: ContactInstitutionService,
+    private interlocuteurAlertePCSService: InterlocuteurAlertePCSService,
+    private materielPointService: MaterielPointService,
   ) {
     this.buildForm();
     this.buildMissionForm();
@@ -78,6 +110,16 @@ export class PlanModalComponent implements OnChanges {
     });
     this.pointService.getMine().subscribe(points => this.points = points);
     this.userService.getAll().subscribe(users => this.users = users);
+    this.pointTypeService.getAll().subscribe(types => this.pointTypes = types);
+    if (this.myInstitutionId) {
+      this.risqueCommunalService.getForInstitution(this.myInstitutionId).subscribe(r => this.risquesCommunaux = r);
+      this.interlocuteurAlertePCSService.getForInstitution(this.myInstitutionId).subscribe(i => this.interlocuteursPCS = i);
+    }
+    this.contactInstitutionService.getAll().subscribe(contacts => {
+      this.contactsInstitution = this.myInstitutionId
+        ? contacts.filter(c => c.institution === this.myInstitutionId)
+        : contacts;
+    });
   }
 
   ngOnChanges(changes: SimpleChanges): void {
@@ -169,6 +211,9 @@ export class PlanModalComponent implements OnChanges {
     this.selectedZoneIds = [...(this.plan?.zones_ids ?? [])];
     this.selectedTeamIds = [...(this.plan?.equipes_ids ?? [])];
     this.selectedPointIds = [...(this.plan?.points_ids ?? [])];
+    this.selectedRisqueIds = [...(this.plan?.risques_ids ?? [])];
+    this.selectedContactIds = [...(this.plan?.contacts_internes_ids ?? [])];
+    this.selectedInterlocuteurIds = [...(this.plan?.interlocuteurs_ids ?? [])];
   }
 
   get isEdit(): boolean {
@@ -181,16 +226,217 @@ export class PlanModalComponent implements OnChanges {
       : [...this.selectedZoneIds, id];
   }
 
+  // ── Création d'une nouvelle zone directement depuis ce flux (demande utilisateur) ──────
+  // Réutilise app-zone-modal telle quelle (même composant que la page Zones), même patron que
+  // showPointModal/onPointCreated ci-dessous.
+  showZoneModal = false;
+
+  onZoneCreated(zone: Zone): void {
+    this.showZoneModal = false;
+    this.zones = [...this.zones, zone];
+    this.toggleZone(zone.id);
+  }
+
+  // ── Cellules standards PCS (raccourci, demande utilisateur du 12/10) ──────────────────
+  // Pas de gabarit de Team côté backend (Plan ne fait que référencer des équipes déjà
+  // existantes, jamais n'en crée -- voir PlanViewSet.activer) : simple raccourci qui crée 4
+  // équipes nommées comme les 4 cellules terrain d'un PCS type (COM/LOG/POP/SECU), reprises
+  // telles quelles dans la sélection ci-dessous une fois créées. Noms/missions croisés sur 3
+  // vrais PCS (Floirac/Saint-Sixt/Canet-de-Salars) -- une commune reste libre de les renommer
+  // ou de n'en garder que certaines, la structure variant fortement d'une commune à l'autre.
+  creantCellulesStandards = false;
+
+  private readonly CELLULES_STANDARDS: { name: string; description: string; color: string }[] = [
+    { name: 'Cellule communication', description: "Assurer la diffusion des informations officielles, l'accueil téléphonique et physique du public.", color: '#2563eb' },
+    { name: 'Cellule logistique', description: 'Mobiliser les moyens humains et matériels, organiser transport et évacuation.', color: '#d97706' },
+    { name: 'Cellule population', description: "Assurer l'assistance à la population évacuée : accueil, recensement, soutien.", color: '#16a34a' },
+    { name: 'Cellule sécurité', description: 'Participer au maintien de l\'ordre et à la protection des biens et des personnes sur le terrain.', color: '#dc2626' },
+  ];
+
+  creerCellulesStandards(): void {
+    const aCreer = this.CELLULES_STANDARDS.filter(c => !this.teams.some(t => t.name === c.name));
+    if (aCreer.length === 0) return;
+    this.creantCellulesStandards = true;
+    let restant = aCreer.length;
+    for (const cellule of aCreer) {
+      this.teamService.create(cellule).subscribe({
+        next: (created) => {
+          this.teams = [...this.teams, created];
+          if (created.id) this.toggleTeam(created.id);
+          if (--restant === 0) this.creantCellulesStandards = false;
+        },
+        error: () => { if (--restant === 0) this.creantCellulesStandards = false; },
+      });
+    }
+  }
+
   toggleTeam(id: string): void {
     this.selectedTeamIds = this.selectedTeamIds.includes(id)
       ? this.selectedTeamIds.filter(i => i !== id)
       : [...this.selectedTeamIds, id];
   }
 
+  // ── Création libre d'une équipe (demande utilisateur) ──────────────────────────────────
+  // Même formulaire que teams.component.ts (nom + responsable optionnel), sans y toucher --
+  // simple formulaire inline ici, même patron de recherche que missionReferentQuery/
+  // selectMissionReferent ci-dessus, dupliqué pour le responsable d'équipe.
+  showTeamForm = false;
+  teamNom = '';
+  teamLeaderId: string | null = null;
+  teamLeaderQuery = '';
+  showTeamLeaderResults = false;
+  teamSaving = false;
+  teamError = '';
+
+  get teamLeaderResults(): User[] {
+    const q = this.teamLeaderQuery.trim().toLowerCase();
+    if (!q) return [];
+    return this.users.filter(u =>
+      `${u.first_name} ${u.last_name}`.toLowerCase().includes(q) || u.username.toLowerCase().includes(q)
+    );
+  }
+
+  selectTeamLeader(user: User): void {
+    this.teamLeaderId = user.id;
+    this.teamLeaderQuery = `${user.first_name} ${user.last_name}`.trim() || user.username;
+    this.showTeamLeaderResults = false;
+  }
+
+  onTeamLeaderQueryChange(): void {
+    this.teamLeaderId = null;
+    this.showTeamLeaderResults = true;
+  }
+
+  hideTeamLeaderResultsDelayed(): void {
+    setTimeout(() => this.showTeamLeaderResults = false, 150);
+  }
+
+  creerEquipe(): void {
+    const nom = this.teamNom.trim();
+    if (!nom) return;
+    this.teamSaving = true;
+    this.teamError = '';
+    this.teamService.create({ name: nom, leader: this.teamLeaderId || undefined }).subscribe({
+      next: (created) => {
+        this.teamSaving = false;
+        this.teams = [...this.teams, created];
+        if (created.id) this.toggleTeam(created.id);
+        this.teamNom = '';
+        this.teamLeaderId = null;
+        this.teamLeaderQuery = '';
+        this.showTeamForm = false;
+      },
+      error: (err) => {
+        this.teamSaving = false;
+        this.teamError = err.error?.name?.[0] || err.error?.detail || "Impossible de créer cette équipe.";
+      },
+    });
+  }
+
   togglePoint(id: string): void {
     this.selectedPointIds = this.selectedPointIds.includes(id)
       ? this.selectedPointIds.filter(i => i !== id)
       : [...this.selectedPointIds, id];
+  }
+
+  // ── Création d'un nouveau point directement depuis ce flux (demande utilisateur) ──────
+  // Réutilise app-point-modal telle quelle (même composant que la vue crise/équipe), hors
+  // contexte de crise -- voir teams.component pour le même usage non-crise (crisisId=null,
+  // selectableInstitutions=[]).
+  showPointModal = false;
+
+  onPointCreated(point: PointOperationnel): void {
+    this.showPointModal = false;
+    this.points = [...this.points, point];
+    if (point.id) this.togglePoint(point.id);
+  }
+
+  // ── Stock de matériel d'un point sélectionné (visibilité, demande utilisateur) ─────────
+  // Chargé à la demande (jamais pour tous les points en même temps) pour ne pas multiplier les
+  // appels réseau -- un simple repli, pas une refonte de la gestion de stock elle-même.
+  expandedStockPointIds: string[] = [];
+  stocksParPoint: Record<string, MaterielPoint[]> = {};
+  stockLoadingPointId: string | null = null;
+
+  toggleStockVisibility(pointId: string, event: Event): void {
+    event.stopPropagation();
+    if (this.expandedStockPointIds.includes(pointId)) {
+      this.expandedStockPointIds = this.expandedStockPointIds.filter(id => id !== pointId);
+      return;
+    }
+    this.expandedStockPointIds = [...this.expandedStockPointIds, pointId];
+    if (this.stocksParPoint[pointId]) return;
+    this.stockLoadingPointId = pointId;
+    this.materielPointService.getByPoint(pointId).subscribe({
+      next: (stocks) => {
+        this.stocksParPoint = { ...this.stocksParPoint, [pointId]: stocks };
+        if (this.stockLoadingPointId === pointId) this.stockLoadingPointId = null;
+      },
+      error: () => { if (this.stockLoadingPointId === pointId) this.stockLoadingPointId = null; },
+    });
+  }
+
+  // ── Risques couverts : chercher/créer un type de risque, puis le déclarer pour mon
+  // institution si ce n'est pas déjà fait -- même patron exact que institutions.component.ts
+  // (onRisqueSelected), aucune duplication de logique métier, juste le même geste ici.
+  risqueSearchFn = (q: string) => this.risqueMajeurTypeService.search(q);
+  risqueCreateLabelFn = (value: string) => `Créer « ${value} » comme nouveau type de risque`;
+  risqueCreateFn = (nom: string) => this.risqueMajeurTypeService.create({ nom });
+
+  onRisqueSelected(item: RisqueMajeurType): void {
+    if (!this.myInstitutionId) return;
+    const existant = this.risquesCommunaux.find(r => r.risque_type === item.id);
+    if (existant) {
+      if (existant.id) this.toggleRisque(existant.id);
+      return;
+    }
+    this.risqueCommunalService.create({ institution: this.myInstitutionId, risque_type: item.id }).subscribe(created => {
+      this.risquesCommunaux = [...this.risquesCommunaux, created];
+      if (created.id) this.toggleRisque(created.id);
+    });
+  }
+
+  toggleRisque(id: string): void {
+    this.selectedRisqueIds = this.selectedRisqueIds.includes(id)
+      ? this.selectedRisqueIds.filter(i => i !== id)
+      : [...this.selectedRisqueIds, id];
+  }
+
+  // ── Contacts internes : sélection parmi l'existant uniquement (voir docstring de classe) ──
+  toggleContact(id: string): void {
+    this.selectedContactIds = this.selectedContactIds.includes(id)
+      ? this.selectedContactIds.filter(i => i !== id)
+      : [...this.selectedContactIds, id];
+  }
+
+  contactLabel(contact: ContactInstitution): string {
+    return contact.utilisateur_nom || contact.fonction || 'Contact';
+  }
+
+  // ── Interlocuteurs externes (annuaire PCS) : même patron "chercher ou créer" que
+  // institutions.component.ts (onglet Annuaire PCS) -- création rapide en mode TELEPHONE,
+  // complétée ensuite depuis cet onglet si besoin (email, mode d'alerte précis...).
+  interlocuteurPCSSearchFn = (q: string) => this.interlocuteurAlertePCSService.search(q);
+  interlocuteurPCSCreateLabelFn = (value: string) => `Créer « ${value} » comme nouvel interlocuteur`;
+  interlocuteurPCSCreateFn = (organisme: string) =>
+    this.interlocuteurAlertePCSService.create({ organisme, nom: organisme, categorie: 'AUTRE', mode_alerte: 'TELEPHONE' });
+
+  onInterlocuteurPCSSelected(item: InterlocuteurAlertePCS): void {
+    // Rattache systématiquement (no-op si déjà fait par interlocuteurPCSCreateFn) -- même
+    // patron que institutions.component.ts, couvre le cas "trouvé via recherche, pas encore
+    // rattaché à MON institution".
+    this.interlocuteurAlertePCSService.rattacher(item.id).subscribe(rattache => {
+      if (!this.interlocuteursPCS.some(i => i.id === rattache.id)) {
+        this.interlocuteursPCS = [...this.interlocuteursPCS, rattache];
+      }
+      this.toggleInterlocuteur(rattache.id);
+    });
+  }
+
+  toggleInterlocuteur(id: string): void {
+    this.selectedInterlocuteurIds = this.selectedInterlocuteurIds.includes(id)
+      ? this.selectedInterlocuteurIds.filter(i => i !== id)
+      : [...this.selectedInterlocuteurIds, id];
   }
 
   submit(): void {
@@ -206,6 +452,9 @@ export class PlanModalComponent implements OnChanges {
       zones_ids: this.selectedZoneIds,
       equipes_ids: this.selectedTeamIds,
       points_ids: this.selectedPointIds,
+      risques_ids: this.selectedRisqueIds,
+      contacts_internes_ids: this.selectedContactIds,
+      interlocuteurs_ids: this.selectedInterlocuteurIds,
     };
 
     this.saving = true;

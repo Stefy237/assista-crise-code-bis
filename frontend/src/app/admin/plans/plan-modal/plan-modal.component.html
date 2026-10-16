@@ -20,6 +20,9 @@
 
       <div class="form-group">
         <label>Zones couvertes</label>
+        <button type="button" class="btn-secondary sm" (click)="showZoneModal = true">
+          <span class="material-icons">layers</span> Nouvelle zone
+        </button>
         <div class="chip-list">
           @for (z of zones; track z.id) {
             <button type="button" class="chip-toggle" [class.selected]="selectedZoneIds.includes(z.id)" (click)="toggleZone(z.id)">
@@ -27,17 +30,77 @@
             </button>
           }
           @if (zones.length === 0) {
-            <span class="chip-empty">Aucune zone déclarée — voir la rubrique Zones.</span>
+            <span class="chip-empty">Aucune zone déclarée pour l'instant.</span>
           }
         </div>
       </div>
 
       <div class="form-group">
+        <label>Risques couverts</label>
+        <div class="chip-list">
+          @for (r of risquesCommunaux; track r.id) {
+            <button type="button" class="chip-toggle" [class.selected]="selectedRisqueIds.includes(r.id)" (click)="toggleRisque(r.id)">
+              {{ r.risque_nom }}
+            </button>
+          }
+          @if (risquesCommunaux.length === 0) {
+            <span class="chip-empty">Aucun risque déclaré pour l'instant.</span>
+          }
+        </div>
+        <app-tag-search-input
+          placeholder="Chercher ou déclarer un risque…"
+          [createLabelFn]="risqueCreateLabelFn"
+          emptyMessage="Aucun type de risque existant ne correspond."
+          [searchFn]="risqueSearchFn"
+          [createFn]="risqueCreateFn"
+          (itemSelected)="onRisqueSelected($event)">
+        </app-tag-search-input>
+      </div>
+
+      <div class="form-group">
         <label>Équipes du dispositif</label>
+        <div class="button-row">
+          <button type="button" class="btn-secondary sm" [disabled]="creantCellulesStandards" (click)="creerCellulesStandards()">
+            <span class="material-icons">groups</span> Créer les 4 cellules standards (COM/LOG/POP/SECU)
+          </button>
+          @if (!showTeamForm) {
+            <button type="button" class="btn-secondary sm" (click)="showTeamForm = true">
+              <span class="material-icons">add</span> Nouvelle équipe
+            </button>
+          }
+        </div>
+        @if (showTeamForm) {
+          <div class="inline-form">
+            <input type="text" placeholder="Nom de l'équipe *" [(ngModel)]="teamNom" [ngModelOptions]="{standalone: true}">
+            <div class="user-search">
+              <input
+                type="text"
+                placeholder="Responsable (optionnel)"
+                [(ngModel)]="teamLeaderQuery"
+                [ngModelOptions]="{standalone: true}"
+                (input)="onTeamLeaderQueryChange()"
+                (focus)="showTeamLeaderResults = true"
+                (blur)="hideTeamLeaderResultsDelayed()"
+              />
+              @if (showTeamLeaderResults && teamLeaderResults.length) {
+                <ul class="user-search-results">
+                  @for (u of teamLeaderResults; track u.id) {
+                    <li (mousedown)="selectTeamLeader(u)">{{ u.first_name }} {{ u.last_name }} ({{ u.username }})</li>
+                  }
+                </ul>
+              }
+            </div>
+            <button class="btn-primary sm" type="button" [disabled]="teamSaving || !teamNom.trim()" (click)="creerEquipe()">Créer</button>
+            <button class="btn-secondary sm" type="button" (click)="showTeamForm = false">Annuler</button>
+            @if (teamError) {
+              <div class="error-message">{{ teamError }}</div>
+            }
+          </div>
+        }
         <div class="chip-list">
           @for (t of teams; track t.id) {
             <button type="button" class="chip-toggle" [class.selected]="selectedTeamIds.includes(t.id!)" (click)="toggleTeam(t.id!)">
-              {{ t.name }}
+              {{ teamDisplayName(t) }}
             </button>
           }
           @if (teams.length === 0) {
@@ -48,16 +111,81 @@
 
       <div class="form-group">
         <label>Points de regroupement du dispositif</label>
-        <div class="chip-list">
+        <button type="button" class="btn-secondary sm" (click)="showPointModal = true">
+          <span class="material-icons">add_location_alt</span> Nouveau point
+        </button>
+        <div class="chip-list points-chip-list">
           @for (p of points; track p.id) {
-            <button type="button" class="chip-toggle" [class.selected]="selectedPointIds.includes(p.id)" (click)="togglePoint(p.id)">
-              {{ p.nom }}
-            </button>
+            <div class="point-chip-wrap">
+              <button type="button" class="chip-toggle" [class.selected]="selectedPointIds.includes(p.id)" (click)="togglePoint(p.id)">
+                {{ p.nom }}
+              </button>
+              @if (selectedPointIds.includes(p.id)) {
+                <button type="button" class="icon-btn sm" title="Voir le stock" (click)="toggleStockVisibility(p.id, $event)">
+                  <span class="material-icons">inventory_2</span>
+                </button>
+              }
+            </div>
+            @if (expandedStockPointIds.includes(p.id)) {
+              <div class="stock-panel">
+                @if (stockLoadingPointId === p.id) {
+                  <span class="field-hint">Chargement du stock…</span>
+                } @else if ((stocksParPoint[p.id] ?? []).length === 0) {
+                  <span class="field-hint">Aucun stock renseigné pour ce point.</span>
+                } @else {
+                  @for (s of stocksParPoint[p.id]; track s.id) {
+                    <span class="badge" [class.badge-low]="s.niveau_stock === 'NUL' || s.niveau_stock === 'FAIBLE'">
+                      {{ s.item_nom }} — {{ s.niveau_stock_libelle || s.niveau_stock }}
+                    </span>
+                  }
+                }
+              </div>
+            }
           }
           @if (points.length === 0) {
             <span class="chip-empty">Aucun point disponible.</span>
           }
         </div>
+      </div>
+
+      <div class="form-group">
+        <label>Contacts internes</label>
+        <p class="field-hint">
+          Gérez la liste de vos contacts depuis l'onglet Contacts de la fiche Institution — ici,
+          choisissez seulement ceux mobilisés sur ce dispositif.
+        </p>
+        <div class="chip-list">
+          @for (c of contactsInstitution; track c.id) {
+            <button type="button" class="chip-toggle" [class.selected]="c.id && selectedContactIds.includes(c.id)" (click)="c.id && toggleContact(c.id)">
+              {{ contactLabel(c) }}
+            </button>
+          }
+          @if (contactsInstitution.length === 0) {
+            <span class="chip-empty">Aucun contact déclaré pour l'instant.</span>
+          }
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Interlocuteurs externes (annuaire PCS)</label>
+        <div class="chip-list">
+          @for (i of interlocuteursPCS; track i.id) {
+            <button type="button" class="chip-toggle" [class.selected]="selectedInterlocuteurIds.includes(i.id)" (click)="toggleInterlocuteur(i.id)">
+              {{ i.nom || i.organisme }}
+            </button>
+          }
+          @if (interlocuteursPCS.length === 0) {
+            <span class="chip-empty">Aucun interlocuteur déclaré pour l'instant.</span>
+          }
+        </div>
+        <app-tag-search-input
+          placeholder="Chercher ou ajouter un interlocuteur (préfecture, SDIS, élu...)…"
+          [createLabelFn]="interlocuteurPCSCreateLabelFn"
+          emptyMessage="Aucun interlocuteur existant ne correspond."
+          [searchFn]="interlocuteurPCSSearchFn"
+          [createFn]="interlocuteurPCSCreateFn"
+          (itemSelected)="onInterlocuteurPCSSelected($event)">
+        </app-tag-search-input>
       </div>
 
       @if (errorMessage) {
@@ -114,7 +242,7 @@
             <select formControlName="equipe">
               <option [ngValue]="null">— Équipe —</option>
               @for (t of selectableTeamsForMission; track t.id) {
-                <option [ngValue]="t.id">{{ t.name }}</option>
+                <option [ngValue]="t.id">{{ teamDisplayName(t) }}</option>
               }
             </select>
             <input type="text" formControlName="titre" placeholder="Titre de la mission *">
@@ -150,4 +278,23 @@
     }
 
   </div>
+
+  @if (showPointModal) {
+    <app-point-modal
+      [crisisId]="null"
+      [pointTypes]="pointTypes"
+      [selectableInstitutions]="[]"
+      [point]="null"
+      (saved)="onPointCreated($event)"
+      (closed)="showPointModal = false">
+    </app-point-modal>
+  }
+
+  @if (showZoneModal) {
+    <app-zone-modal
+      [zone]="null"
+      (saved)="onZoneCreated($event)"
+      (closed)="showZoneModal = false">
+    </app-zone-modal>
+  }
 </div>

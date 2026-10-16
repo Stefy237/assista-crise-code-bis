@@ -65,7 +65,7 @@
               <div class="team-activation-row" [class.selected]="selectedTeamIds.includes(t.id!)">
                 <label class="checkbox-label">
                   <input type="checkbox" [checked]="selectedTeamIds.includes(t.id!)" (change)="toggleTeam(t.id!)">
-                  <span>{{ t.name }}</span>
+                  <span>{{ teamDisplayName(t) }}</span>
                 </label>
                 @if (selectedTeamIds.includes(t.id!)) {
                   <div class="theme-chip-list">

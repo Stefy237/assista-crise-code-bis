@@ -11,6 +11,12 @@ export interface Plan {
   equipes_noms: string[];
   points_ids: string[];
   points_noms: string[];
+  risques_ids: string[];
+  risques_noms: string[];
+  contacts_internes_ids: string[];
+  contacts_internes_noms: string[];
+  interlocuteurs_ids: string[];
+  interlocuteurs_noms: string[];
 }
 
 export interface PlanPayload {
@@ -20,6 +26,9 @@ export interface PlanPayload {
   zones_ids?: string[];
   equipes_ids?: string[];
   points_ids?: string[];
+  risques_ids?: string[];
+  contacts_internes_ids?: string[];
+  interlocuteurs_ids?: string[];
 }
 
 export interface PlanActivationEquipe {

@@ -9,7 +9,7 @@ import { TeamService } from '../../../services/team.service';
 import { BesoinService } from '../../../services/besoin.service';
 import { Plan, PlanActivationResult } from '../../../shared/models/plan.model';
 import { Crisis } from '../../../shared/models/crisis.model';
-import { Team } from '../../../shared/models/team.model';
+import { Team, teamDisplayName } from '../../../shared/models/team.model';
 import { Besoin } from '../../../shared/models/besoin.model';
 import { AddressResult } from '../../../shared/models/address-result.model';
 import { AddressPickerComponent } from '../../../shared/components/common/address-picker/address-picker.component';
@@ -29,6 +29,8 @@ import { PointPickerComponent } from '../../../shared/components/common/point-pi
   styleUrl: './plan-activation-modal.component.scss',
 })
 export class PlanActivationModalComponent implements OnInit {
+  teamDisplayName = teamDisplayName;
+
   @Input({ required: true }) plan!: Plan;
 
   @Output() activated = new EventEmitter<PlanActivationResult>();
