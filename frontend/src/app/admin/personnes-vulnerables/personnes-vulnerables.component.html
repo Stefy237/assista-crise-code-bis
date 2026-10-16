@@ -1,0 +1,85 @@
+<div class="vulnerables-page">
+
+  <header class="page-header">
+    <div class="header-left">
+      <h1><span class="material-icons">accessible</span> Personnes vulnérables</h1>
+      <p class="subtitle">{{ filteredPersonnes.length }} fiche{{ filteredPersonnes.length > 1 ? 's' : '' }}</p>
+    </div>
+    <button type="button" class="btn-primary" (click)="openCreateModal()">
+      <span class="material-icons">add</span> Nouvelle fiche
+    </button>
+  </header>
+
+  <p class="help-text">
+    <span class="material-icons">info</span>
+    Registre communal des personnes vulnérables (recensement PCS) — catégories fonctionnelles
+    uniquement (besoin d'assistance à l'évacuation, isolement...), jamais une donnée médicale.
+    Accès réservé à la RCSC/au responsable de la mairie, ou à une institution ayant reçu une
+    délégation explicite sur cette commune.
+  </p>
+
+  @if (errorMessage) {
+    <div class="toast toast-err"><span class="material-icons">error_outline</span> {{ errorMessage }}</div>
+  }
+
+  @if (isLoading) {
+    <div class="loading">Chargement...</div>
+  }
+
+  @if (!isLoading) {
+    <div class="toolbar">
+      <div class="search-box">
+        <span class="material-icons">search</span>
+        <input type="text" placeholder="Rechercher par nom ou adresse…" [(ngModel)]="searchQuery"/>
+      </div>
+    </div>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Nom</th>
+          <th>Adresse</th>
+          <th>Catégories</th>
+          <th>Statut</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (personne of filteredPersonnes; track personne.id) {
+          <tr (click)="openEditModal(personne)">
+            <td>{{ personne.prenom }} {{ personne.nom }}</td>
+            <td>{{ personne.adresse }}</td>
+            <td>
+              @for (cat of personne.categories_detail; track cat.id) {
+                <span class="badge">{{ cat.nom }}</span>
+              }
+            </td>
+            <td>
+              <span class="badge" [class.badge-ok]="personne.actif" [class.badge-off]="!personne.actif">
+                {{ personne.actif ? 'Active' : 'Radiée' }}
+              </span>
+            </td>
+            <td class="actions">
+              <button type="button" class="icon-btn" (click)="radierPersonne(personne, $event)" title="Radier">
+                <span class="material-icons">delete_outline</span>
+              </button>
+            </td>
+          </tr>
+        } @empty {
+          <tr>
+            <td colspan="5" class="empty">Aucune personne recensée pour l'instant.</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+
+  @if (modalOpen) {
+    <app-personne-vulnerable-modal
+      [personne]="editingPersonne"
+      (saved)="onSaved()"
+      (closed)="closeModal()">
+    </app-personne-vulnerable-modal>
+  }
+
+</div>

@@ -94,6 +94,24 @@ export const zonesGuard: CanActivateFn = (route, state) => {
   );
 };
 
+/** Registre des personnes vulnérables : basé sur `acces_registre_vulnerables`, calculé côté
+ * serveur (RCSC/RESPONSABLE désigné pour une mairie, délégation de compétence active sinon,
+ * voir UserSerializer.get_acces_registre_vulnerables) -- contrairement à
+ * isAutoriteLocaleCommunale (zonesGuard ci-dessus), cette règle n'est pas re-dérivable côté
+ * client (dépend de l'appartenance à une Team précise), d'où la lecture directe du champ. */
+export const vulnerabilitesGuard: CanActivateFn = (route, state) => {
+  const authService = inject(AuthService);
+  const router = inject(Router);
+
+  if (!authService.getToken()) {
+    return router.parseUrl('/accueil');
+  }
+  return authService.fetchMe().pipe(
+    map(() => authService.getCurrentUser()?.acces_registre_vulnerables ? true : router.parseUrl('/admin/acces-refuse')),
+    catchError(() => of(router.parseUrl('/admin/acces-refuse'))),
+  );
+};
+
 
 
 

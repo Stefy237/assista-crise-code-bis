@@ -22,6 +22,10 @@ export interface User {
   institution_type_code?: string | null; // Code type (MAIRIE/EPCI/SDIS/...) de l'institution active — voir AuthService.isAutoriteLocaleCommunale
 
   needs_institution_setup?: boolean;    // Compte Autorité locale activé mais pas encore rattaché à une institution
+  souhaite_rejoindre_reserve?: boolean; // Case cochée à l'inscription (voir register.component) — institutions marque blanche avec reserve_active
+  reserve_verifiee?: boolean;           // Lecture seule — bascule via UserViewSet.verifier_reserve (responsable de la réserve), jamais par l'utilisateur lui-même
+  reserve_a_verifier?: boolean;         // = souhaite_rejoindre_reserve && !reserve_verifiee (calculé côté backend) — pilote la bannière
+  acces_registre_vulnerables?: boolean; // Calculé côté backend (RCSC/RESPONSABLE pour une mairie, délégation active sinon) — pilote le menu/garde du registre des personnes vulnérables, jamais recalculé côté client
   ma_zone?: {
     niveau: string;
     nom: string | null;

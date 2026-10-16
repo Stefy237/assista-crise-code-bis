@@ -17,11 +17,21 @@ import {
 // arrière-plan, ne réveille jamais un onglet minimisé pour rien).
 const INTERVALLE_POLLING_NOTIFICATIONS_MS = 20_000;
 
+/** `permanent` : toujours visible en haut, jamais dans un cadre repliable (pages consultées au
+ * quotidien, replier ajouterait un clic à chaque connexion) -- les cinq autres valeurs
+ * correspondent aux cadres dépliables de `groupesNav` ci-dessous, dans cet ordre précis
+ * (demande utilisateur du 12/10, plusieurs allers-retours de reclassement) : une entrée reste
+ * groupée par UTILITÉ (à quel moment du cycle de vie d'une crise on s'en sert), pas par domaine
+ * technique -- sauf "Communications / Radio", seul regroupement transversal explicitement
+ * demandé (gérer l'infra radio est le même geste qu'on soit en préparation ou en crise). */
+type GroupeNavId = 'permanent' | 'crise' | 'post-critique' | 'preparation' | 'communications' | 'administration';
+
 interface NavItem {
   icon: string;
   label: string;
   route: string;
   active?: boolean;
+  groupe: GroupeNavId;
 }
 
 @Component({
@@ -46,115 +56,189 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
   // navigateur au tout premier chargement (rien de "nouveau" par rapport à... rien).
   private dernierResume: ResumeNotifications | null = null;
 
+  /** Ordre d'affichage des cadres dépliables -- voir docstring de GroupeNavId. */
+  readonly groupesNav: { id: GroupeNavId; label: string; icon: string }[] = [
+    { id: 'crise', label: 'Crise en cours', icon: 'emergency' },
+    { id: 'post-critique', label: 'Post-critique — gestion à long terme', icon: 'history' },
+    { id: 'preparation', label: 'Préparation', icon: 'event_available' },
+    { id: 'communications', label: 'Communications / Radio', icon: 'settings_input_antenna' },
+    { id: 'administration', label: 'Administration', icon: 'admin_panel_settings' },
+  ];
+
   navItems: NavItem[] = [
-    { icon: 'home', label: 'Accueil', route: '/admin/dashboard' },
+    { icon: 'home', label: 'Accueil', route: '/admin/dashboard', groupe: 'permanent' },
 
     // Placée haut dans le menu à dessein (demande utilisateur du 26/09) : page unique à 3
     // panneaux repliables (ressource/moyen/coordination) pensée comme l'outil quotidien d'une
     // cellule de crise, pas une page annexe.
-    { icon: 'dashboard_customize', label: 'Cellule de crise', route: '/admin/cellule-crise' },
+    { icon: 'dashboard_customize', label: 'Cellule de crise', route: '/admin/cellule-crise', groupe: 'permanent' },
 
-    { icon: 'flag', label: 'Signalements', route: '/admin/signalements' },
+    { icon: 'flag', label: 'Signalements', route: '/admin/signalements', groupe: 'crise' },
+
+    // Jamais ajoutée au menu jusqu'ici (même défaut que Missions/Companions Meshtastic
+    // ci-dessous) : page, route et service existaient déjà côté front/back, mais seul
+    // AdminSidebarComponent (orphelin, jamais instancié) la référençait -- inatteignable sans
+    // connaître son URL exacte.
+    { icon: 'verified_user', label: 'Sécurité', route: '/admin/declarations-securite', groupe: 'crise' },
 
     // Vue filtrée sur la commune de l'institution de l'utilisateur (typiquement une mairie) —
     // existait déjà côté route/composant/backend mais n'apparaissait dans AUCUN menu (seul
     // AdminSidebarComponent la référençait, un composant orphelin jamais instancié nulle part) :
-    // la page était donc inatteignable sans connaître son URL exacte.
-    { icon: 'location_city', label: 'Vue Ma Collectivité', route: '/admin/vue-mairie' },
+    // la page était donc inatteignable sans connaître son URL exacte. Permanente (demande
+    // utilisateur du 12/10) : une mairie la consulte en dehors de toute crise.
+    { icon: 'location_city', label: 'Vue Ma Collectivité', route: '/admin/vue-mairie', groupe: 'permanent' },
 
-    { icon: 'groups', label: 'Équipes', route: '/admin/equipes' },
+    // Préparation, pas Crise en cours (demande utilisateur du 12/10) : "tu la prépares, puis tu
+    // l'utilises, et si ça se passe bien tu la récupères pour la prochaine fois" -- même logique
+    // que "Mon plan de sauvegarde" (un roster réutilisable, pas un geste du jour J).
+    { icon: 'groups', label: 'Équipes', route: '/admin/equipes', groupe: 'preparation' },
 
     // Absente du menu jusqu'ici (page atteignable seulement en connaissant son URL exacte,
     // même défaut que 'Vue Ma Collectivité' ci-dessus) — c'est pourtant ici qu'on démarre/
     // clôture une mission (Team.mission_active), condition du suivi de position MeshCore.
-    { icon: 'flag_circle', label: 'Missions', route: '/admin/missions' },
+    { icon: 'flag_circle', label: 'Missions', route: '/admin/missions', groupe: 'crise' },
 
     // Route publique (hors /admin) volontairement : un chef d'équipe de terrain peut être un
     // simple citoyen (UTIL_SIMPLE), pas forcément un acteur institutionnel — contrairement au
     // reste de cette barre, cette rubrique reste visible/accessible même sans rôle effectif
-    // institutionnel (voir isNavItemVisible).
-    { icon: 'checklist', label: 'Mes interventions', route: '/mes-interventions' },
+    // institutionnel (voir isNavItemVisible). Permanente : usage quotidien d'un chef d'équipe.
+    { icon: 'checklist', label: 'Mes interventions', route: '/mes-interventions', groupe: 'permanent' },
 
-    { icon: 'apartment', label: 'Institutions', route: '/admin/institutions' },
+    { icon: 'apartment', label: 'Institutions', route: '/admin/institutions', groupe: 'administration' },
 
-    { icon: 'local_fire_department', label: 'Crises', route: '/admin/crises' },
+    { icon: 'local_fire_department', label: 'Crises', route: '/admin/crises', groupe: 'crise' },
 
-    { icon: 'home_work', label: 'Centres', route: '/admin/centres' },
+    { icon: 'home_work', label: 'Centres', route: '/admin/centres', groupe: 'crise' },
 
-    { icon: 'night_shelter', label: 'Logement intervenants', route: '/admin/logement-intervenants' },
+    // Post-critique (demande utilisateur du 12/10) : le relogement des intervenants déborde
+    // largement la phase aiguë d'une crise, c'est un suivi qui dure.
+    { icon: 'night_shelter', label: 'Logement intervenants', route: '/admin/logement-intervenants', groupe: 'post-critique' },
 
-    { icon: 'layers', label: 'Zones', route: '/admin/zones' },
+    { icon: 'layers', label: 'Zones', route: '/admin/zones', groupe: 'preparation' },
 
     // Outil de planification préventive pour les mairies (demande explicite du 29/09) --
     // visibilité restreinte comme Zones, voir isNavItemVisible.
-    { icon: 'water_drop', label: 'Simulation inondation', route: '/admin/simulation-inondation' },
+    { icon: 'water_drop', label: 'Simulation inondation', route: '/admin/simulation-inondation', groupe: 'preparation' },
 
     // Dispositif pré-enregistré (PCS) : équipes/points/zones préparés à l'avance, activables
     // en un geste sur une crise réelle — voir PlanViewSet.activer.
-    { icon: 'fact_check', label: 'Plans', route: '/admin/plans' },
+    { icon: 'fact_check', label: 'Mon plan de sauvegarde', route: '/admin/plans', groupe: 'preparation' },
 
-    { icon: 'category', label: 'Compétences', route: '/admin/competences' },
+    { icon: 'category', label: 'Compétences', route: '/admin/competences', groupe: 'preparation' },
 
-    { icon: 'playlist_add_check', label: 'Besoins', route: '/admin/besoins' },
+    // Registre communal des personnes vulnérables (recensement PCS) -- visibilité restreinte à
+    // la RCSC/au RESPONSABLE désigné d'une mairie, ou à une institution avec délégation de
+    // compétence active, voir isNavItemVisible et acces_registre_vulnerables (calculé côté
+    // serveur, core/vulnerabilites.py).
+    { icon: 'accessible', label: 'Personnes vulnérables', route: '/admin/personnes-vulnerables', groupe: 'preparation' },
 
-    { icon: 'inventory_2', label: 'Matériel', route: '/admin/materiel' },
+    // Administration (demande utilisateur du 12/10) : gestion du catalogue partagé, pas un
+    // geste du jour J d'une crise précise.
+    { icon: 'playlist_add_check', label: 'Besoins', route: '/admin/besoins', groupe: 'administration' },
 
-    { icon: 'groups', label: 'Ressources mobilisées', route: '/admin/ressources-mobilisees' },
+    { icon: 'inventory_2', label: 'Matériel', route: '/admin/materiel', groupe: 'administration' },
 
-    { icon: 'settings_input_antenna', label: 'Companions MeshCore (test)', route: '/admin/meshcore-companions' },
-    { icon: 'forum', label: 'Canaux MeshCore (test)', route: '/admin/meshcore-canaux' },
+    { icon: 'groups', label: 'Ressources mobilisées', route: '/admin/ressources-mobilisees', groupe: 'crise' },
+
+    // Communications / Radio (demande utilisateur du 12/10) : gérer l'infra radio est le même
+    // geste qu'on soit en préparation ou en pleine crise, d'où un cadre à part plutôt que
+    // d'éclater companions/canaux entre les autres groupes. Les canaux ici (chat généraliste
+    // public/privé) sont une communication HORS crise à proprement parler -- en crise, ce sont
+    // les canaux d'ÉQUIPE qui servent, rattachés à chaque équipe, pas cette page généraliste.
+    { icon: 'settings_input_antenna', label: 'Companions MeshCore (test)', route: '/admin/meshcore-companions', groupe: 'communications' },
+    { icon: 'forum', label: 'Canaux MeshCore (test)', route: '/admin/meshcore-canaux', groupe: 'communications' },
 
     // Jamais ajouté au menu jusqu'ici (même défaut que MeshCore avant correction) : page
     // atteignable seulement en connaissant son URL exacte.
-    { icon: 'settings_input_antenna', label: 'Companions Meshtastic (test)', route: '/admin/meshtastic-companions' },
-    { icon: 'forum', label: 'Canaux Meshtastic (test)', route: '/admin/meshtastic-canaux' },
+    { icon: 'settings_input_antenna', label: 'Companions Meshtastic (test)', route: '/admin/meshtastic-companions', groupe: 'communications' },
+    { icon: 'forum', label: 'Canaux Meshtastic (test)', route: '/admin/meshtastic-canaux', groupe: 'communications' },
 
     // Boîtiers Raspberry Pi déployés sur site — voir le cadrage "Chantier B" (plan).
-    { icon: 'router', label: 'Satellites', route: '/admin/satellites' },
-    { icon: 'visibility', label: 'Supervision PC Crise', route: '/admin/supervision-pc-crise' },
+    { icon: 'router', label: 'Satellites', route: '/admin/satellites', groupe: 'communications' },
 
-    { icon: 'campaign', label: 'Demandes de mobilisation', route: '/admin/demandes-mobilisation' },
-    { icon: 'sync_problem', label: 'Conflits de synchronisation', route: '/admin/conflits-synchronisation' },
+    { icon: 'visibility', label: 'Supervision PC Crise', route: '/admin/supervision-pc-crise', groupe: 'crise' },
 
-    { icon: 'link', label: 'Correspondances', route: '/admin/correspondances' },
+    { icon: 'campaign', label: 'Demandes de mobilisation', route: '/admin/demandes-mobilisation', groupe: 'crise' },
 
-    { icon: 'assignment', label: 'Affectations', route: '/admin/affectations' },
+    // Administration (demande utilisateur du 12/10) : suivi technique transversal, pas propre à
+    // une crise précise.
+    { icon: 'sync_problem', label: 'Conflits de synchronisation', route: '/admin/conflits-synchronisation', groupe: 'administration' },
 
-    { icon: 'folder', label: 'Dossiers', route: '/admin/dossiers' },
+    { icon: 'link', label: 'Correspondances', route: '/admin/correspondances', groupe: 'administration' },
 
-    { icon: 'search', label: 'Recherches de personnes', route: '/admin/recherches-personnes'},
+    { icon: 'assignment', label: 'Affectations', route: '/admin/affectations', groupe: 'crise' },
 
-    { icon: 'map', label: 'Carte', route: '/admin/carte' },
+    { icon: 'folder', label: 'Dossiers', route: '/admin/dossiers', groupe: 'crise' },
 
-    { icon: 'check_circle', label: 'Résultats', route: '/admin/resultats' },
+    { icon: 'search', label: 'Recherches de personnes', route: '/admin/recherches-personnes', groupe: 'crise' },
 
-    { icon: 'group', label: 'Utilisateurs', route: '/admin/utilisateurs' },
+    { icon: 'map', label: 'Carte', route: '/admin/carte', groupe: 'crise' },
 
-    { icon: 'fact_check', label: 'Main courante', route: '/admin/main-courante' },
+    // Page stub ("results works!") -- gardée dans le menu malgré tout (le site est encore en
+    // dev, demande utilisateur du 12/10), classée ici en pressentant un bilan post-crise.
+    { icon: 'check_circle', label: 'Résultats', route: '/admin/resultats', groupe: 'post-critique' },
+
+    { icon: 'group', label: 'Utilisateurs', route: '/admin/utilisateurs', groupe: 'administration' },
+
+    { icon: 'fact_check', label: 'Main courante', route: '/admin/main-courante', groupe: 'crise' },
 
     // Comptes Secours organisés en attente (auto-inscription bloquée jusqu'à décision d'un
     // admin ou de la mairie de leur territoire — voir accountValidationGuard) : réservé à ces
     // deux rôles, pas à tout institutionnel (un régulateur ou un autre Secours n'a rien à y
     // faire).
-    { icon: 'how_to_reg', label: 'Validations de comptes', route: '/admin/validations-comptes' },
+    { icon: 'how_to_reg', label: 'Validations de comptes', route: '/admin/validations-comptes', groupe: 'administration' },
 
     // Route publique (hors /admin) : un particulier atteint la carte/le formulaire de
     // rattachement par un lien direct, pas par ce menu (réservé au personnel institutionnel,
     // voir isNavItemVisible) -- les actions de gestion restent conditionnées côté backend
     // (Habitation.peut_gerer, HabitationViewSet).
-    { icon: 'home_repair_service', label: 'Référencement des dégâts', route: '/referencement-degats' },
+    { icon: 'home_repair_service', label: 'Référencement des dégâts', route: '/referencement-degats', groupe: 'post-critique' },
 
 ];
 
+  /** État replié/déplié de chaque cadre, par id -- juste une préférence d'affichage pour CE
+   * visiteur (voir artifact-capabilities, même principe appliqué ici au localStorage du
+   * navigateur), jamais rien à synchroniser côté serveur. "Crise en cours" déplié par défaut :
+   * le plus consulté au quotidien. */
+  groupesOuverts: Partial<Record<GroupeNavId, boolean>> = { crise: true };
 
-
+  private static readonly CLE_STOCKAGE_GROUPES = 'admin-sidebar-groupes-ouverts';
 
   constructor(
     private authService: AuthService,
     private notificationService: NotificationService,
     private router: Router,
     public suiviPosition: SuiviPositionPermanentService,
-  ) {}
+  ) {
+    try {
+      const sauvegarde = localStorage.getItem(AdminLayoutComponent.CLE_STOCKAGE_GROUPES);
+      if (sauvegarde) this.groupesOuverts = JSON.parse(sauvegarde);
+    } catch {
+      // localStorage indisponible (navigation privée, quota...) -- repli silencieux sur le
+      // défaut ("Crise en cours" déplié), jamais bloquant pour l'affichage du menu.
+    }
+  }
+
+  itemsDuGroupe(id: GroupeNavId): NavItem[] {
+    return this.navItems.filter(item => item.groupe === id && this.isNavItemVisible(item));
+  }
+
+  get itemsPermanents(): NavItem[] {
+    return this.itemsDuGroupe('permanent');
+  }
+
+  estGroupeOuvert(id: GroupeNavId): boolean {
+    return !!this.groupesOuverts[id];
+  }
+
+  toggleGroupe(id: GroupeNavId): void {
+    this.groupesOuverts = { ...this.groupesOuverts, [id]: !this.groupesOuverts[id] };
+    try {
+      localStorage.setItem(AdminLayoutComponent.CLE_STOCKAGE_GROUPES, JSON.stringify(this.groupesOuverts));
+    } catch {
+      // Pas grave : juste une préférence d'affichage non retenue d'une session à l'autre.
+    }
+  }
 
   /** Bascule le suivi de position permanent (voir SuiviPositionPermanentService) -- accord
    * navigateur demandé une seule fois, à la première activation. */
@@ -311,6 +395,11 @@ export class AdminLayoutComponent implements OnInit, OnDestroy {
     // Zones = découpage PCS/PICS, réservé aux mairies/EPCI (voir zonesGuard, qui protège
     // aussi l'accès direct par URL) — inutile de montrer une entrée qui mènerait à un refus.
     if (item.label === 'Zones' || item.label === 'Simulation inondation') return this.authService.isAutoriteLocaleCommunale();
+    // Registre des personnes vulnérables : contrairement à Zones (dérivable du type
+    // d'institution côté client), la règle RCSC/RESPONSABLE dépend de l'appartenance à une
+    // Team précise -- piloté par le champ calculé côté serveur, jamais recalculé ici (voir
+    // vulnerabilitesGuard, qui protège aussi l'accès direct par URL).
+    if (item.label === 'Personnes vulnérables') return !!this.authService.getCurrentUser()?.acces_registre_vulnerables;
     return this.isInstitutionalEffective;
   }
 

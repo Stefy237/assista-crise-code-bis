@@ -26,6 +26,10 @@ export class TeamService {
   delete(id: string):                      Observable<void>    { return this.http.delete<void>(`${this.url}/${id}/`); }
   /** POST /api/teams/<id>/reactiver/ — réactive une équipe désactivée (voir delete). */
   reactiver(id: string):                   Observable<Team>    { return this.http.post<Team>(`${this.url}/${id}/reactiver/`, {}); }
+
+  /** POST /api/teams/<id>/designer-rcsc/ — bascule est_equipe_rcsc (réservé à l'autorité locale
+   * de l'institution de l'équipe) -- voir TeamViewSet.designer_rcsc côté backend. */
+  designerRcsc(id: string):                Observable<Team>    { return this.http.post<Team>(`${this.url}/${id}/designer-rcsc/`, {}); }
   /** GET /api/teams/vue_mairie/ — équipes de toute la commune (toutes institutions). */
   vueMairie():                              Observable<Team[]>  { return this.http.get<Team[]>(`${this.url}/vue_mairie/`); }
   /** GET /api/teams/equipes-institution/ — équipes de la SEULE institution de l'appelant
