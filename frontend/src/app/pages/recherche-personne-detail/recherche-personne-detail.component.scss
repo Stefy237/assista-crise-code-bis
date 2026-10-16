@@ -289,3 +289,89 @@
   background: #1d4ed8;
 }
 
+// ══ Secteurs de recherche (méthode SAR) ══════════════════════
+
+.secteurs-section {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 1.5rem;
+  margin-top: 1.5rem;
+
+  h2 { margin: 0 0 .4rem; }
+}
+
+.secteurs-hint {
+  color: #64748b;
+  font-size: .9rem;
+  margin: 0 0 1rem;
+}
+
+.secteurs-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+
+  th, td {
+    text-align: left;
+    padding: .6rem .5rem;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  select { padding: .3rem .5rem; border-radius: 6px; border: 1px solid #cbd5e1; }
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  border: 1px solid #2563eb;
+  background: white;
+  color: #2563eb;
+  padding: .6rem 1.2rem;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+
+  &:hover { background: #eff6ff; }
+}
+
+.icon-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: .3rem;
+  border-radius: 6px;
+  color: #64748b;
+
+  &:hover { background: #f1f5f9; }
+  &.danger { color: #dc2626; }
+  &.danger:hover { background: #fef2f2; }
+}
+
+.secteur-form {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+
+  input, select {
+    padding: .6rem .75rem;
+    border-radius: 8px;
+    border: 1px solid #cbd5e1;
+  }
+
+  app-zone-map { display: block; height: 400px; border-radius: 8px; overflow: hidden; }
+}
+
+.secteur-form-actions {
+  display: flex;
+  gap: .75rem;
+}
+
+.error-message {
+  color: #dc2626;
+  margin: 0;
+}
+

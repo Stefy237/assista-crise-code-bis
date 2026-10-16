@@ -89,8 +89,9 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
     // — l'utilisateur l'active volontairement s'il en a besoin.
     benevolesPompiers: false,
     // Répéteurs MeshCore (voir doc de conception « Maillage Terrain ») : infrastructure pure,
-    // peu nombreuse en pratique — visible par défaut, contrairement à l'annuaire bénévoles.
-    relaisMeshCore: true,
+    // mais décoché par défaut (demande utilisateur du 10/10) -- l'utilisateur l'active
+    // volontairement s'il en a besoin, même logique que l'annuaire bénévoles.
+    relaisMeshCore: false,
     // Companions MeshCore (poste de commandement, véhicule...) : position saisie manuellement,
     // optionnelle — visible par défaut comme les relais.
     compagnonsMeshCore: true,
@@ -165,7 +166,8 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
     // aux deux calques ci-dessus), voir PointOperationnelViewSet.carte_publique.
     this.loadCentresPublics();
     if (this.isInstitutional) {
-      this.loadRelaisMeshCore();
+      // Relais MeshCore : PAS chargé ici, voir onLayerToggle()/loadRelaisMeshCore -- à la
+      // demande seulement, même logique que l'annuaire bénévoles.
       this.loadCompagnonsMeshCore();
       this.loadNoeudsMeshCore();
       this.loadNoeudsMeshtastic();
@@ -174,12 +176,19 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
 
   /** Appelé par les checkbox du panneau de calques (voir template) : ré-applique la
    * visibilité sur les couches déjà ajoutées à la carte, sans jamais recharger les données —
-   * sauf l'annuaire bénévoles/pompiers, chargé à la demande à la première activation (voir
-   * ngOnInit et loadBenevolesPompiers). */
+   * sauf l'annuaire bénévoles/pompiers et les relais MeshCore, chargés à la demande à la
+   * première activation (voir ngOnInit, loadBenevolesPompiers et loadRelaisMeshCore).
+   * Décoché par défaut ET non chargé tant que l'utilisateur ne l'a pas demandé : la position
+   * d'un relais n'a pas besoin de transiter jusqu'au navigateur de quelqu'un qui n'ouvre jamais
+   * ce calque (demande utilisateur du 10/10, souci de minimisation des données de position). */
   onLayerToggle(): void {
     if (this.layerVisibility.benevolesPompiers && !this.benevolesPompiersCharges) {
       this.benevolesPompiersCharges = true;
       this.loadBenevolesPompiers();
+    }
+    if (this.layerVisibility.relaisMeshCore && !this.relaisMeshCoreCharges) {
+      this.relaisMeshCoreCharges = true;
+      this.loadRelaisMeshCore();
     }
     this.applyClusterVisibility();
     this.applyLayerVisibility('team-positions-layer', this.layerVisibility.positions);
@@ -408,6 +417,7 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
   // ~1300 fiches pour une institution à secteur région, coûteux à charger pour rien tant que
   // l'utilisateur n'a jamais coché la case.
   private benevolesPompiersCharges = false;
+  private relaisMeshCoreCharges = false;
 
   loadBenevolesPompiers(): void {
     this.offerService.vueSecteur().subscribe({
@@ -670,13 +680,25 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
           features: positions.map(p => ({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [Number(p.longitude), Number(p.latitude)] },
-            properties: { nom: p.utilisateur_nom || p.nom_noeud },
+            properties: {
+              nom: p.utilisateur_nom || p.nom_noeud,
+              batterie: this.libelleBatterie(p.tension_batterie_v, p.niveau_batterie_pct),
+            },
           })),
         };
         this.runWhenMapReady(() => this.addOrUpdateNoeudsMeshCoreLayer());
       },
       error: (err) => console.error('Erreur chargement nœuds MeshCore:', err),
     });
+  }
+
+  /** Formatte la télémétrie batterie pour une popup de carte -- chaîne vide si aucune des deux
+   * valeurs n'est connue (voir docstring de PositionNoeudMission.tension_batterie_v). */
+  private libelleBatterie(tensionV: number | null, niveauPct: number | null): string {
+    const morceaux: string[] = [];
+    if (niveauPct != null) morceaux.push(`${niveauPct}%`);
+    if (tensionV != null) morceaux.push(`${tensionV.toFixed(2)} V`);
+    return morceaux.join(' · ');
   }
 
   private addOrUpdateNoeudsMeshCoreLayer(): void {
@@ -724,7 +746,10 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       const geometry = e.features[0].geometry as GeoJSON.Point;
       const coordinates = geometry.coordinates.slice() as [number, number];
       const nom = e.features[0].properties?.['nom'] || 'Nœud';
-      new maplibregl.Popup().setLngLat(coordinates).setHTML(`<strong>${nom}</strong><br>Nœud MeshCore personnel`).addTo(this.map!);
+      const batterie = e.features[0].properties?.['batterie'];
+      new maplibregl.Popup().setLngLat(coordinates).setHTML(
+        `<strong>${nom}</strong><br>Nœud MeshCore personnel${batterie ? `<br>Batterie : ${batterie}` : ''}`
+      ).addTo(this.map!);
     });
     this.map.on('mouseenter', 'noeuds-meshcore-layer', () => { this.map!.getCanvas().style.cursor = 'pointer'; });
     this.map.on('mouseleave', 'noeuds-meshcore-layer', () => { this.map!.getCanvas().style.cursor = ''; });
@@ -964,7 +989,7 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       const props = e.features[0].properties || {};
       new maplibregl.Popup()
         .setLngLat(coordinates)
-        .setHTML(`<strong>${props['nom'] || 'Centre'}</strong><br>${props['type_libelle'] || ''}`)
+        .setHTML(`<strong>${props['nom'] || 'Centre'}</strong><br>${props['type_libelle'] || ''}${props['accepte_animaux'] ? '<br>🐾 Animaux acceptés' : ''}`)
         .addTo(this.map!);
     });
     this.map.on('mouseenter', layerId, () => { this.map!.getCanvas().style.cursor = 'pointer'; });

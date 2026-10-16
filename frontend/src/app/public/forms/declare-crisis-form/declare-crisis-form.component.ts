@@ -292,6 +292,13 @@ export class DeclareCrisisFormComponent implements OnInit{
 
           if (err.status === 401) {
             errorMessage = 'Vous devez être connecté en tant qu\'administrateur ou autorité locale pour déclarer une crise.';
+          } else if (err.status === 400 && err.error?.onboarding) {
+            // Rattachement à l'institution pas encore finalisé (voir
+            // _verifier_onboarding_termine côté backend) — redirige directement plutôt que de
+            // laisser l'utilisateur sur un formulaire qu'il ne pourra pas soumettre.
+            alert(err.error.onboarding);
+            this.router.navigate(['/completer-inscription']);
+            return;
           } else if (err.status === 403) {
             errorMessage = 'Vous n\'avez pas les permissions nécessaires pour déclarer une crise.';
           } else if (err.status === 400 && err.error) {

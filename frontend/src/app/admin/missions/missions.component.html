@@ -205,7 +205,7 @@
                   <div class="team-card">
                     <div class="team-card-header">
                       <span class="team-dot" [style.background]="team.color"></span>
-                      <strong>{{ team.name }}</strong>
+                      <strong>{{ teamDisplayName(team) }}</strong>
                     </div>
                     <p class="team-card-meta">{{ team.member_ids.length }} membre{{ team.member_ids.length > 1 ? 's' : '' }} · {{ teamZoneSummary(team) }}</p>
                   </div>

@@ -10,7 +10,7 @@ import { DossierService } from '../../services/dossier.service';
 import { NoeudMeshUtilisateurService } from '../../services/noeud-mesh-utilisateur.service';
 
 import { Mission } from '../../shared/models/mission.model';
-import { Team } from '../../shared/models/team.model';
+import { Team, teamDisplayName } from '../../shared/models/team.model';
 import { Crisis } from '../../shared/models/crisis.model';
 import { Dossier } from '../../shared/models/dossier.model';
 import { PositionNoeudMission } from '../../shared/models/position-noeud-mission.model';
@@ -28,6 +28,8 @@ type FilterStatut = Mission['statut'] | 'ALL';
   styleUrls: ['./missions.component.scss'],
 })
 export class MissionsComponent implements OnInit {
+
+  teamDisplayName = teamDisplayName;
 
   missions: Mission[] = [];
   teams: Team[] = [];
@@ -148,7 +150,8 @@ export class MissionsComponent implements OnInit {
   }
 
   teamName(id: string): string {
-    return this.teams.find(t => t.id === id)?.name ?? id.slice(0, 8);
+    const team = this.teams.find(t => t.id === id);
+    return team ? teamDisplayName(team) : id.slice(0, 8);
   }
 
   dossiersForMission(missionId: string): Dossier[] {

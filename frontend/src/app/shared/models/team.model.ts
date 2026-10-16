@@ -62,6 +62,8 @@ export interface Team {
   institution_delegataire_nom?: string | null;
   equipe_parente?:              string | null; // UUID de l'équipe de tête à laquelle celle-ci est rattachée comme ressource (lecture seule, voir TeamService.rattacherEquipe/detacherEquipe)
   equipe_parente_nom?:          string | null;
+  est_equipe_rcsc?:             boolean;       // Marque cette équipe comme LA RCSC de son institution (lecture seule, voir TeamService.designerRcsc) -- conditionne l'accès au registre des personnes vulnérables
+
   sous_equipes_info?:           { id: string; nom: string }[];
   canal_meshcore_id?:           string | null;
   canal_meshcore_nom?:          string | null;
@@ -92,4 +94,13 @@ export interface Team {
    * encore engagée. Manuel dans les deux sens, voir TeamService.demarrerEngagement/
    * mettreAuRepos. */
   engagement_debut?:    string | null;
+}
+
+/** Nom affiché d'une équipe, préfixé par son institution responsable (ex: "Mairie de Rion des
+ * Landes - Cellule population") -- à utiliser partout où des équipes de PLUSIEURS institutions
+ * peuvent apparaître ensemble (sélecteurs/listes/carte zone-filtrés, pas une fiche d'équipe ou
+ * un sélecteur déjà restreint à une seule institution, où le préfixe serait redondant).
+ * Demande utilisateur du 2026-10-15 : repérer vite qui est qui en environnement multi-entité. */
+export function teamDisplayName(team: Pick<Team, 'name' | 'institution_nom'>): string {
+  return team.institution_nom ? `${team.institution_nom} - ${team.name}` : team.name;
 }

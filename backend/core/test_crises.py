@@ -83,6 +83,28 @@ class TestCrisisCreationRestriction:
         crisis = Crisis.objects.get(id=response.data["id"])
         assert crisis.author == user
 
+    def test_local_authority_with_unfinished_onboarding_cannot_create_crisis(self, create_user):
+        """Reproduit l'incident Thierry Larrivière (15/10) : compte AUT_LOCALE activé mais dont
+        le rattachement institution (confirmer-institution/creer-mon-institution) n'est pas
+        encore passé -- pending_institution_name toujours renseigné, pas de ContactInstitution
+        actif. Doit être bloqué avant toute création (voir _verifier_onboarding_termine),
+        au lieu de laisser la crise se créer sans checklist PCS associable."""
+        user = create_user(
+            username="onboarding-en-cours@test.fr",
+            email="onboarding-en-cours@test.fr",
+            type="AUT_LOCALE",
+        )
+        user.pending_institution_name = "Mairie de Rion des Landes"
+        user.save(update_fields=["pending_institution_name"])
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post(reverse('crisis-list'), CRISIS_PAYLOAD, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "onboarding" in response.data
+        assert not Crisis.objects.exists()
+
     def test_crisis_zone_polygon_round_trips_as_geojson(self, local_authority_client):
         """zone (WKT en écriture) doit ressortir en zone_geojson (GeoJSON natif) en lecture,
         sans dépendance de parsing WKT côté frontend."""
@@ -179,6 +201,7 @@ class TestImplicationInstitution:
     def test_implique_and_acteur_can_coexist(self, local_authority_client, institution):
         client, user = local_authority_client
         crisis = Crisis.objects.create(**CRISIS_PAYLOAD)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         client.post(
             reverse('implicationinstitution-list'),
@@ -187,7 +210,10 @@ class TestImplicationInstitution:
         )
         response = client.post(
             reverse('implicationinstitution-list'),
-            {"crise": str(crisis.id), "institution": str(institution.id), "type_implication": "ACTEUR"},
+            {
+                "crise": str(crisis.id), "institution": str(institution.id), "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
+            },
             format='json',
         )
 
@@ -242,6 +268,7 @@ class TestImplicationThemesEtResponsable:
     def test_declare_acteur_with_responsable_email_invites_new_user(self, local_authority_client, institution):
         client, _ = local_authority_client
         crisis = Crisis.objects.create(**CRISIS_PAYLOAD)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(
             reverse('implicationinstitution-list'),
@@ -249,13 +276,15 @@ class TestImplicationThemesEtResponsable:
                 "crise": str(crisis.id),
                 "institution": str(institution.id),
                 "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
                 "responsable_email": "nouveau-regulateur@test.fr",
             },
             format='json',
         )
 
         assert response.status_code == status.HTTP_201_CREATED
-        invited = User.objects.get(email="nouveau-regulateur@test.fr")
+        from core.crypto_fields import blind_index
+        invited = User.objects.get(email_bidx=blind_index("nouveau-regulateur@test.fr"))
         assert invited.type == UserRole.REGULATEUR
         assert invited.is_active is False
         assert invited.enabled is False
@@ -264,8 +293,12 @@ class TestImplicationThemesEtResponsable:
         implication = ImplicationInstitution.objects.get(id=response.data["id"])
         assert implication.responsable == invited
 
-        assert len(mail.outbox) == 1
-        assert invited.email in mail.outbox[0].to
+        # 2 emails désormais : l'invitation/activation du compte régulateur, et l'accès à la
+        # messagerie d'équipe envoyé la première fois qu'un membre rejoint l'équipe de son
+        # institution (voir grant_institution_and_demo_access/_envoyer_email_acces_messagerie_
+        # equipe, ajouté le 2026-10-08) -- les deux adressés au même nouvel invité.
+        assert len(mail.outbox) == 2
+        assert all(invited.email in email.to for email in mail.outbox)
 
     def test_designating_a_non_contact_as_responsable_attaches_and_promotes_them(
         self, local_authority_client, institution, create_user
@@ -275,6 +308,7 @@ class TestImplicationThemesEtResponsable:
         pour une institution à laquelle il n'appartient pas lui-même)."""
         client, _ = local_authority_client
         crisis = Crisis.objects.create(**CRISIS_PAYLOAD)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
         outsider = create_user(username="outsider@test.fr", email="outsider@test.fr", type="UTIL_SIMPLE")
 
         response = client.post(
@@ -283,6 +317,7 @@ class TestImplicationThemesEtResponsable:
                 "crise": str(crisis.id),
                 "institution": str(institution.id),
                 "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
                 "responsable": str(outsider.id),
             },
             format='json',
@@ -300,10 +335,14 @@ class TestImplicationThemesEtResponsable:
         l'implication de n'importe quelle institution, pas seulement la sienne."""
         client, _ = admin_client
         crisis = Crisis.objects.create(**CRISIS_PAYLOAD)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(
             reverse('implicationinstitution-list'),
-            {"crise": str(crisis.id), "institution": str(institution.id), "type_implication": "ACTEUR"},
+            {
+                "crise": str(crisis.id), "institution": str(institution.id), "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
+            },
             format='json',
         )
 

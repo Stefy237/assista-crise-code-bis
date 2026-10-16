@@ -10,7 +10,7 @@ import { TeamService } from '../../services/team.service';
 import { RequestService } from '../../services/request.service';
 import { InformationService } from '../../services/information.service';
 import { Dossier } from '../../shared/models/dossier.model';
-import { Team } from '../../shared/models/team.model';
+import { Team, teamDisplayName } from '../../shared/models/team.model';
 import { UserRole } from '../../shared/models/user.model';
 import { MinimapComponent } from '../../shared/components/common/minimap/minimap.component';
 
@@ -38,6 +38,8 @@ const STATUTS_MODIFIABLES = ['NOUVEAU', 'EN_ATTENTE_DISTRIBUTION', 'EN_ATTENTE_A
   styleUrls: ['./dossiers.component.scss']
 })
 export class DossiersComponent implements OnInit {
+
+  teamDisplayName = teamDisplayName;
 
   dossiers: Dossier[] = [];
   teams: Team[] = [];

@@ -234,5 +234,66 @@
 
   </div>
 
+  <div class="secteurs-section" *ngIf="peutGererSecteurs">
+
+    <h2>Secteurs de recherche</h2>
+    <p class="secteurs-hint">
+      Découpez la zone de recherche en secteurs et affectez-en un à chaque équipe pour suivre ce
+      qui a déjà été fouillé, plutôt que seulement où chaque équipe se trouve actuellement.
+    </p>
+
+    <table class="secteurs-table" *ngIf="secteurs.length > 0">
+      <thead>
+        <tr><th>Secteur</th><th>Équipe</th><th>Statut</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let secteur of secteurs">
+          <td>{{ secteur.nom }}</td>
+          <td>
+            <select [ngModel]="secteur.equipe" (ngModelChange)="changerEquipeSecteur(secteur, $event)">
+              <option [ngValue]="null">— Aucune —</option>
+              <option *ngFor="let equipe of equipes" [ngValue]="equipe.id">{{ teamDisplayName(equipe) }}</option>
+            </select>
+          </td>
+          <td>
+            <select [ngModel]="secteur.statut" (ngModelChange)="changerStatutSecteur(secteur, $event)">
+              <option value="A_FAIRE">À faire</option>
+              <option value="EN_COURS">En cours</option>
+              <option value="FOUILLE">Fouillé</option>
+            </select>
+          </td>
+          <td>
+            <button class="icon-btn danger" (click)="supprimerSecteur(secteur)" title="Supprimer">
+              <span class="material-icons">delete_outline</span>
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="empty-comments" *ngIf="secteurs.length === 0 && !ajoutSecteurOuvert">
+      Aucun secteur de recherche défini pour l'instant.
+    </p>
+
+    <button class="btn-secondary" *ngIf="!ajoutSecteurOuvert" (click)="ajoutSecteurOuvert = true">
+      <span class="material-icons">add</span> Ajouter un secteur
+    </button>
+
+    <div class="secteur-form" *ngIf="ajoutSecteurOuvert">
+      <input type="text" [(ngModel)]="nouveauSecteurNom" placeholder="Nom du secteur (ex: Secteur Nord)">
+      <select [(ngModel)]="nouveauSecteurEquipeId">
+        <option value="">— Équipe (optionnel) —</option>
+        <option *ngFor="let equipe of equipes" [value]="equipe.id">{{ teamDisplayName(equipe) }}</option>
+      </select>
+      <p class="secteurs-hint">Dessinez le contour du secteur sur la carte (clic pour poser chaque point, double-clic pour terminer).</p>
+      <app-zone-map (zoneChange)="onNouveauSecteurZoneChange($event)"></app-zone-map>
+      <p class="error-message" *ngIf="secteurErreur">{{ secteurErreur }}</p>
+      <div class="secteur-form-actions">
+        <button class="btn-primary" [disabled]="creatingSecteur" (click)="creerSecteur()">Enregistrer le secteur</button>
+        <button class="btn-secondary" (click)="ajoutSecteurOuvert = false">Annuler</button>
+      </div>
+    </div>
+
+  </div>
+
 </div>
 

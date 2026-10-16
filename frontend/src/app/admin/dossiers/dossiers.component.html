@@ -138,7 +138,7 @@
             (ngModelChange)="affecterEquipe($event)"
             [disabled]="savingEquipe">
             <option [ngValue]="null" disabled>— Aucune équipe —</option>
-            <option *ngFor="let t of teams" [ngValue]="t.id">{{ t.name }}</option>
+            <option *ngFor="let t of teams" [ngValue]="t.id">{{ teamDisplayName(t) }}</option>
           </select>
         </ng-container>
       </div>

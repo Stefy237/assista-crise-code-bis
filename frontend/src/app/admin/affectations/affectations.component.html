@@ -21,7 +21,7 @@
     </select>
     <select formControlName="equipe">
       <option [ngValue]="null">— Équipe —</option>
-      <option *ngFor="let t of teams" [ngValue]="t.id">{{ t.name }}</option>
+      <option *ngFor="let t of teams" [ngValue]="t.id">{{ teamDisplayName(t) }}</option>
     </select>
     <input type="text" formControlName="commentaire" placeholder="Commentaire (optionnel)"/>
     <label class="checkbox-row"><input type="checkbox" formControlName="active"/> Active</label>

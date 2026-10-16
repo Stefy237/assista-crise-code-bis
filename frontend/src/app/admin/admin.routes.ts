@@ -4,6 +4,7 @@ import { CentresComponent } from './centres/centres.component';
 import { LogementIntervenantsComponent } from './logement-intervenants/logement-intervenants.component';
 import { StocksComparaisonComponent } from './stocks-comparaison/stocks-comparaison.component';
 import { ZonesComponent } from './zones/zones.component';
+import { PersonnesVulnerablesComponent } from './personnes-vulnerables/personnes-vulnerables.component';
 import { SimulationInondationComponent } from './simulation-inondation/simulation-inondation.component';
 import { PlansComponent } from './plans/plans.component';
 import { Routes } from '@angular/router';
@@ -15,7 +16,7 @@ import { MapComponent } from '../shared/components/common/map/map.component';
 import { ResultsComponent } from './results/results.component';
 import { UsersComponent } from './users/users.component';
 import { AuditLogsComponent } from './audit-logs/audit-logs.component';
-import { sysAdminGuard, institutionalEffectiveGuard, accountValidationGuard, zonesGuard } from '../core/guards/admin.guard';
+import { sysAdminGuard, institutionalEffectiveGuard, accountValidationGuard, zonesGuard, vulnerabilitesGuard } from '../core/guards/admin.guard';
 import { AccesRefuseComponent } from './acces-refuse/acces-refuse.component';
 import { AccountValidationsComponent } from './account-validations/account-validations.component';
 import { CompetencesComponent } from './competences/competences.component';
@@ -25,6 +26,9 @@ import { MissionsComponent } from './missions/missions.component';
 import { VueMairieComponent } from './vue-mairie/vue-mairie.component';
 import { ImportPersonnelComponent } from './import-personnel/import-personnel.component';
 import { ImportInstitutionsComponent } from './import-institutions/import-institutions.component';
+import { ImportCorrespondantsPCSComponent } from './import-correspondants-pcs/import-correspondants-pcs.component';
+import { ImportInterlocuteursPCSComponent } from './import-interlocuteurs-pcs/import-interlocuteurs-pcs.component';
+import { ImportMaterielPointComponent } from './import-materiel-point/import-materiel-point.component';
 import { DeclarationsSecuriteComponent } from './declarations-securite/declarations-securite.component';
 import { BesoinsComponent } from './besoins/besoins.component';
 import { BesoinsCompetencesComponent } from './besoins-competences/besoins-competences.component';
@@ -54,6 +58,9 @@ export const ADMIN_ROUTES: Routes = [
   { path: 'vue-mairie', component: VueMairieComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'import-personnel', component: ImportPersonnelComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'import-institutions', component: ImportInstitutionsComponent, canActivate: [institutionalEffectiveGuard] },
+  { path: 'import-correspondants-pcs', component: ImportCorrespondantsPCSComponent, canActivate: [institutionalEffectiveGuard] },
+  { path: 'import-interlocuteurs-pcs', component: ImportInterlocuteursPCSComponent, canActivate: [institutionalEffectiveGuard] },
+  { path: 'import-materiel-point', component: ImportMaterielPointComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'declarations-securite', component: DeclarationsSecuriteComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'equipes', component: TeamsComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'institutions', component: InstitutionsComponent, canActivate: [institutionalEffectiveGuard] },
@@ -71,6 +78,7 @@ export const ADMIN_ROUTES: Routes = [
   { path: 'centres', component: CentresComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'logement-intervenants', component: LogementIntervenantsComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'zones', component: ZonesComponent, canActivate: [institutionalEffectiveGuard, zonesGuard] },
+  { path: 'personnes-vulnerables', component: PersonnesVulnerablesComponent, canActivate: [institutionalEffectiveGuard, vulnerabilitesGuard] },
   { path: 'simulation-inondation', component: SimulationInondationComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'plans', component: PlansComponent, canActivate: [institutionalEffectiveGuard] },
   { path: 'carte', component: MapComponent, canActivate: [institutionalEffectiveGuard] },

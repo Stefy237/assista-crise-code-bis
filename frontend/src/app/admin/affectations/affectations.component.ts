@@ -11,7 +11,7 @@ import { TeamService } from '../../services/team.service';
 import { AffectationCompetence } from '../../shared/models/affectation-competence.model';
 import { Crisis } from '../../shared/models/crisis.model';
 import { Competence } from '../../shared/models/competence.model';
-import { Team } from '../../shared/models/team.model';
+import { Team, teamDisplayName } from '../../shared/models/team.model';
 
 @Component({
   selector: 'app-affectations',
@@ -21,6 +21,8 @@ import { Team } from '../../shared/models/team.model';
   styleUrls: ['./affectations.component.scss'],
 })
 export class AffectationsComponent implements OnInit {
+
+  teamDisplayName = teamDisplayName;
 
   affectations: AffectationCompetence[] = [];
   crises: Crisis[] = [];
