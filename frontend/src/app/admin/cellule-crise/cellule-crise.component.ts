@@ -10,7 +10,7 @@ import { Crisis } from '../../shared/models/crisis.model';
 import { CelluleCriseService } from '../../services/cellule-crise.service';
 import { CelluleCrise } from '../../shared/models/cellule-crise.model';
 import { TeamService } from '../../services/team.service';
-import { Team, MatrixMessage } from '../../shared/models/team.model';
+import { Team, MatrixMessage, teamDisplayName } from '../../shared/models/team.model';
 import { DossierService } from '../../services/dossier.service';
 import { Dossier } from '../../shared/models/dossier.model';
 import { RessourceMobilisee } from '../../shared/models/ressource-mobilisee.model';
@@ -49,6 +49,7 @@ interface EquipeAvecResume {
 })
 export class CelluleCriseComponent implements OnInit, OnDestroy {
   dureeDepuis = dureeDepuis;
+  teamDisplayName = teamDisplayName;
 
   crises: Crisis[] = [];
   criseId = '';
@@ -165,7 +166,7 @@ export class CelluleCriseComponent implements OnInit, OnDestroy {
     forkJoin(appels).subscribe(resultats => {
       resultats.forEach((res, i) => {
         res.messages.filter(m => m.urgent).forEach(m => {
-          this.messagesUrgents.push({ equipeNom: equipesDeLaCrise[i].name, message: m });
+          this.messagesUrgents.push({ equipeNom: teamDisplayName(equipesDeLaCrise[i]), message: m });
         });
       });
     });
@@ -258,11 +259,8 @@ export class CelluleCriseComponent implements OnInit, OnDestroy {
     this.offerService.getAll({ crisis: this.criseId, status: 'DISPONIBLE' }).subscribe({
       next: (offres) => {
         this.offresDisponibles = offres;
-        const idsOffres = new Set(offres.map(o => o.id));
-        // DisponibiliteOffreService n'a pas de filtre par crise côté backend -- on récupère
-        // tout puis on ne garde que les offres déjà scopées à cette crise ci-dessus.
-        this.disponibiliteOffreService.getAll().subscribe({
-          next: (dispos) => { this.disponibilites = dispos.filter(d => idsOffres.has(d.offer)); },
+        this.disponibiliteOffreService.getByOffers(offres.map(o => o.id)).subscribe({
+          next: (dispos) => { this.disponibilites = dispos; },
           error: () => {},
         });
       },

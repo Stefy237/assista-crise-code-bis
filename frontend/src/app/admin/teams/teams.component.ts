@@ -24,6 +24,7 @@ import { DossierHistoriqueService } from '../../services/dossier-historique.serv
 import { PointOperationnelService } from '../../services/point-operationnel.service';
 import { PointTypeService } from '../../services/point-type.service';
 import { MissionService } from '../../services/mission.service';
+import { AuthService } from '../../auth/services/auth.service';
 import { ZoneMapComponent } from '../../shared/components/common/zone-map/zone-map.component';
 import { MinimapComponent } from '../../shared/components/common/minimap/minimap.component';
 import { TagSearchInputComponent } from '../../shared/components/common/tag-search-input/tag-search-input.component';
@@ -123,6 +124,7 @@ export class TeamsComponent implements OnInit {
     private pointOperationnelService: PointOperationnelService,
     private pointTypeService: PointTypeService,
     private missionService: MissionService,
+    public authService: AuthService,
     private route: ActivatedRoute,
     private router: Router,
   ) {}
@@ -159,7 +161,6 @@ export class TeamsComponent implements OnInit {
       offers:   this.offerService.getAll({ exclude_type: 'Bénévolat' }),
       requests: this.requestService.getAll(),
       teams:    this.teamService.getAll(this.showDesactives),       // ← ajouté ici
-      disponibilites: this.disponibiliteOffreService.getAll(),
       dossiers: this.dossierService.getAll(),
       competences: this.competenceService.getAll(),
       besoins: this.besoinService.getAll(),
@@ -169,12 +170,18 @@ export class TeamsComponent implements OnInit {
       points: this.pointOperationnelService.getAll(),
       pointTypes: this.pointTypeService.getAll(),
     }).subscribe({
-      next: ({ users, crisis, offers, requests, teams, disponibilites, dossiers, competences, besoins, roles, affectationsRoles, institutions, points, pointTypes }) => {
+      next: ({ users, crisis, offers, requests, teams, dossiers, competences, besoins, roles, affectationsRoles, institutions, points, pointTypes }) => {
         this.users    = users;
         this.crisis   = crisis;
         this.offers   = offers;
         this.requests = requests;
-        this.disponibilites = disponibilites;
+        // Scopé aux offres déjà chargées ci-dessus plutôt qu'un getAll() séparé (27k+ lignes
+        // mesurées sur cette table, sans rapport avec le nombre d'offres réellement affichées
+        // ici) -- voir DisponibiliteOffreService.getByOffers.
+        this.disponibiliteOffreService.getByOffers(offers.map(o => o.id!)).subscribe({
+          next: (disponibilites) => { this.disponibilites = disponibilites; },
+          error: () => {},
+        });
         this.dossiers = dossiers;
         this.competences = competences;
         this.besoins = besoins;
@@ -404,6 +411,23 @@ export class TeamsComponent implements OnInit {
         this.showSuccess('Délégation retirée.');
       },
       error: (err) => this.showError(err?.error?.error || 'Erreur lors du retrait de la délégation.'),
+    });
+  }
+
+  /** Bascule est_equipe_rcsc (voir TeamViewSet.designer_rcsc) -- conditionne l'accès au registre
+   * des personnes vulnérables pour toute l'institution de cette équipe (voir
+   * core/vulnerabilites.py). Réservé côté serveur à l'autorité locale propriétaire ; le bouton
+   * n'est affiché côté client que pour cette même population (voir isAutoriteLocaleCommunale
+   * dans le template), par cohérence avec le reste de la page -- pas une garantie de sécurité. */
+  designerRcsc(): void {
+    if (!this.selectedTeam?.id) return;
+    this.teamService.designerRcsc(this.selectedTeam.id).subscribe({
+      next: (updated) => {
+        this.selectedTeam = { ...updated, missions: this.selectedTeam!.missions };
+        this.reloadTeams();
+        this.showSuccess(updated.est_equipe_rcsc ? 'Équipe désignée comme RCSC.' : 'Désignation RCSC retirée.');
+      },
+      error: (err) => this.showError(err?.error?.detail || 'Erreur lors de la désignation RCSC.'),
     });
   }
 

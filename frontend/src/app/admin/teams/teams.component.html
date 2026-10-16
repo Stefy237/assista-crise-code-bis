@@ -269,6 +269,26 @@
           </div>
         </div>
 
+        <!-- ── RCSC ────────────────────────────────────────── -->
+        @if (authService.isAutoriteLocaleCommunale()) {
+          <div class="detail-section">
+            <div class="section-header">
+              <h3>
+                <span class="material-icons">shield</span>
+                Réserve Communale de Sécurité Civile
+              </h3>
+            </div>
+            <p class="section-hint">
+              Désigne cette équipe comme LA RCSC de son institution — conditionne l'accès de ses
+              membres au registre des personnes vulnérables.
+            </p>
+            <button type="button" class="btn-ghost sm" (click)="designerRcsc()">
+              <span class="material-icons">{{ selectedTeam.est_equipe_rcsc ? 'remove_moderator' : 'shield' }}</span>
+              {{ selectedTeam.est_equipe_rcsc ? 'Retirer la désignation RCSC' : 'Désigner comme RCSC' }}
+            </button>
+          </div>
+        }
+
         <!-- ── MEMBRES ─────────────────────────────────────── -->
         <div class="detail-section">
           <div class="section-header">

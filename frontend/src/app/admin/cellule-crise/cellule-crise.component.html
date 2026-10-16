@@ -213,7 +213,7 @@
           @for (equipe of equipes; track equipe.team.id) {
             <div class="carte-equipe">
               <button type="button" class="carte-equipe-entete" (click)="basculerEquipe(equipe.team.id!)">
-                <strong>{{ equipe.team.name }}</strong>
+                <strong>{{ teamDisplayName(equipe.team) }}</strong>
                 <span class="resume-equipe">
                   {{ equipe.nbPersonnes }} pers.
                   @if (materielAffiche(equipe).texte) {
@@ -261,7 +261,7 @@
                   @if (equipe.team.salon_matrix_room_id) {
                     <app-matrix-salon-chat
                       [cle]="equipe.team.id!"
-                      [titre]="'Salon — ' + equipe.team.name"
+                      [titre]="'Salon — ' + teamDisplayName(equipe.team)"
                       [pretACharger]="estDepliee(equipe.team.id!)"
                       [autoriserUrgent]="true"
                       [cadre]="estCadreEquipe(equipe.team)"
