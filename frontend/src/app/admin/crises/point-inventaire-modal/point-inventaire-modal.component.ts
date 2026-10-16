@@ -1,6 +1,7 @@
 import { Component, EventEmitter, Input, OnInit, Output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 
 import { MaterielPointService } from '../../../services/materiel-point.service';
 import { MaterielCatalogueService } from '../../../services/materiel-catalogue.service';
@@ -50,7 +51,12 @@ export class PointInventaireModalComponent implements OnInit {
     private catalogueService: MaterielCatalogueService,
     private contributionService: ContributionMaterielService,
     private pointTypeService: PointTypeService,
+    private router: Router,
   ) {}
+
+  importerFichier(): void {
+    this.router.navigate(['/admin/import-materiel-point'], { queryParams: { point: this.point.id } });
+  }
 
   // ── Apports (ContributionMateriel) ────────────────────────────
   expandedItemId: string | null = null;
@@ -156,6 +162,59 @@ export class PointInventaireModalComponent implements OnInit {
         quantite: 1, unite: 'unité', statut: null, responsable: null, commentaire: null, date_maj: null },
       ...this.stocks,
     ];
+  }
+
+  /** Précision libre par item (ex: "tatamis utilisables comme lits d'urgence") -- le champ
+   * existait déjà côté modèle/API mais n'était affiché nulle part (demande utilisateur du
+   * 12/10). Même logique que setNiveau : crée la ligne réelle au premier enregistrement si elle
+   * n'existe encore que côté client. */
+  commentaireEnCours: Record<string, string> = {};
+  savingCommentaireItemId: string | null = null;
+
+  commentaireAffiche(entry: MaterielPoint): string {
+    const id = entry.item;
+    return id in this.commentaireEnCours ? this.commentaireEnCours[id] : (entry.commentaire ?? '');
+  }
+
+  modifierCommentaire(entry: MaterielPoint, valeur: string): void {
+    this.commentaireEnCours[entry.item] = valeur;
+  }
+
+  enregistrerCommentaire(entry: MaterielPoint): void {
+    const valeur = (this.commentaireEnCours[entry.item] ?? entry.commentaire ?? '').trim() || null;
+    if (valeur === (entry.commentaire ?? null)) {
+      delete this.commentaireEnCours[entry.item];
+      return;
+    }
+    this.savingCommentaireItemId = entry.item;
+    const request$ = entry.id
+      ? this.materielService.update(entry.id, { commentaire: valeur ?? undefined })
+      : this.materielService.create({ point: this.point.id, item: entry.item, niveau_stock: 'NUL', commentaire: valeur ?? undefined });
+
+    request$.subscribe({
+      next: (updated) => {
+        const idx = this.stocks.findIndex(s => s.item === entry.item);
+        if (idx !== -1) this.stocks[idx] = updated;
+        delete this.commentaireEnCours[entry.item];
+        this.savingCommentaireItemId = null;
+      },
+      error: () => { this.savingCommentaireItemId = null; },
+    });
+  }
+
+  /** Retire le besoin de la liste de ce point -- jusqu'ici seul "remettre à Nul" était possible,
+   * la ligne restait affichée indéfiniment (demande utilisateur du 12/10). Une ligne jamais
+   * enregistrée côté serveur (id null, simple ajout client en attente) se retire juste
+   * localement, rien à appeler. */
+  supprimerEntree(entry: MaterielPoint): void {
+    if (!confirm(`Retirer « ${entry.item_nom} » de la liste de ce centre ?`)) return;
+    if (!entry.id) {
+      this.stocks = this.stocks.filter(s => s.item !== entry.item);
+      return;
+    }
+    this.materielService.delete(entry.id).subscribe(() => {
+      this.stocks = this.stocks.filter(s => s.item !== entry.item);
+    });
   }
 
   setNiveau(entry: MaterielPoint, niveau: NiveauStock): void {

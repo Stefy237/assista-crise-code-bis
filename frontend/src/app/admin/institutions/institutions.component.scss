@@ -140,6 +140,22 @@
   &.badge-off { background: #f3f4f6; color: #6b7280; }
 }
 
+.pcs-groupe-titre {
+  margin: 1rem 0 .4rem;
+  font-size: .85rem;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  color: #6b7280;
+}
+
+.edition-row td {
+  input, select {
+    display: block;
+    width: 100%;
+    margin-bottom: .25rem;
+  }
+}
+
 .icon-btn {
   border: none;
   background: none;
@@ -153,6 +169,83 @@
   &.danger:hover { background: #fef2f2; color: #b91c1c; }
 
   .material-icons { font-size: 1.15rem; }
+}
+
+.actions-cell {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+}
+
+.risque-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: .75rem 1rem;
+  margin-bottom: .75rem;
+
+  textarea {
+    width: 100%;
+    margin-top: .25rem;
+    padding: .5rem;
+    border-radius: 6px;
+    border: 1px solid #e5e7eb;
+    font-family: inherit;
+    font-size: .85rem;
+  }
+
+  label { display: block; font-size: .8rem; color: #6b7280; margin-top: .5rem; }
+  p { margin: .4rem 0; font-size: .88rem; }
+}
+
+.risque-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.risque-generalites {
+  color: #6b7280;
+  font-style: italic;
+  font-size: .82rem !important;
+}
+
+.georisques-block {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: .75rem 1rem;
+  margin-bottom: 1rem;
+  background: #f8fafc;
+}
+
+.georisques-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: .88rem;
+
+  .material-icons { font-size: 1.1rem; vertical-align: text-bottom; margin-right: .25rem; }
+}
+
+.georisques-date {
+  color: #6b7280;
+  font-size: .78rem;
+  margin: .4rem 0;
+}
+
+.georisques-list {
+  list-style: none;
+  margin: .5rem 0 0;
+  padding: 0;
+
+  li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .4rem 0;
+    border-top: 1px solid #e5e7eb;
+    font-size: .85rem;
+  }
 }
 
 .btn-primary, .btn-secondary, .btn-danger {
@@ -326,4 +419,12 @@
       }
     }
   }
+}
+
+.hint-sm {
+  display: block;
+  font-size: .72rem;
+  color: #9ca3af;
+  font-weight: 400;
+  margin-top: .2rem;
 }

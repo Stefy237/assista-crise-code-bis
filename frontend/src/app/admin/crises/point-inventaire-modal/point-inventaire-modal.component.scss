@@ -87,6 +87,39 @@
   .material-icons { font-size: 1rem; }
 }
 
+.form-input-sm {
+  width: 100%;
+  min-width: 140px;
+  padding: .35rem .5rem;
+  font-size: .8rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+
+  &:disabled { opacity: .6; cursor: wait; }
+}
+
+.actions-cell {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #6b7280;
+  padding: .3rem;
+  border-radius: 6px;
+  display: inline-flex;
+
+  &:hover { background: #f3f4f6; }
+  &.danger:hover { background: #fef2f2; color: #b91c1c; }
+
+  .material-icons { font-size: 1.1rem; }
+}
+
 .icon-btn {
   background: none;
   border: none;

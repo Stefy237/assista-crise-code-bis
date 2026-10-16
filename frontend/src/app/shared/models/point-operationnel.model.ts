@@ -38,6 +38,9 @@ export interface PointOperationnel {
   commentaire?: string | null;
   description?: string | null;
   capacite_accueil?: number | null;
+  /** Centre d'accueil acceptant les animaux domestiques -- voir PointOperationnel.
+   * accepte_animaux côté backend (demande utilisateur du 12/10). */
+  accepte_animaux?: boolean;
   date_ouverture?: string | null;
   date_fermeture?: string | null;
   competences_requises?: string[];
@@ -86,6 +89,7 @@ export interface CentreAccueilPublic {
   crise: string | null;
   type_code?: string | null;
   type_libelle?: string | null;
+  accepte_animaux?: boolean;
 }
 
 export interface PointEquipeMembre {
@@ -118,6 +122,7 @@ export interface PointOperationnelPayload {
   institution?: string;
   description?: string;
   capacite_accueil?: number | null;
+  accepte_animaux?: boolean;
   date_ouverture?: string | null;
   date_fermeture?: string | null;
   location?: string;

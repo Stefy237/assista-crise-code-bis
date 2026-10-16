@@ -15,6 +15,15 @@ import { AffectationRoleOperationnelService } from '../../services/affectation-r
 import { LocationService, Commune } from '../../services/location.service';
 import { ZoneService } from '../../services/zone.service';
 import { Zone } from '../../shared/models/zone.model';
+import { ConfigurationAlerteSismiqueService } from '../../services/configuration-alerte-sismique.service';
+import { ConfigurationAlerteSismique } from '../../shared/models/configuration-alerte-sismique.model';
+import { InterlocuteurAlertePCSService } from '../../services/interlocuteur-alerte-pcs.service';
+import {
+  InterlocuteurAlertePCS, CategorieInterlocuteurPCS, ModeAlertePCS,
+  CATEGORIES_INTERLOCUTEUR_PCS, MODES_ALERTE_PCS,
+} from '../../shared/models/interlocuteur-alerte-pcs.model';
+import { RisqueMajeurTypeService, RisqueCommunalService } from '../../services/risque-majeur.service';
+import { RisqueMajeurType, RisqueCommunal, SuggestionGeorisques } from '../../shared/models/risque-majeur.model';
 import { TagSearchInputComponent } from '../../shared/components/common/tag-search-input/tag-search-input.component';
 import { MatrixSalonChatComponent } from '../teams/matrix-salon-chat/matrix-salon-chat.component';
 
@@ -32,7 +41,7 @@ import { Competence } from '../../shared/models/competence.model';
 type MainTab = 'institutions' | 'types' | 'roles';
 type ModalView = 'none' | 'create' | 'edit' | 'delete' | 'detail';
 type RefModalView = 'none' | 'create' | 'edit' | 'delete';
-type DetailTab = 'contacts' | 'domaines' | 'regulateurs' | 'matrix';
+type DetailTab = 'contacts' | 'domaines' | 'regulateurs' | 'matrix' | 'alertes' | 'annuaire-pcs' | 'mes-risques';
 
 @Component({
   selector: 'app-institutions',
@@ -101,7 +110,14 @@ export class InstitutionsComponent implements OnInit {
     private affectationRoleService: AffectationRoleOperationnelService,
     private locationService: LocationService,
     private zoneService: ZoneService,
+    private configurationAlerteSismiqueService: ConfigurationAlerteSismiqueService,
+    private interlocuteurAlertePCSService: InterlocuteurAlertePCSService,
+    private risqueMajeurTypeService: RisqueMajeurTypeService,
+    private risqueCommunalService: RisqueCommunalService,
   ) {}
+
+  readonly categoriesInterlocuteurPCS = CATEGORIES_INTERLOCUTEUR_PCS;
+  readonly modesAlertePCS = MODES_ALERTE_PCS;
 
   ngOnInit(): void {
     this.buildForms();
@@ -158,6 +174,12 @@ export class InstitutionsComponent implements OnInit {
       libelle: ['', Validators.required],
       description: [''],
       actif: [true],
+    });
+
+    this.alerteSismiqueForm = this.fb.group({
+      actif: [false],
+      rayon_km: [100, [Validators.required, Validators.min(1)]],
+      magnitude_min: [3.5, [Validators.required, Validators.min(0)]],
     });
 
     this.contactForm = this.fb.group({
@@ -310,6 +332,228 @@ export class InstitutionsComponent implements OnInit {
     if (institution.id) {
       this.zoneService.getAll(institution.id).subscribe(zones => this.zones = zones);
     }
+    this.configAlerteSismique = null;
+    this.alerteSismiqueForm.reset({ actif: false, rayon_km: 100, magnitude_min: 3.5 });
+    if (institution.id) {
+      this.configurationAlerteSismiqueService.getForInstitution(institution.id).subscribe(configs => {
+        if (configs.length > 0) {
+          this.configAlerteSismique = configs[0];
+          this.alerteSismiqueForm.patchValue(configs[0]);
+        }
+      });
+    }
+    this.chargerInterlocuteursPCS();
+    this.chargerRisquesCommunaux();
+    this.suggestionsGeorisques = [];
+    this.suggestionsGeorisquesDateMaj = null;
+    this.suggestionsGeorisquesChargees = false;
+    this.suggestionsGeorisquesErreur = '';
+  }
+
+  // ══ Catalogue de risques majeurs (détail institution) ═══════════════════
+  risquesCommunaux: RisqueCommunal[] = [];
+  editionRisqueId: string | null = null;
+  editionRisque: Partial<RisqueCommunal> = {};
+  savingRisqueId: string | null = null;
+
+  private chargerRisquesCommunaux(): void {
+    this.risquesCommunaux = [];
+    if (!this.selectedInstitution?.id) return;
+    this.risqueCommunalService.getForInstitution(this.selectedInstitution.id).subscribe(
+      (liste) => (this.risquesCommunaux = liste),
+    );
+  }
+
+  /** Recherche un type de risque déjà déclaré par une autre commune (ex: "Inondation", déjà
+   * seedé) ou en crée un nouveau à la volée -- catalogue librement extensible, voir docstring
+   * de RisqueMajeurType (confirmé nécessaire en croisant 3 vrais PCS le 12/10 : aucune commune
+   * n'a la même liste de risques). */
+  risqueSearchFn = (q: string) => this.risqueMajeurTypeService.search(q);
+  risqueCreateLabelFn = (value: string) => `Créer « ${value} » comme nouveau type de risque`;
+  risqueCreateFn = (nom: string) => this.risqueMajeurTypeService.create({ nom });
+
+  onRisqueSelected(item: RisqueMajeurType): void {
+    if (!this.selectedInstitution?.id) return;
+    if (this.risquesCommunaux.some(r => r.risque_type === item.id)) return;
+    this.risqueCommunalService.create({ institution: this.selectedInstitution.id, risque_type: item.id }).subscribe(() => this.chargerRisquesCommunaux());
+  }
+
+  // ══ Suggestions Géorisques (détail institution) ═══════════════════════
+  suggestionsGeorisques: SuggestionGeorisques[] = [];
+  suggestionsGeorisquesDateMaj: string | null = null;
+  suggestionsGeorisquesEnCours = false;
+  suggestionsGeorisquesChargees = false;
+  suggestionsGeorisquesErreur = '';
+  acceptationSuggestionEnCours: string | null = null;
+
+  chargerSuggestionsGeorisques(force = false): void {
+    if (!this.selectedInstitution?.id) return;
+    this.suggestionsGeorisquesEnCours = true;
+    this.suggestionsGeorisquesErreur = '';
+    this.risqueCommunalService.suggestionsGeorisques(this.selectedInstitution.id, force).subscribe({
+      next: ({ suggestions, date_maj }: { suggestions: SuggestionGeorisques[]; date_maj: string | null }) => {
+        this.suggestionsGeorisques = suggestions;
+        this.suggestionsGeorisquesDateMaj = date_maj;
+        this.suggestionsGeorisquesChargees = true;
+        this.suggestionsGeorisquesEnCours = false;
+      },
+      error: (err: any) => {
+        this.suggestionsGeorisquesErreur = err?.error?.error || "Impossible de consulter Géorisques pour cette commune.";
+        this.suggestionsGeorisquesChargees = true;
+        this.suggestionsGeorisquesEnCours = false;
+      },
+    });
+  }
+
+  /** Accepte une suggestion : réutilise le type de risque existant (nom exact) ou le crée --
+   * RisqueMajeurTypeViewSet.create dédoublonne déjà par nom insensible à la casse, voir
+   * TagLikeViewSetMixin -- puis déclare le risque pour cette institution. */
+  accepterSuggestion(suggestion: SuggestionGeorisques): void {
+    if (!this.selectedInstitution?.id || suggestion.deja_declare) return;
+    this.acceptationSuggestionEnCours = suggestion.num_risque;
+    this.risqueMajeurTypeService.create({ nom: suggestion.libelle }).subscribe({
+      next: (type) => {
+        this.risqueCommunalService.create({ institution: this.selectedInstitution!.id, risque_type: type.id }).subscribe({
+          next: () => {
+            suggestion.deja_declare = true;
+            this.acceptationSuggestionEnCours = null;
+            this.chargerRisquesCommunaux();
+          },
+          error: () => { this.acceptationSuggestionEnCours = null; },
+        });
+      },
+      error: () => { this.acceptationSuggestionEnCours = null; },
+    });
+  }
+
+  retirerRisqueCommunal(item: RisqueCommunal): void {
+    if (!confirm(`Retirer le risque « ${item.risque_nom} » de cette commune ?`)) return;
+    this.risqueCommunalService.delete(item.id).subscribe(() => this.chargerRisquesCommunaux());
+  }
+
+  commencerEditionRisque(item: RisqueCommunal): void {
+    this.editionRisqueId = item.id;
+    this.editionRisque = { ...item };
+  }
+
+  annulerEditionRisque(): void {
+    this.editionRisqueId = null;
+    this.editionRisque = {};
+  }
+
+  enregistrerRisqueCommunal(): void {
+    if (!this.editionRisqueId) return;
+    this.savingRisqueId = this.editionRisqueId;
+    const { etat_des_lieux, enjeux } = this.editionRisque;
+    this.risqueCommunalService.update(this.editionRisqueId, { etat_des_lieux, enjeux }).subscribe({
+      next: () => { this.savingRisqueId = null; this.annulerEditionRisque(); this.chargerRisquesCommunaux(); },
+      error: () => { this.savingRisqueId = null; },
+    });
+  }
+
+  // ══ Annuaire d'alerte PCS/PICS (détail institution) ═══════════════════
+  interlocuteursPCS: InterlocuteurAlertePCS[] = [];
+  editionInterlocuteurId: string | null = null;
+  editionInterlocuteur: Partial<InterlocuteurAlertePCS> = {};
+  savingInterlocuteurId: string | null = null;
+
+  private chargerInterlocuteursPCS(): void {
+    this.interlocuteursPCS = [];
+    if (!this.selectedInstitution?.id) return;
+    this.interlocuteurAlertePCSService.getForInstitution(this.selectedInstitution.id).subscribe(
+      (liste) => (this.interlocuteursPCS = liste),
+    );
+  }
+
+  /** Utilisateurs de l'institution sélectionnée -- candidats au rattachement d'un compte pour
+   * l'envoi Matrix (voir "lier à un compte" dans le formulaire d'édition inline). */
+  get utilisateursCandidatsPCS(): User[] {
+    if (!this.selectedInstitution?.id) return [];
+    const ids = this.contacts.filter(c => c.institution === this.selectedInstitution!.id).map(c => c.utilisateur);
+    return this.users.filter(u => ids.includes(u.id));
+  }
+
+  get interlocuteursPCSParCategorie(): { categorie: CategorieInterlocuteurPCS; libelle: string; items: InterlocuteurAlertePCS[] }[] {
+    return this.categoriesInterlocuteurPCS
+      .map(c => ({
+        categorie: c.value, libelle: c.label,
+        items: this.interlocuteursPCS.filter(i => i.categorie === c.value),
+      }))
+      .filter(g => g.items.length > 0);
+  }
+
+  /** Recherche un interlocuteur déjà déclaré (par une autre commune du même département
+   * comprise) -- voir <app-tag-search-input> dans le template. */
+  interlocuteurPCSSearchFn = (q: string) => this.interlocuteurAlertePCSService.search(q);
+
+  /** Création rapide avec des valeurs par défaut (mode TELEPHONE tant qu'aucun email/compte
+   * n'est renseigné) -- l'utilisateur complète ensuite via l'édition inline. Le backend
+   * rattache automatiquement l'institution courante à la création (perform_create). */
+  interlocuteurPCSCreateLabelFn = (value: string) => `Créer « ${value} » comme nouveau contact`;
+
+  modeAlertePCSLabel(mode: ModeAlertePCS): string {
+    return this.modesAlertePCS.find(m => m.value === mode)?.label ?? mode;
+  }
+
+  interlocuteurPCSCreateFn = (organisme: string) =>
+    this.interlocuteurAlertePCSService.create({ organisme, nom: organisme, categorie: 'AUTRE', mode_alerte: 'TELEPHONE' });
+
+  onInterlocuteurPCSSelected(item: InterlocuteurAlertePCS): void {
+    // Rattache systématiquement (no-op si déjà fait par interlocuteurPCSCreateFn) -- couvre le
+    // cas "trouvé via recherche, pas encore rattaché à MA commune".
+    this.interlocuteurAlertePCSService.rattacher(item.id).subscribe(() => this.chargerInterlocuteursPCS());
+  }
+
+  retirerInterlocuteurPCS(item: InterlocuteurAlertePCS): void {
+    if (!confirm(`Retirer « ${item.nom} » de l'annuaire de cette commune ? (reste visible pour les autres communes qui l'utilisent déjà)`)) return;
+    this.interlocuteurAlertePCSService.detacher(item.id).subscribe(() => this.chargerInterlocuteursPCS());
+  }
+
+  commencerEditionInterlocuteurPCS(item: InterlocuteurAlertePCS): void {
+    this.editionInterlocuteurId = item.id;
+    this.editionInterlocuteur = { ...item };
+  }
+
+  annulerEditionInterlocuteurPCS(): void {
+    this.editionInterlocuteurId = null;
+    this.editionInterlocuteur = {};
+  }
+
+  enregistrerInterlocuteurPCS(): void {
+    if (!this.editionInterlocuteurId) return;
+    this.savingInterlocuteurId = this.editionInterlocuteurId;
+    const { nom, organisme, categorie, email, telephone, notes, mode_alerte, actif, utilisateur } = this.editionInterlocuteur;
+    this.interlocuteurAlertePCSService.update(this.editionInterlocuteurId, {
+      nom, organisme, categorie, email, telephone, notes, mode_alerte, actif, utilisateur,
+    }).subscribe({
+      next: () => { this.savingInterlocuteurId = null; this.annulerEditionInterlocuteurPCS(); this.chargerInterlocuteursPCS(); },
+      error: () => { this.savingInterlocuteurId = null; },
+    });
+  }
+
+  // ══ Alertes sismiques (détail institution) ═══════════════════
+  configAlerteSismique: ConfigurationAlerteSismique | null = null;
+  savingAlerteSismique = false;
+  alerteSismiqueForm!: FormGroup;
+
+  submitAlerteSismique(): void {
+    if (!this.selectedInstitution?.id || this.alerteSismiqueForm.invalid) {
+      this.alerteSismiqueForm.markAllAsTouched();
+      return;
+    }
+    this.savingAlerteSismique = true;
+    const brut = this.alerteSismiqueForm.getRawValue();
+    const valeurs = { actif: !!brut.actif, rayon_km: Number(brut.rayon_km), magnitude_min: Number(brut.magnitude_min) };
+    const request$ = this.configAlerteSismique
+      ? this.configurationAlerteSismiqueService.update(this.configAlerteSismique.id, valeurs)
+      : this.configurationAlerteSismiqueService.create({ institution: this.selectedInstitution.id, ...valeurs });
+    request$.subscribe({
+      next: (config) => {
+        this.configAlerteSismique = config;
+        this.savingAlerteSismique = false;
+      },
+      error: () => { this.savingAlerteSismique = false; },
+    });
   }
 
   closeModal(): void {

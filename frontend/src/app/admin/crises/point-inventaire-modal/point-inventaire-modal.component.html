@@ -4,6 +4,9 @@
     <div class="modal-header">
       <h2>Besoins &amp; stocks — {{ point.nom }}</h2>
       <div class="header-actions">
+        <button class="btn-secondary sm" (click)="importerFichier()" title="Importer le matériel depuis un fichier CSV/XLSX">
+          <span class="material-icons">upload_file</span> Importer
+        </button>
         <button class="btn-secondary sm" (click)="compare()" title="Comparer avec les autres centres">
           <span class="material-icons">compare_arrows</span> Comparer
         </button>
@@ -33,7 +36,7 @@
 
         <table class="data-table sm">
           <thead>
-            <tr><th>Besoin</th><th>Niveau de stock</th><th>Quantité</th><th>Dernière mise à jour</th><th></th></tr>
+            <tr><th>Besoin</th><th>Niveau de stock</th><th>Quantité</th><th>Précision</th><th>Dernière mise à jour</th><th></th></tr>
           </thead>
           <tbody>
             @for (entry of stocks; track entry.item) {
@@ -60,17 +63,28 @@
                     <span class="muted">—</span>
                   }
                 </td>
-                <td>{{ entry.date_maj ? (entry.date_maj | date:'short') : '—' }}</td>
                 <td>
+                  <input
+                    type="text" class="form-input-sm" placeholder="ex: utilisable comme lit d'urgence"
+                    [ngModel]="commentaireAffiche(entry)" [ngModelOptions]="{standalone: true}"
+                    (ngModelChange)="modifierCommentaire(entry, $event)"
+                    (blur)="enregistrerCommentaire(entry)"
+                    [disabled]="savingCommentaireItemId === entry.item">
+                </td>
+                <td>{{ entry.date_maj ? (entry.date_maj | date:'short') : '—' }}</td>
+                <td class="actions-cell">
                   <button type="button" class="btn-secondary sm" (click)="toggleApports(entry)">
                     <span class="material-icons">{{ expandedItemId === entry.item ? 'expand_less' : 'expand_more' }}</span>
                     Apports
+                  </button>
+                  <button type="button" class="icon-btn danger" (click)="supprimerEntree(entry)" title="Retirer ce besoin de la liste">
+                    <span class="material-icons">delete</span>
                   </button>
                 </td>
               </tr>
               @if (expandedItemId === entry.item) {
                 <tr class="apports-row">
-                  <td colspan="5">
+                  <td colspan="6">
                     @if (loadingContributions) {
                       <p class="muted">Chargement des apports…</p>
                     } @else {
@@ -98,7 +112,7 @@
                 </tr>
               }
             } @empty {
-              <tr><td colspan="5" class="empty">Aucun besoin dans le catalogue pour l'instant.</td></tr>
+              <tr><td colspan="6" class="empty">Aucun besoin dans le catalogue pour l'instant.</td></tr>
             }
           </tbody>
         </table>
