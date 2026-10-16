@@ -62,4 +62,46 @@ export class ImportService {
   telechargerExempleInstitutions(): Observable<Blob> {
     return this.http.get(`${this.url}/institutions/exemple/`, { responseType: 'blob' });
   }
+
+  /** POST /api/imports/correspondants-pcs/ — importe les correspondants PCS (rôles DOS/RAC/
+   * Correspondants...) en comptes complets + affectations de rôle pour l'institution de
+   * l'utilisateur connecté. `role` doit correspondre au libellé exact d'un RoleOperationnel
+   * déjà existant (voir l'onglet « Rôles opérationnels »). */
+  importerCorrespondantsPCS(fichier: File, mapping: Record<string, string>): Observable<ImportResultat> {
+    const fd = new FormData();
+    fd.append('fichier', fichier);
+    Object.entries(mapping).forEach(([champ, colonne]) => { if (colonne) fd.append(`mapping_${champ}`, colonne); });
+    return this.http.post<ImportResultat>(`${this.url}/correspondants-pcs/`, fd);
+  }
+
+  telechargerExempleCorrespondantsPCS(): Observable<Blob> {
+    return this.http.get(`${this.url}/correspondants-pcs/exemple/`, { responseType: 'blob' });
+  }
+
+  /** POST /api/imports/interlocuteurs-pcs/ — importe l'annuaire d'alerte PCS/PICS (catalogue
+   * partagé, voir InterlocuteurAlertePCS) pour l'institution de l'utilisateur connecté. */
+  importerInterlocuteursPCS(fichier: File, mapping: Record<string, string>): Observable<ImportResultat> {
+    const fd = new FormData();
+    fd.append('fichier', fichier);
+    Object.entries(mapping).forEach(([champ, colonne]) => { if (colonne) fd.append(`mapping_${champ}`, colonne); });
+    return this.http.post<ImportResultat>(`${this.url}/interlocuteurs-pcs/`, fd);
+  }
+
+  telechargerExempleInterlocuteursPCS(): Observable<Blob> {
+    return this.http.get(`${this.url}/interlocuteurs-pcs/exemple/`, { responseType: 'blob' });
+  }
+
+  /** POST /api/imports/materiel-point/ — importe le matériel d'UN point opérationnel précis
+   * (`pointId`, jamais une colonne du fichier) -- voir imports.importer_materiel_point. */
+  importerMaterielPoint(fichier: File, pointId: string, mapping: Record<string, string>): Observable<ImportResultat> {
+    const fd = new FormData();
+    fd.append('fichier', fichier);
+    fd.append('point_id', pointId);
+    Object.entries(mapping).forEach(([champ, colonne]) => { if (colonne) fd.append(`mapping_${champ}`, colonne); });
+    return this.http.post<ImportResultat>(`${this.url}/materiel-point/`, fd);
+  }
+
+  telechargerExempleMaterielPoint(): Observable<Blob> {
+    return this.http.get(`${this.url}/materiel-point/exemple/`, { responseType: 'blob' });
+  }
 }
