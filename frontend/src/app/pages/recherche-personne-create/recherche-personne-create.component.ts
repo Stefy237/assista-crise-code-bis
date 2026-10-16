@@ -122,8 +122,13 @@ export class RecherchePersonneCreateComponent {
       .create(formData)
       .subscribe(() => {
 
+        // Le dépôt est ouvert à tout compte authentifié (voir public.routes.ts), mais la liste
+        // /recherches-personnes reste réservée aux acteurs institutionnels (institutional
+        // EffectiveGuard) -- y rediriger un simple citoyen qui vient de déposer sa fiche le
+        // renvoyait tout droit sur /admin/acces-refuse, juste après un dépôt réussi. Seul un
+        // acteur institutionnel est renvoyé vers le registre ; les autres vers l'accueil.
         this.router.navigate([
-          '/recherches-personnes'
+          this.authService.isInstitutionalEffective() ? '/recherches-personnes' : '/accueil'
         ]);
 
       });
