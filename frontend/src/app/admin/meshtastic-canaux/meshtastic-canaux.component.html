@@ -67,7 +67,7 @@
       @if (loadingMessages) {
         <p class="chargement">Chargement…</p>
       } @else {
-        <div class="messages">
+        <div class="messages" #messagesContainer>
           @for (m of messagesAffiches; track m.id) {
             <div class="message" [class.sortant]="m.direction === 'SORTANT'">
               <div class="message-meta">

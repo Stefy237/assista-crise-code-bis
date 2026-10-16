@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit } from '@angular/core';
+import { AfterViewChecked, Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { forkJoin } from 'rxjs';
@@ -26,7 +26,12 @@ type Conversation =
   templateUrl: './meshtastic-canaux.component.html',
   styleUrl: './meshtastic-canaux.component.scss',
 })
-export class MeshtasticCanauxComponent implements OnInit, OnDestroy {
+export class MeshtasticCanauxComponent implements OnInit, OnDestroy, AfterViewChecked {
+
+  @ViewChild('messagesContainer') messagesContainer?: ElementRef<HTMLDivElement>;
+  /** Défilement en bas différé à l'après-rendu (voir ngAfterViewChecked) : le conteneur
+   * `@ViewChild` n'existe pas encore tant que `loadingMessages` affiche le spinner à sa place. */
+  private doitDefilerEnBas = false;
 
   canaux: CanalMeshtastic[] = [];
   noeuds: NoeudUtilisateurMeshtastic[] = [];
@@ -64,6 +69,26 @@ export class MeshtasticCanauxComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     if (this.intervalRafraichissement) clearInterval(this.intervalRafraichissement);
+  }
+
+  ngAfterViewChecked(): void {
+    if (this.doitDefilerEnBas && this.messagesContainer) {
+      this.doitDefilerEnBas = false;
+      this.defilerEnBas();
+    }
+  }
+
+  private defilerEnBas(): void {
+    const el = this.messagesContainer?.nativeElement;
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  /** Vrai si l'utilisateur n'a pas remonté lire l'historique -- évite de l'arracher de sa
+   * lecture à chaque rafraîchissement automatique (8s). */
+  private estProcheDuBas(): boolean {
+    const el = this.messagesContainer?.nativeElement;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }
 
   chargerSidebar(): void {
@@ -113,14 +138,25 @@ export class MeshtasticCanauxComponent implements OnInit, OnDestroy {
 
   chargerMessages(conv: Conversation, avecSpinner: boolean): void {
     if (avecSpinner) this.loadingMessages = true;
+    // Changement de conversation : on force le défilement en bas. Rafraîchissement auto :
+    // seulement si l'utilisateur n'a pas remonté lire l'historique.
+    const procheDuBas = avecSpinner || this.estProcheDuBas();
     if (conv.type === 'canal') {
       this.canalService.getMessages(conv.canal.id).subscribe({
-        next: (data) => { this.messagesCanal = data; if (avecSpinner) this.loadingMessages = false; },
+        next: (data) => {
+          this.messagesCanal = data;
+          if (avecSpinner) this.loadingMessages = false;
+          if (procheDuBas) this.doitDefilerEnBas = true;
+        },
         error: () => { if (avecSpinner) this.loadingMessages = false; },
       });
     } else {
       this.dmService.getPourContact(conv.noeud.node_num).subscribe({
-        next: (data) => { this.messagesDm = data; if (avecSpinner) this.loadingMessages = false; },
+        next: (data) => {
+          this.messagesDm = data;
+          if (avecSpinner) this.loadingMessages = false;
+          if (procheDuBas) this.doitDefilerEnBas = true;
+        },
         error: () => { if (avecSpinner) this.loadingMessages = false; },
       });
     }
@@ -143,6 +179,7 @@ export class MeshtasticCanauxComponent implements OnInit, OnDestroy {
           this.messagesCanal = [...this.messagesCanal, message];
           this.nouveauMessage = '';
           this.envoiEnCours = false;
+          this.doitDefilerEnBas = true;
         },
         error: () => { this.errorMessage = "Échec de l'envoi."; this.envoiEnCours = false; },
       });
@@ -160,6 +197,7 @@ export class MeshtasticCanauxComponent implements OnInit, OnDestroy {
           this.messagesDm = [...this.messagesDm, message];
           this.nouveauMessage = '';
           this.envoiEnCours = false;
+          this.doitDefilerEnBas = true;
         },
         error: () => { this.errorMessage = "Échec de l'envoi."; this.envoiEnCours = false; },
       });
@@ -182,6 +220,13 @@ export class MeshtasticCanauxComponent implements OnInit, OnDestroy {
   auteurMessage(m: MessageCanalMeshtastic | MessageMeshtasticLog, conv: Conversation): string {
     if (m.direction === 'SORTANT') return m.expediteur_nom || 'Moi';
     if (conv.type === 'dm') return this.titreConversation(conv);
+    // Canal entrant : nom annoncé par le nœud + propriétaire affecté si connu (demande
+    // utilisateur du 10/10) -- "Mesh" générique seulement en dernier recours, si rien n'a pu
+    // être identifié (nœud jamais vu dans le répertoire, et pas affecté à un compte).
+    const nodeNom = (m as MessageCanalMeshtastic).node_nom;
+    if (nodeNom && m.expediteur_nom) return `${nodeNom} (${m.expediteur_nom})`;
+    if (nodeNom) return nodeNom;
+    if (m.expediteur_nom) return m.expediteur_nom;
     return 'Mesh';
   }
 

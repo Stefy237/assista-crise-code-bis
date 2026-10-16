@@ -259,8 +259,16 @@ class DjangoClient:
             "contact_node_num": contact_node_num, "contenu": contenu,
         })
 
-    async def canal_a_envoyer(self, canal_id):
-        response = await self._request("GET", "/messages-canal-meshtastic/a-envoyer/", params={"canal": canal_id})
+    async def canal_a_envoyer(self, canal_id, compagnon_id=None):
+        """`compagnon_id` (demande utilisateur du 10/10) : ne renvoie que les messages NON
+        ciblés (visibles de tous) + ceux ciblés précisément sur CE companion -- indispensable
+        quand plusieurs companions actifs servent le même canal "partagé" en parallèle (ex: un
+        companion TCP local ET le pont MQTT Gaulix), sinon les deux se disputeraient les mêmes
+        lignes EN_ATTENTE (voir MessageCanalMeshtastic.compagnon côté Django)."""
+        params = {"canal": canal_id}
+        if compagnon_id:
+            params["compagnon"] = compagnon_id
+        response = await self._request("GET", "/messages-canal-meshtastic/a-envoyer/", params=params)
         return response.json()
 
     async def marquer_message_canal(self, message_id, statut, erreur=None):
@@ -596,7 +604,7 @@ async def boucle_envoi_canaux(mqtt_client, compagnon, registre, django):
     while True:
         try:
             for canal_nom, canal in registre.tous().items():
-                for message in await django.canal_a_envoyer(canal["id"]):
+                for message in await django.canal_a_envoyer(canal["id"], compagnon_id=compagnon["id"]):
                     packet_id = random.randint(1, 0xFFFFFFFF)
                     data = mesh_pb2.Data(portnum=portnums_pb2.PortNum.TEXT_MESSAGE_APP, payload=message["contenu"].encode("utf-8"))
                     paquet = mesh_pb2.MeshPacket()
@@ -746,10 +754,16 @@ async def _executer_compagnon_interface_locale(django, compagnon, construire_int
     appareil est joint directement via la lib officielle `meshtastic` (TCPInterface ou
     SerialInterface, seule la construction diffère) — le firmware gère lui-même le PSK/PKI,
     comme le fait l'appli officielle en WiFi local ou en USB : aucun chiffrement fait maison
-    ici, contrairement au mode MQTT. Limité en v1 aux DM (envoi/réception) et à la réception de
-    messages de canal — pas d'envoi sur un canal précis : les canaux d'un vrai appareil sont
-    déjà configurés dessus (PSK gérées par son propre firmware), pas par CanalMeshtastic
-    (pensé pour le mode MQTT logiciel)."""
+    ici, contrairement au mode MQTT.
+
+    Envoi sur canal (demande utilisateur du 10/10, ex: diffuser une alerte sismique sur
+    "Fr_EMCOM" aussi via ce companion local, pas seulement via le pont MQTT Gaulix) : voir
+    boucle_envoi_canaux_locale ci-dessous -- limité aux canaux Django dont le NOM correspond à
+    un canal DÉJÀ configuré en dur sur CET appareil physique (PSK posée manuellement via
+    l'appli Meshtastic officielle, jamais par ce pont, contrairement au mode MQTT où
+    CanalMeshtastic EST la source de vérité) : ce pont ne fait ici que retrouver l'index local
+    du canal par son nom (iface.localNode.getChannelByName) pour y envoyer, jamais créer/
+    reconfigurer un canal sur l'appareil lui-même."""
     from pubsub import pub
 
     boucle = asyncio.get_running_loop()
@@ -800,10 +814,34 @@ async def _executer_compagnon_interface_locale(django, compagnon, construire_int
                 logger.exception("Échec du cycle d'envoi des DM (%s, %s).", libelle_connexion, compagnon["nom"])
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
+    async def boucle_envoi_canaux_locale():
+        """Un canal Django sans correspondance locale (getChannelByName renvoie None) est
+        silencieusement ignoré à chaque passage -- pas une erreur, juste un canal que CET
+        appareil ne sert pas physiquement (ex: Fr_Tech/Fr_BlaBla, réservés au mode MQTT chez
+        Gaulix, jamais configurés sur ce companion local)."""
+        while True:
+            try:
+                canaux_distants = await django.canaux_avec_cle(compagnon["id"])
+                for canal in canaux_distants:
+                    canal_local = iface.localNode.getChannelByName(canal["nom"])
+                    if canal_local is None:
+                        continue
+                    for message in await django.canal_a_envoyer(canal["id"], compagnon_id=compagnon["id"]):
+                        iface.sendText(message["contenu"], channelIndex=canal_local.index)
+                        await django.marquer_message_canal(message["id"], "ENVOYE")
+                        logger.info(
+                            "Message de canal '%s' envoyé en %s (index local %d, %s).",
+                            canal["nom"], libelle_connexion, canal_local.index, compagnon["nom"],
+                        )
+            except Exception:
+                logger.exception("Échec du cycle d'envoi de canal (%s, %s).", libelle_connexion, compagnon["nom"])
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
     try:
         await asyncio.gather(
             boucle_execution_planifiee(file_a_planifier),
             boucle_envoi_dm(),
+            boucle_envoi_canaux_locale(),
         )
     finally:
         pub.unsubscribe(on_receive, "meshtastic.receive")

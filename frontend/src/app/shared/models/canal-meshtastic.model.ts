@@ -35,6 +35,10 @@ export interface MessageCanalMeshtastic {
   direction: DirectionMessageMesh;
   expediteur?: string | null;
   expediteur_nom?: string | null;
+  /** Nom ANNONCÉ par le nœud lui-même (répertoire ContactMeshtastic, découvert passivement) --
+   * distinct d'expediteur_nom (compte assista-crise affecté à ce nœud, voir
+   * NoeudUtilisateurMeshtastic) : présent même si personne n'a affecté ce nœud à un compte. */
+  node_nom?: string | null;
   contact_node_num?: number | null;
   contenu: string;
   statut: StatutMessageMesh;
