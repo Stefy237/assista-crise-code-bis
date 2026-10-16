@@ -24,6 +24,8 @@ import { CompagnonMeshtasticService } from '../../services/compagnon-meshtastic.
 import { NoeudMeshUtilisateur } from '../../shared/models/noeud-mesh-utilisateur.model';
 import { NoeudUtilisateurMeshtastic, ReclamerMeshtasticBrokerRequis } from '../../shared/models/noeud-utilisateur-meshtastic.model';
 import { SuiviPositionPermanentService } from '../../services/suivi-position-permanent.service';
+import { PieceIdentiteReserveService } from '../../services/piece-identite-reserve.service';
+import { PieceIdentiteReserve } from '../../shared/models/piece-identite-reserve.model';
 
 @Component({
   selector: 'app-settings',
@@ -42,6 +44,14 @@ export class SettingsComponent implements OnInit {
 
   isUpdatingProfile = false;
   isChangingPassword = false;
+
+  // Candidature réserve (voir User.souhaite_rejoindre_reserve, PieceIdentiteReserveService) --
+  // null tant qu'aucun fichier n'a encore été envoyé, auquel cas le prochain upload CRÉE la
+  // pièce (voir uploaderPermis) ; une fois un id connu, les uploads suivants la METTENT À JOUR
+  // (remplacement recto/verso indépendamment l'un de l'autre).
+  maPieceIdentite: PieceIdentiteReserve | null = null;
+  uploadPermisEnCours = false;
+  uploadPermisErreur = '';
 
   _successMessage = '';
   _errorMessage = '';
@@ -124,6 +134,7 @@ export class SettingsComponent implements OnInit {
     private declarationService: DeclarationSecuriteService,
     private dossierService: DossierService,
     private userService: UserService,
+    private pieceIdentiteReserveService: PieceIdentiteReserveService,
     private router: Router,
     private route: ActivatedRoute,
     private noeudMeshCoreService: NoeudMeshUtilisateurService,
@@ -158,6 +169,10 @@ export class SettingsComponent implements OnInit {
     }
     this.initForms();
     this.loadAll();
+
+    if (this.currentUser?.souhaite_rejoindre_reserve) {
+      this.chargerPieceIdentiteReserve();
+    }
 
     // Abonnement réactif (pas juste route.snapshot, lu une seule fois) : les liens rapides de
     // l'en-tête (`quick-link`) pointent tous vers /settings avec un `tab` différent — Angular
@@ -702,4 +717,48 @@ export class SettingsComponent implements OnInit {
   get isIndividual(): boolean { return this.currentUser?.type === 'UTIL_SIMPLE'; }
 
   private clearMessages(): void { this.successMessage = ''; this.errorMessage = ''; }
+
+  private chargerPieceIdentiteReserve(): void {
+    // L'API ne retourne QUE la pièce du propriétaire connecté (voir
+    // PieceIdentiteReserveViewSet.get_queryset) -- au plus une par utilisateur en pratique,
+    // on prend la première s'il y en a une.
+    this.pieceIdentiteReserveService.mesPieces().subscribe({
+      next: (pieces) => { this.maPieceIdentite = pieces[0] ?? null; },
+      error: () => {},
+    });
+  }
+
+  onFichierPermisRecto(event: Event): void {
+    this.uploaderPermis('permis_recto', event);
+  }
+
+  onFichierPermisVerso(event: Event): void {
+    this.uploaderPermis('permis_verso', event);
+  }
+
+  private uploaderPermis(champ: 'permis_recto' | 'permis_verso', event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const fichier = input.files?.[0];
+    if (!fichier) return;
+
+    this.uploadPermisEnCours = true;
+    this.uploadPermisErreur = '';
+
+    const envoi = this.maPieceIdentite
+      ? this.pieceIdentiteReserveService.mettreAJour(this.maPieceIdentite.id, { [champ]: fichier })
+      : this.pieceIdentiteReserveService.creer({ [champ]: fichier });
+
+    envoi.subscribe({
+      next: (piece) => {
+        this.maPieceIdentite = piece;
+        this.uploadPermisEnCours = false;
+        input.value = '';
+      },
+      error: (err) => {
+        this.uploadPermisErreur = err?.error?.[champ]?.[0] || 'Échec de l\'envoi du fichier.';
+        this.uploadPermisEnCours = false;
+        input.value = '';
+      },
+    });
+  }
 }

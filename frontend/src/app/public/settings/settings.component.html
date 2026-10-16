@@ -154,6 +154,48 @@
             </div>
           </form>
 
+          <!-- Candidature réserve (voir User.souhaite_rejoindre_reserve) -->
+          @if (currentUser?.souhaite_rejoindre_reserve) {
+            <div class="reserve-piece-identite-block">
+              <h3><span class="material-icons">badge</span> Candidature à la réserve</h3>
+              @if (currentUser?.reserve_a_verifier) {
+                <p class="tab-hint">
+                  <span class="material-icons">hourglass_top</span>
+                  Votre candidature est en cours de vérification par le responsable de la réserve.
+                </p>
+              } @else {
+                <p class="tab-hint">
+                  <span class="material-icons">check_circle</span>
+                  Votre candidature a été vérifiée.
+                </p>
+              }
+              <p class="tab-hint">
+                Pour des raisons d'assurance, merci de déposer une photo recto et verso de votre
+                permis de conduire. Ces documents sont chiffrés et ne sont accessibles qu'à vous
+                et au responsable de la réserve.
+              </p>
+              <div class="piece-identite-upload">
+                <div class="piece-identite-cote">
+                  <label class="btn btn-secondary">
+                    <span class="material-icons">{{ maPieceIdentite?.a_recto ? 'check_circle' : 'upload_file' }}</span>
+                    {{ maPieceIdentite?.a_recto ? 'Permis (recto) envoyé — remplacer' : 'Envoyer le recto' }}
+                    <input type="file" accept="image/*,.pdf" (change)="onFichierPermisRecto($event)" style="display: none" [disabled]="uploadPermisEnCours">
+                  </label>
+                </div>
+                <div class="piece-identite-cote">
+                  <label class="btn btn-secondary">
+                    <span class="material-icons">{{ maPieceIdentite?.a_verso ? 'check_circle' : 'upload_file' }}</span>
+                    {{ maPieceIdentite?.a_verso ? 'Permis (verso) envoyé — remplacer' : 'Envoyer le verso' }}
+                    <input type="file" accept="image/*,.pdf" (change)="onFichierPermisVerso($event)" style="display: none" [disabled]="uploadPermisEnCours">
+                  </label>
+                </div>
+              </div>
+              @if (uploadPermisErreur) {
+                <p class="error-message">{{ uploadPermisErreur }}</p>
+              }
+            </div>
+          }
+
           <!-- SUIVI DE POSITION PERMANENT -->
           <div class="position-suivi-block">
             <h3><span class="material-icons">my_location</span> Suivi de position pendant mes missions</h3>

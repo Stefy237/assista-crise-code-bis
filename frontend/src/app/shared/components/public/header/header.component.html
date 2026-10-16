@@ -1,12 +1,12 @@
 <header class="header">
   <div class="container">
-    <!-- Logo -->
+    <!-- Logo (voir BrandingService -- "logo.png" par défaut, remplacé si une institution
+         marque blanche résout pour le Host visité) -->
     <div class="logo" (click)="navigateTo('/')">
-      <!-- <span class="logo-icon">&#64;</span> -->
       <span class="logo-icon">
-        <img src="logo.png" alt="Logo Assista Crise">
+        <img [src]="(branding$ | async)?.logo_url || 'logo.png'" [alt]="'Logo ' + ((branding$ | async)?.nom_affichage || 'Assista Crise')">
       </span>
-      <h1 class="logo-text">Assista Crise</h1>
+      <h1 class="logo-text">{{ (branding$ | async)?.nom_affichage || 'Assista Crise' }}</h1>
     </div>
 
     @if (canAccessDemo) {
@@ -217,6 +217,16 @@
     <span class="material-icons">info</span>
     Finalisez votre inscription : rattachez-vous à votre institution
     <span class="material-icons">arrow_forward</span>
+  </a>
+}
+
+<!-- Même gabarit que la bannière ci-dessus, pour la candidature "rejoindre la réserve" (voir
+     User.souhaite_rejoindre_reserve/reserve_a_verifier) -- reste visible tant que le
+     responsable de la réserve n'a pas traité la candidature. -->
+@if (currentUser?.reserve_a_verifier) {
+  <a class="setup-reminder-banner" routerLink="/settings">
+    <span class="material-icons">hourglass_top</span>
+    Votre candidature à la réserve est en cours de vérification
   </a>
 }
 

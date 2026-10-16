@@ -1,13 +1,17 @@
 import { Component, HostListener } from '@angular/core';
+import { CommonModule } from '@angular/common';
 import { Router, RouterModule } from '@angular/router';
 import { AuthService } from '../../../../auth/services/auth.service';
 import { User, UserRole } from '../../../models/user.model';
 import { TeamService } from '../../../../services/team.service';
 import { UserAvatarComponent } from '../../common/user-avatar/user-avatar.component';
+import { Observable } from 'rxjs';
+import { BrandingService, Branding } from '../../../../services/branding.service';
 
 @Component({
   selector: 'app-header',
   imports: [
+    CommonModule,
     RouterModule,
     UserAvatarComponent,
   ],
@@ -21,8 +25,13 @@ export class HeaderComponent {
   showMobileMenu = false;
   isMobile = false;
   myTeamId: string | null = null;
+  branding$: Observable<Branding>;
 
-  constructor(public authService: AuthService, private router: Router, private teamService: TeamService) {
+  constructor(
+    public authService: AuthService, private router: Router, private teamService: TeamService,
+    private brandingService: BrandingService,
+  ) {
+    this.branding$ = this.brandingService.branding$;
     this.currentUser = this.authService.getCurrentUser();
     this.checkScreenSize();
 

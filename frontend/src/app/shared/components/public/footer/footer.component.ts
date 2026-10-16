@@ -1,15 +1,23 @@
 import { Component } from '@angular/core';
+import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
+import { Observable } from 'rxjs';
+import { BrandingService, Branding } from '../../../../services/branding.service';
 
 @Component({
   selector: 'app-footer',
   templateUrl: './footer.component.html',
   styleUrls: ['./footer.component.scss'],
   standalone: true,
-  imports: [RouterModule],
+  imports: [CommonModule, RouterModule],
 })
 export class FooterComponent {
   currentYear = new Date().getFullYear();
+  branding$: Observable<Branding>;
+
+  constructor(private brandingService: BrandingService) {
+    this.branding$ = this.brandingService.branding$;
+  }
 
   emergencyLinks = [
     { label: 'SAMU',             number: '15',  url: 'tel:15'  },

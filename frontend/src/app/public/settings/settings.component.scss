@@ -760,6 +760,37 @@
   font-size: 0.9rem;
   max-width: 68ch;
   margin: 0 0 1.5rem;
+
+  .material-icons { font-size: 16px; vertical-align: text-bottom; margin-right: .2rem; }
+}
+
+.reserve-piece-identite-block {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e5e7eb;
+
+  h3 {
+    display: flex; align-items: center; gap: .5rem;
+    font-size: 1.05rem; margin: 0 0 .6rem;
+    .material-icons { font-size: 20px; color: #667eea; }
+  }
+
+  .piece-identite-upload {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .btn-secondary {
+    display: inline-flex; align-items: center; gap: .4rem;
+    padding: 0.65rem 1.3rem;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    background: #f3f4f6;
+    color: #374151;
+  }
 }
 
 .radio-zone-title {

@@ -1,4 +1,5 @@
 import { Component } from '@angular/core';
+import { CONTACT_NOM } from '../../../shared/utils/contact-obfusque.util';
 
 @Component({
   selector: 'app-credits',
@@ -7,5 +8,5 @@ import { Component } from '@angular/core';
   styleUrl: './credits.component.scss'
 })
 export class CreditsComponent {
-
+  readonly contactNom = CONTACT_NOM;
 }

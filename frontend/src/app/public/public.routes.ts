@@ -65,6 +65,11 @@ export const PUBLIC_ROUTES: Routes = [
           .then(m => m.EngagementRessourceComponent)
       },
       {
+        path: 'confirmation-pcs/:token',
+        loadComponent: () => import('./confirmation-pcs/confirmation-pcs.component')
+          .then(m => m.ConfirmationPcsComponent)
+      },
+      {
         path: 'repondre-offre/:token',
         loadComponent: () => import('./offer-reponse/offer-reponse.component')
           .then(m => m.OfferReponseComponent)
@@ -159,8 +164,15 @@ export const PUBLIC_ROUTES: Routes = [
         component: RecherchesPersonnesComponent
       },
       {
+        // Dépôt ouvert à tout compte authentifié (demande utilisateur du 08/10) : un citoyen
+        // dont un proche a disparu pendant une crise n'a aucune raison d'être rattaché à une
+        // institution pour signaler sa disparition -- même logique que Request/Offer/
+        // Information. Backend aligné (RecherchePersonneViewSet.get_permissions, action
+        // 'create' -> IsAuthenticated). Seules la consultation du registre et sa gestion
+        // (ci-dessus/ci-dessous) restent réservées aux institutionnels -- c'est là qu'est la
+        // donnée sensible sur un tiers qui avait motivé le correctif RGPD du 18/09.
         path: 'recherches-personnes/new',
-        canActivate: [institutionalEffectiveGuard],
+        canActivate: [authGuard],
         component: RecherchePersonneCreateComponent
       },
       {

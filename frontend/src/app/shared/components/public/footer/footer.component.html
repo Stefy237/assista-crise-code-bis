@@ -4,8 +4,8 @@
     <!-- ── Brand ─────────────────────────────────────────── -->
     <div class="col col-brand">
       <div class="brand">
-        <img src="logo.png" alt="Assista Crise" class="brand-logo" onerror="this.style.display='none'"/>
-        <span class="brand-name">Assista Crise</span>
+        <img [src]="(branding$ | async)?.logo_url || 'logo.png'" [alt]="(branding$ | async)?.nom_affichage || 'Assista Crise'" class="brand-logo" onerror="this.style.display='none'"/>
+        <span class="brand-name">{{ (branding$ | async)?.nom_affichage || 'Assista Crise' }}</span>
       </div>
       <p class="brand-desc">
         Plateforme de coordination en situation de crise.<br/>

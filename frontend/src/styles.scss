@@ -3,8 +3,18 @@
 @import 'fonts.scss';
 
 
+// Marque blanche (voir BrandingService) : valeurs par défaut Assista-Crise, réécrites au
+// runtime sur :root par BrandingService.appliquer() quand le Host visité résout vers une
+// institution avec son propre branding -- jamais autrement (pas de variation par défaut).
+:root {
+  --brand-primary: #2563eb;
+  --brand-secondary: #1d4ed8;
+  --brand-font-title: Roboto, "Helvetica Neue", sans-serif;
+  --brand-font-text: Roboto, "Helvetica Neue", sans-serif;
+}
+
 html, body { height: 100%; }
-body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
+body { margin: 0; font-family: var(--brand-font-text); }
 app-header, app-admin-header {
   position: sticky;
   top: 0;
