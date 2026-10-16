@@ -3,7 +3,7 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { map, Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { Crisis, CrisisPayload } from '../shared/models/crisis.model';
-import { StatsResponse } from '../shared/models/api.model';
+import { StatsResponse, PageResponse } from '../shared/models/api.model';
 import { StocksComparaison } from '../shared/models/materiel-point.model';
 import { geoPointToLatLng, latLngToGeoJson } from '../shared/models/geopoint.model';
 import { GeolocationService } from './geolocation.service';
@@ -42,6 +42,15 @@ export class CrisisService {
    */
   getRecent(limit = 5): Observable<Crisis[]> {
     return this.getAll({ ordering: '-date_debut', limit: String(limit) });
+  }
+
+  /** GET /api/crises/?page=&page_size=&... — voir OfferService.searchPage, même patron.
+   * Utilisé par ReportingComponent (page Signalements) à la place de getAll(). */
+  searchPage(params: Record<string, string>, page: number, pageSize: number): Observable<PageResponse<Crisis>> {
+    const httpParams = this.toParams({ ...params, page: String(page), page_size: String(pageSize) });
+    return this.http
+      .get<PageResponse<Crisis>>(`${this.apiUrl}/`, { params: httpParams })
+      .pipe(map(res => ({ ...res, results: res.results.map(this.normalize) })));
   }
 
   /** GET /api/crises/<id>/ */

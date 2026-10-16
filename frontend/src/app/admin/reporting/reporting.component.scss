@@ -257,6 +257,24 @@
 
 .rayon-input { width: 5.5rem; cursor: text; }
 
+// Filtre commune : recadré à la page affichée depuis le passage en pagination serveur (voir
+// ReportingComponent.onCommuneFilterChange) -- ce hint rend la limite visible plutôt que de
+// laisser croire à un filtre global comme avant.
+.filter-with-hint {
+  display: flex; flex-direction: column; gap: .15rem;
+}
+.filter-hint {
+  font-size: .72rem; color: #94a3b8; padding-left: .2rem;
+}
+
+.overview-hint {
+  display: flex; align-items: center; gap: .5rem;
+  margin: .5rem 0 0; padding: .6rem .9rem;
+  background: var(--surface); border: 1px dashed var(--border); border-radius: 9px;
+  font-size: .82rem; color: #64748b;
+  .material-icons { font-size: 18px; color: var(--primary); }
+}
+
 .checkbox-inline {
   display: flex; align-items: center; gap: .4rem;
   font-size: .85rem; color: var(--muted); cursor: pointer;

@@ -8,14 +8,15 @@
         Signalements
       </h1>
       <p class="subtitle">
-        @if (!isLoading) { {{ filteredRows.length }} résultat{{ filteredRows.length > 1 ? 's' : '' }} sur {{ allRows.length }} total }
+        @if (!isLoading && isOverview) { Aperçu — {{ pagedRows.length }} résultat{{ pagedRows.length > 1 ? 's' : '' }} (10 max par type) }
+        @else if (!isLoading) { {{ pagedRows.length }} affiché{{ pagedRows.length > 1 ? 's' : '' }} sur {{ totalCount }} résultat{{ totalCount > 1 ? 's' : '' }} }
       </p>
     </div>
     <div class="header-actions">
-      <button class="btn-ghost" (click)="loadAll()" [disabled]="isLoading" title="Rafraîchir">
+      <button class="btn-ghost" (click)="load()" [disabled]="isLoading" title="Rafraîchir">
         <span class="material-icons" [class.spin]="isLoading">refresh</span>
       </button>
-      <button class="btn-primary" (click)="exportCSV()" [disabled]="isLoading || filteredRows.length === 0">
+      <button class="btn-primary" (click)="exportCSV()" [disabled]="isLoading || pagedRows.length === 0" [title]="isOverview ? 'Exporte uniquement l\'aperçu affiché' : 'Exporte la page affichée'">
         <span class="material-icons">download</span>
         Exporter CSV
       </button>
@@ -59,7 +60,7 @@
       <button
         class="kind-tab"
         [class.active]="filterKind === opt.value"
-        (click)="filterKind = opt.value; applyFilters()"
+        (click)="changeKind(opt.value)"
       >
         <span class="material-icons">{{ opt.icon }}</span>
         <span>{{ opt.label }}</span>
@@ -76,34 +77,39 @@
         type="text"
         placeholder="Rechercher par titre, contact, email…"
         [(ngModel)]="searchQuery"
-        (ngModelChange)="currentPage = 1; applyFilters()"
+        (ngModelChange)="currentPage = 1; load()"
       />
       @if (searchQuery) {
-        <button class="clear-btn" (click)="searchQuery = ''; applyFilters()">
+        <button class="clear-btn" (click)="searchQuery = ''; currentPage = 1; load()">
           <span class="material-icons">close</span>
         </button>
       }
     </div>
 
     <div class="control-row">
-      <select class="filter-select" [(ngModel)]="filterStatus" (ngModelChange)="currentPage = 1; applyFilters()">
+      <select class="filter-select" [(ngModel)]="filterStatus" (ngModelChange)="currentPage = 1; load()">
         @for (opt of statusOptions; track opt.value) {
           <option [value]="opt.value">{{ opt.label }}</option>
         }
       </select>
 
-      <input
-        type="text"
-        class="filter-select"
-        placeholder="Filtrer par commune…"
-        [(ngModel)]="filterCommune"
-        (ngModelChange)="currentPage = 1; applyFilters()"
-      />
+      <div class="filter-with-hint">
+        <input
+          type="text"
+          class="filter-select"
+          placeholder="Filtrer par commune…"
+          [(ngModel)]="filterCommune"
+          (ngModelChange)="onCommuneFilterChange()"
+        />
+        @if (!isOverview) {
+          <span class="filter-hint">s'applique à la page affichée uniquement</span>
+        }
+      </div>
 
       <select
         class="filter-select"
         [(ngModel)]="echelle"
-        (ngModelChange)="loadAll()"
+        (ngModelChange)="load()"
         title="Étendue géographique — par défaut, ma zone de compétence. Le rayon en km n'élargit que les offres/bénévoles."
       >
         @for (opt of echelleOptions; track opt.value) {
@@ -117,25 +123,25 @@
           class="filter-select rayon-input"
           min="1"
           [(ngModel)]="rayonKm"
-          (change)="loadAll()"
+          (change)="load()"
           title="Rayon en kilomètres autour de ma commune (offres/bénévoles uniquement)"
         />
       }
 
-      <select class="filter-select" [(ngModel)]="filterCompetence" (ngModelChange)="currentPage = 1; applyFilters()" title="Ne s'applique qu'aux offres">
+      <select class="filter-select" [(ngModel)]="filterCompetence" (ngModelChange)="currentPage = 1; load()" title="Ne s'applique qu'aux offres">
         <option value="ALL">Toutes compétences</option>
         @for (c of competences; track c.id) {
           <option [value]="c.nom">{{ c.nom }}</option>
         }
       </select>
 
-      <select class="filter-select" [(ngModel)]="filterMaterielLivraison" (ngModelChange)="currentPage = 1; applyFilters()" title="Ne s'applique qu'aux offres de matériel">
+      <select class="filter-select" [(ngModel)]="filterMaterielLivraison" (ngModelChange)="currentPage = 1; load()" title="Ne s'applique qu'aux offres de matériel">
         <option value="ALL">Matériel : tous</option>
         <option value="LIVRAISON_POSSIBLE">Dépôt en centre de regroupement</option>
         <option value="A_RECUPERER">À récupérer sur place</option>
       </select>
 
-      <select class="filter-select" [(ngModel)]="pageSize" (ngModelChange)="currentPage = 1; applyFilters()">
+      <select class="filter-select" [(ngModel)]="pageSize" (ngModelChange)="currentPage = 1; load()">
         <option [value]="10">10 / page</option>
         <option [value]="15">15 / page</option>
         <option [value]="25">25 / page</option>
@@ -143,7 +149,7 @@
       </select>
 
       <label class="checkbox-inline" title="Afficher aussi les offres/demandes/signalements désactivés">
-        <input type="checkbox" [(ngModel)]="showDesactives" (ngModelChange)="loadAll()" />
+        <input type="checkbox" [(ngModel)]="showDesactives" (ngModelChange)="load()" />
         Afficher aussi les éléments désactivés
       </label>
 
@@ -154,6 +160,14 @@
         </button>
       }
     </div>
+    @if (isOverview) {
+      <p class="overview-hint">
+        <span class="material-icons">info</span>
+        Aperçu limité à 10 résultats par type — passez sur un onglet spécifique (Offres,
+        Demandes, Informations, Crises) pour parcourir l'ensemble des résultats, les trier et
+        les paginer.
+      </p>
+    }
   </div>
 
   <!-- ══ BARRES D'ACTION GROUPÉE (masquées en mode picker : hors-sujet quand on est déjà dans
@@ -198,7 +212,7 @@
       <div class="skel-rows">
         @for (i of [1,2,3,4,5,6,7,8]; track i) { <div class="skel-row"></div> }
       </div>
-    } @else if (filteredRows.length === 0) {
+    } @else if (pagedRows.length === 0) {
       <div class="empty">
         <span class="material-icons">manage_search</span>
         <p>Aucun signalement trouvé</p>
@@ -380,30 +394,32 @@
         </table>
       </div>
 
-      <!-- ── Pagination ──────────────────────────────────────────────────────── -->
-      <div class="pagination">
-        <span class="pag-info">
-          {{ (currentPage - 1) * pageSize + 1 }}–{{ minOf(currentPage * pageSize, filteredRows.length) }}
-          sur {{ filteredRows.length }}
-        </span>
-        <div class="pag-buttons">
-          <button class="pag-btn" [disabled]="currentPage === 1" (click)="changePage(1)">
-            <span class="material-icons">first_page</span>
-          </button>
-          <button class="pag-btn" [disabled]="currentPage === 1" (click)="changePage(currentPage - 1)">
-            <span class="material-icons">chevron_left</span>
-          </button>
-          @for (p of pageNumbers; track p) {
-            <button class="pag-btn" [class.active]="p === currentPage" (click)="changePage(p)">{{ p }}</button>
-          }
-          <button class="pag-btn" [disabled]="currentPage === totalPages" (click)="changePage(currentPage + 1)">
-            <span class="material-icons">chevron_right</span>
-          </button>
-          <button class="pag-btn" [disabled]="currentPage === totalPages" (click)="changePage(totalPages)">
-            <span class="material-icons">last_page</span>
-          </button>
+      <!-- ── Pagination (masquée en aperçu "Tout" — voir isOverview) ──────────── -->
+      @if (!isOverview) {
+        <div class="pagination">
+          <span class="pag-info">
+            {{ (currentPage - 1) * pageSize + 1 }}–{{ minOf(currentPage * pageSize, totalCount) }}
+            sur {{ totalCount }}
+          </span>
+          <div class="pag-buttons">
+            <button class="pag-btn" [disabled]="currentPage === 1" (click)="changePage(1)">
+              <span class="material-icons">first_page</span>
+            </button>
+            <button class="pag-btn" [disabled]="currentPage === 1" (click)="changePage(currentPage - 1)">
+              <span class="material-icons">chevron_left</span>
+            </button>
+            @for (p of pageNumbers; track p) {
+              <button class="pag-btn" [class.active]="p === currentPage" (click)="changePage(p)">{{ p }}</button>
+            }
+            <button class="pag-btn" [disabled]="currentPage === totalPages" (click)="changePage(currentPage + 1)">
+              <span class="material-icons">chevron_right</span>
+            </button>
+            <button class="pag-btn" [disabled]="currentPage === totalPages" (click)="changePage(totalPages)">
+              <span class="material-icons">last_page</span>
+            </button>
+          </div>
         </div>
-      </div>
+      }
     }
   </div>
 </div>
@@ -604,7 +620,7 @@
               <select [(ngModel)]="assignTeamId">
                 <option [ngValue]="null">— Choisir une équipe —</option>
                 @for (team of teams; track team.id) {
-                  <option [ngValue]="team.id">{{ team.name }}</option>
+                  <option [ngValue]="team.id">{{ teamDisplayName(team) }}</option>
                 }
               </select>
               <button class="btn-secondary sm" [disabled]="!assignTeamId" (click)="submitAssignTeam()">
@@ -641,7 +657,7 @@
               <select [(ngModel)]="assignTeamId">
                 <option [ngValue]="null">— Choisir une équipe —</option>
                 @for (team of teams; track team.id) {
-                  <option [ngValue]="team.id">{{ team.name }}</option>
+                  <option [ngValue]="team.id">{{ teamDisplayName(team) }}</option>
                 }
               </select>
               <button class="btn-secondary sm" [disabled]="!assignTeamId" (click)="submitAssignTeamRequest()">

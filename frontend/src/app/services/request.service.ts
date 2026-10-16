@@ -3,7 +3,7 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { map, Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import { Request, RequestPayload, RequestType } from '../shared/models/request.model';
-import { StatsResponse } from '../shared/models/api.model';
+import { StatsResponse, PageResponse } from '../shared/models/api.model';
 import { geoPointToLatLng, latLngToGeoJson } from '../shared/models/geopoint.model';
 
 @Injectable({
@@ -33,6 +33,16 @@ export class RequestService {
     return this.http
       .get<Request[]>(`${this.url}/`, { params: this.toParams(params) })
       .pipe(map(list => list.map(this.normalize)));
+  }
+
+  /** GET /api/demandes/?page=&page_size=&... — voir OfferService.searchPage, même patron
+   * (pagination opt-in, toujours l'enveloppe ici puisque `page` est systématiquement envoyé).
+   * Utilisé par ReportingComponent (page Signalements) à la place de getAll(). */
+  searchPage(params: Record<string, string>, page: number, pageSize: number): Observable<PageResponse<Request>> {
+    const httpParams = this.toParams({ ...params, page: String(page), page_size: String(pageSize) });
+    return this.http
+      .get<PageResponse<Request>>(`${this.url}/`, { params: httpParams })
+      .pipe(map(res => ({ ...res, results: res.results.map(this.normalize) })));
   }
 
   /**

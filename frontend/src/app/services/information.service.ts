@@ -5,6 +5,7 @@ import { Information, InformationPayload, InformationType } from '../shared/mode
 import { map, Observable } from 'rxjs';
 import { geoPointToLatLng, latLngToGeoJson } from '../shared/models/geopoint.model';
 import { Team } from '../shared/models/team.model';
+import { PageResponse } from '../shared/models/api.model';
 
 export interface BulkAssignInformationResult {
   team: Team;
@@ -38,6 +39,15 @@ export class InformationService {
     return this.http
       .get<Information[]>(`${this.url}/`, { params: this.toParams(params) })
       .pipe(map(list => list.map(this.normalize)));
+  }
+
+  /** GET /api/informations/?page=&page_size=&... — voir OfferService.searchPage, même patron.
+   * Utilisé par ReportingComponent (page Signalements) à la place de getAll(). */
+  searchPage(params: Record<string, string>, page: number, pageSize: number): Observable<PageResponse<Information>> {
+    const httpParams = this.toParams({ ...params, page: String(page), page_size: String(pageSize) });
+    return this.http
+      .get<PageResponse<Information>>(`${this.url}/`, { params: httpParams })
+      .pipe(map(res => ({ ...res, results: res.results.map(this.normalize) })));
   }
 
   getById(id: string): Observable<Information> {

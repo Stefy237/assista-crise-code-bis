@@ -20,7 +20,7 @@ import { MinimapComponent } from '../../shared/components/common/minimap/minimap
 import { Competence } from '../../shared/models/competence.model';
 
 import { DisponibiliteOffre } from '../../shared/models/disponibilite-offre.model';
-import { Team } from '../../shared/models/team.model';
+import { Team, teamDisplayName } from '../../shared/models/team.model';
 import { PointOperationnel } from '../../shared/models/point-operationnel.model';
 import { Dossier } from '../../shared/models/dossier.model';
 import { Mission } from '../../shared/models/mission.model';
@@ -31,6 +31,7 @@ import { Offer }       from '../../shared/models/offer.model';
 import { Request }     from '../../shared/models/request.model';
 import { Information } from '../../shared/models/information.model';
 import { Status }      from '../../shared/models/status.model';
+import { PageResponse } from '../../shared/models/api.model';
 
 // ── Unified row displayed in the table ───────────────────────────────────────
 
@@ -81,6 +82,20 @@ type FilterStatus = Status     | 'ALL';
 type SortField    = 'title' | 'kind' | 'status' | 'date' | 'contact' | 'commune' | 'distanceFromCrisisKm';
 type EchelleFilter = 'zone' | 'rayon' | 'departement' | 'region' | 'national';
 
+// Correspondance SortField (UI) -> `ordering` serveur (OrderingFilter, voir core/views.py) —
+// 'contact' est volontairement absent : champ chiffré (first_name_offer/last_name_offer/...),
+// non triable en SQL (voir core/crypto_fields.py), trié côté client sur la page affichée
+// uniquement (voir setSort). Crisis n'a pas de colonne 'status' ni 'commune_code'/
+// 'distance_from_crisis' : un ordering non supporté par le FilterSet ciblé est simplement
+// ignoré par DRF (pas d'erreur), donc cette table unique convient pour les 4 types.
+const ORDERING_FIELD_MAP: Partial<Record<SortField, string>> = {
+  title: 'title',
+  status: 'status',
+  date: 'created_at',
+  commune: 'commune_code',
+  distanceFromCrisisKm: 'distance_from_crisis',
+};
+
 @Component({
   selector: 'app-reporting',
   standalone: true,
@@ -89,27 +104,32 @@ type EchelleFilter = 'zone' | 'rayon' | 'departement' | 'region' | 'national';
   styleUrls: ['./reporting.component.scss'],
 })
 export class ReportingComponent implements OnInit, OnDestroy {
+  teamDisplayName = teamDisplayName;
+
   private destroy$ = new Subject<void>();
 
-  // ── Raw data ───────────────────────────────────────────────
-  rawCrises:       Crisis[]       = [];
-  rawOffers:       Offer[]       = [];
-  rawRequests:     Request[]     = [];
-  rawInformations: Information[] = [];
+  // ── Support data (chargées une fois, pas re-paginées — volumes réduits) ────
   teams:           Team[]        = [];
   dossiers:        Dossier[]     = [];
   missions:        Mission[]     = [];
   regulateurs:     User[]        = [];
+  /** Annuaire permanent de bénévoles (mode pickForTeamId uniquement) — chargé une fois à
+   * l'entrée dans ce mode, pas reparcouru à chaque changement de filtre/page (c'est un
+   * annuaire de secours pour rattacher un bénévole existant à une équipe, pas le flux de
+   * triage principal que cette page optimise). Voir OfferService.vueSecteur. */
+  benevoleRows:    ReportRow[]   = [];
 
   // ── Détail offre : disponibilités + affectation ─────────────
   selectedOfferDispos: DisponibiliteOffre[] = [];
   assignTeamId:    string | null = null;
   assignDossierId: string | null = null;
 
-  // ── Processed rows ─────────────────────────────────────────
-  allRows:      ReportRow[] = [];
-  filteredRows: ReportRow[] = [];
+  // ── Lignes affichées : la page courante du type actif (ou un aperçu borné
+  // multi-types pour l'onglet "Tout", voir loadOverview) — jamais la table entière. ──
   pagedRows:    ReportRow[] = [];
+  /** Nombre total de résultats correspondant aux filtres actifs pour le type actif (depuis
+   * `count` de la réponse paginée) — absent de sens pour l'onglet "Tout" (voir isOverview). */
+  totalCount = 0;
 
   // ── UI state ───────────────────────────────────────────────
   isLoading      = true;
@@ -121,6 +141,10 @@ export class ReportingComponent implements OnInit, OnDestroy {
   searchQuery   = '';
   filterKind:   FilterKind   = 'ALL';
   filterStatus: FilterStatus = 'ALL';
+  // Substring sur le nom de commune affiché (dérivé serveur, pas une colonne DB unifiée sur
+  // les 4 types) — reste un filtre CLIENT, mais désormais recadré à la seule page affichée
+  // (plus de filtre global possible une fois la pagination serveur en place). Voir le hint
+  // affiché sous ce champ dans le template.
   filterCommune   = '';
   filterCompetence = 'ALL';
   filterMaterielLivraison: 'ALL' | 'A_RECUPERER' | 'LIVRAISON_POSSIBLE' = 'ALL';
@@ -147,7 +171,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
 
   competences: Competence[] = [];
 
-  // ── Pagination ─────────────────────────────────────────────
+  // ── Pagination (serveur) ────────────────────────────────────
   pageSize    = 15;
   currentPage = 1;
   totalPages  = 1;
@@ -161,10 +185,16 @@ export class ReportingComponent implements OnInit, OnDestroy {
   isLoadingAddress = false;
   newStatus:   Status | ''      = '';
 
-  // ── Sélection multiple + actions groupées ───────────────────
+  // ── Sélection multiple + actions groupées (persiste à travers les pages — voir
+  // RecrutementBenevolesModalComponent, même patron : un Set d'ids + une Map parallèle qui
+  // garde la ligne complète, pour pouvoir construire la barre d'action/le récap sans dépendre
+  // de la page actuellement chargée) ─────────────────────────
   selectedOfferIds   = new Set<string>();
   selectedRequestIds = new Set<string>();
   selectedInformationIds = new Set<string>();
+  private selectedOfferRowsMap   = new Map<string, ReportRow>();
+  private selectedRequestRowsMap = new Map<string, ReportRow>();
+  private selectedInformationRowsMap = new Map<string, ReportRow>();
 
   showBulkInformationModal = false;
   bulkInformationTeamId: string | null = null;
@@ -198,6 +228,10 @@ export class ReportingComponent implements OnInit, OnDestroy {
     { label: 'Demandes',     value: 'Request',      icon: 'emergency'           },
     { label: 'Informations', value: 'Information',  icon: 'info'                },
   ];
+
+  /** Compteurs par onglet (badge) — alimentés par `count` de chaque réponse paginée, jamais
+   * recalculés depuis un tableau en mémoire (il n'y en a plus un qui contienne tout). */
+  countByKind: Record<string, number> = { ALL: 0, Crisis: 0, Offer: 0, Request: 0, Information: 0 };
 
   readonly statusOptions: { label: string; value: FilterStatus }[] = [
     { label: 'Tous statuts',  value: 'ALL'             },
@@ -252,10 +286,41 @@ export class ReportingComponent implements OnInit, OnDestroy {
     return !!(this.pickForTeamId || this.pickForPointId);
   }
 
+  /** Onglet "Tout" : aperçu borné (1ère page de chaque type, pas de pagination/tri) plutôt
+   * qu'une fusion paginée de 4 flux hétérogènes — voir le hint affiché dans le template. */
+  get isOverview(): boolean {
+    return this.filterKind === 'ALL';
+  }
+
   ngOnInit():    void {
     this.pickForTeamId = this.route.snapshot.queryParamMap.get('pickForTeam');
     this.pickForPointId = this.route.snapshot.queryParamMap.get('pickForPoint');
-    this.loadAll();
+
+    // Données de support (équipes, dossiers, missions, régulateurs) : chargées une fois, pas
+    // re-paginées ni refetchées à chaque changement de filtre/page de la table principale —
+    // volumes sans commune mesure avec Offer/Request/Information à l'échelle cible.
+    forkJoin({
+      teams:    this.teamService.getAll(),
+      dossiers: this.dossierService.getAll(),
+      missions: this.missionService.getAll(),
+      users:    this.userService.getAll(),
+    }).pipe(takeUntil(this.destroy$)).subscribe({
+      next: ({ teams, dossiers, missions, users }) => {
+        this.teams = teams;
+        this.dossiers = dossiers;
+        this.missions = missions;
+        this.regulateurs = users.filter(u => u.type === UserRole.REGULATEUR);
+      },
+      error: () => {},
+    });
+
+    if (this.pickForTeamId) {
+      this.offerService.vueSecteur().pipe(catchError(() => of([]))).subscribe(offres => {
+        this.benevoleRows = offres.map(o => this.toRow('Offer', o));
+        if (this.filterKind === 'Offer' || this.filterKind === 'ALL') this.load();
+      });
+    }
+
     this.competenceService.getAll().subscribe({
       next: (competences) => { this.competences = competences; },
       error: () => {},
@@ -266,6 +331,9 @@ export class ReportingComponent implements OnInit, OnDestroy {
         error: () => {},
       });
     }
+
+    this.load();
+    this.openByIdFromUrl();
   }
 
   get pickForTeam(): Team | undefined {
@@ -317,7 +385,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // LOAD
+  // LOAD (serveur : pagination + recherche + tri + filtres, voir plan 2026-10-15)
   // ────────────────────────────────────────────────────────────────────────────
 
   /** Params d'échelle géographique communs à Crise/Offre/Demande/Signalement : ?scope=zone
@@ -334,185 +402,252 @@ export class ReportingComponent implements OnInit, OnDestroy {
     return params;
   }
 
-  loadAll(): void {
+  /** Construit les query params serveur pour un type donné — échelle + actif (déjà des
+   * paramètres serveur avant ce chantier) + search/status/ordering (nouveaux, voir
+   * RequestSearchFilter/InformationSearchFilter/OfferSearchFilter/CrisisSearchFilter côté
+   * backend) + competence/materiel_livraison (offres uniquement). */
+  private buildParams(kind: ReportKind): Record<string, string> {
+    const params: Record<string, string> = { ...this.buildEchelleParams(kind === 'Offer') };
+    if (this.showDesactives && kind !== 'Crisis') params['actif'] = 'all';
+    if (kind === 'Offer') params['exclude_type'] = 'Bénévolat';
+    const q = this.searchQuery.trim();
+    if (q) params['search'] = q;
+    if (this.filterStatus !== 'ALL' && kind !== 'Crisis') params['status'] = this.filterStatus;
+    if (kind === 'Offer') {
+      if (this.filterCompetence !== 'ALL') params['competence'] = this.filterCompetence;
+      if (this.filterMaterielLivraison !== 'ALL') params['materiel_livraison'] = this.filterMaterielLivraison;
+    }
+    if (this.sortField !== 'contact' && this.sortField !== 'kind') {
+      const field = kind === 'Crisis'
+        ? ({ date: 'start_date', title: 'name' } as Partial<Record<SortField, string>>)[this.sortField]
+        : ORDERING_FIELD_MAP[this.sortField];
+      if (field) params['ordering'] = this.sortAsc ? field : `-${field}`;
+    }
+    return params;
+  }
+
+  private searchPageFor(kind: ReportKind, page: number, pageSize: number): Observable<PageResponse<Crisis | Offer | Request | Information>> {
+    const params = this.buildParams(kind);
+    switch (kind) {
+      case 'Crisis':      return this.crisisService.searchPage(params, page, pageSize);
+      case 'Offer':       return this.offerService.searchPage(params, page, pageSize);
+      case 'Request':     return this.requestService.searchPage(params, page, pageSize);
+      case 'Information': return this.informationService.searchPage(params, page, pageSize);
+    }
+  }
+
+  /** Point d'entrée unique de chargement — branche sur l'onglet actif : un type précis
+   * déclenche une page serveur triée/filtrée ; "Tout" déclenche un aperçu borné (voir
+   * loadOverview). Toujours appelé après un changement de filtre/tri/page/onglet — jamais de
+   * recalcul en mémoire depuis une table déjà chargée (il n'y en a plus). */
+  load(): void {
     this.isLoading = true;
     this.selectedOfferIds.clear();
     this.selectedRequestIds.clear();
     this.selectedInformationIds.clear();
-    const actifParams = this.showDesactives ? { actif: 'all' } : undefined;
-    const zoneParams = this.buildEchelleParams();
-    // exclude_type=Bénévolat : l'annuaire permanent de bénévoles (potentiellement des
-    // milliers de fiches, sans crise rattachée) ne relève pas de ce tableau de triage —
-    // consultable via OfferService.vueSecteur à la place.
-    const offreParams = { ...(actifParams ?? {}), exclude_type: 'Bénévolat', ...this.buildEchelleParams(true) };
-    // En mode "ajouter une ressource à une équipe" (pickForTeamId), l'annuaire de bénévoles
-    // (normalement exclu de ce tableau, voir exclude_type ci-dessus) redevient nécessaire :
-    // c'est le seul moyen actuel de rattacher un bénévole à une équipe. Scopé au secteur de
-    // l'institution (vue_secteur), jamais chargé pour la vue de triage normale. catchError :
-    // pas d'institution/secteur résolu ne doit pas casser le reste du chargement.
-    const benevoles$ = this.pickForTeamId
-      ? this.offerService.vueSecteur().pipe(catchError(() => of([])))
-      : of([]);
-    forkJoin({
-      crises:       this.crisisService.getAll(zoneParams),
-      offres:       this.offerService.getAll(offreParams),
-      benevoles:    benevoles$,
-      demandes:     this.requestService.getAll({ ...(actifParams ?? {}), ...zoneParams }),
-      informations: this.informationService.getAll({ ...(actifParams ?? {}), ...zoneParams }),
-      teams:        this.teamService.getAll(),
-      dossiers:     this.dossierService.getAll(),
-      missions:     this.missionService.getAll(),
-      users:        this.userService.getAll(),
-    })
+    this.selectedOfferRowsMap.clear();
+    this.selectedRequestRowsMap.clear();
+    this.selectedInformationRowsMap.clear();
+
+    if (this.isOverview) {
+      this.loadOverview();
+    } else {
+      this.loadKindPage(this.filterKind as ReportKind);
+    }
+  }
+
+  /** Recharge sans réinitialiser la sélection ni la page courante — utilisé après une action
+   * qui modifie des données déjà affichées (réactivation, suppression...) plutôt que
+   * `load()`, qui remettrait l'utilisateur à la page 1 avec sélection vidée. */
+  private reload(): void {
+    this.isLoading = true;
+    if (this.isOverview) this.loadOverview();
+    else this.loadKindPage(this.filterKind as ReportKind);
+  }
+
+  private loadKindPage(kind: ReportKind): void {
+    this.searchPageFor(kind, this.currentPage, this.pageSize)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          let rows = res.results.map(raw => this.toRow(kind, raw));
+          if (kind === 'Offer' && this.pickForTeamId) rows = [...rows, ...this.benevoleRows];
+          this.lastFetchedRows = rows;
+          this.applyCommuneFilterAndContactSort();
+          this.totalCount = res.count;
+          this.totalPages = Math.max(1, Math.ceil(res.count / this.pageSize));
+          this.currentPage = Math.min(this.currentPage, this.totalPages);
+          this.countByKind[kind] = res.count;
+          this.afterRowsLoaded();
+        },
+        error: () => { this.showError('Impossible de charger les signalements.'); this.isLoading = false; },
+      });
+    this.refreshOtherCounts(kind);
+  }
+
+  /** Onglet "Tout" : 1ère page de chaque type, taille fixe courte — pas une fusion paginée (ça
+   * reviendrait à tout recharger pour trier en mémoire, exactement le problème corrigé ici).
+   * Fusionné et trié par date côté client : coût négligeable sur ≤40 lignes. */
+  private loadOverview(): void {
+    const OVERVIEW_PAGE_SIZE = 10;
+    const kinds: ReportKind[] = ['Crisis', 'Offer', 'Request', 'Information'];
+    forkJoin(kinds.map(k => this.searchPageFor(k, 1, OVERVIEW_PAGE_SIZE).pipe(
+      catchError(() => of({ count: 0, next: null, previous: null, results: [] } as PageResponse<any>)),
+    )))
     .pipe(takeUntil(this.destroy$))
-    .subscribe({
-      next: ({ crises, offres, benevoles, demandes, informations, teams, dossiers, missions, users }) => {
-        this.teams    = teams;
-        this.dossiers = dossiers;
-        this.missions = missions;
-        this.regulateurs = users.filter(u => u.type === UserRole.REGULATEUR);
-        this.rawCrises       = crises;
-        this.rawOffers       = [...offres, ...benevoles];
-        this.rawRequests     = demandes;
-        this.rawInformations = informations;
-        this.buildRows();
-        this.isLoading = false;
-      },
-      error: () => {
-        this.showError('Impossible de charger les signalements.');
-        this.isLoading = false;
-      },
+    .subscribe(responses => {
+      let rows: ReportRow[] = [];
+      responses.forEach((res, i) => {
+        const kind = kinds[i];
+        this.countByKind[kind] = res.count;
+        rows.push(...res.results.map(raw => this.toRow(kind, raw)));
+      });
+      if (this.pickForTeamId) rows.push(...this.benevoleRows);
+      rows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+      this.lastFetchedRows = rows;
+      this.applyCommuneFilterAndContactSort();
+      this.countByKind['ALL'] = kinds.reduce((sum, k) => sum + (this.countByKind[k] ?? 0), 0);
+      this.totalCount = this.pagedRows.length;
+      this.totalPages = 1;
+      this.afterRowsLoaded();
+    });
+  }
+
+  /** Tient à jour les compteurs des AUTRES onglets pendant qu'on affiche un type précis (sinon
+   * les badges resteraient figés sur leur dernière valeur connue) — requêtes légères
+   * (page_size=1, seul `count` nous intéresse), indépendantes du rendu de la page affichée. */
+  private refreshOtherCounts(activeKind: ReportKind): void {
+    const others = (['Crisis', 'Offer', 'Request', 'Information'] as ReportKind[]).filter(k => k !== activeKind);
+    forkJoin(others.map(k => this.searchPageFor(k, 1, 1).pipe(
+      catchError(() => of({ count: this.countByKind[k] ?? 0, next: null, previous: null, results: [] } as PageResponse<any>)),
+    )))
+    .pipe(takeUntil(this.destroy$))
+    .subscribe(responses => {
+      responses.forEach((res, i) => { this.countByKind[others[i]] = res.count; });
+      this.countByKind['ALL'] = (['Crisis', 'Offer', 'Request', 'Information'] as ReportKind[])
+        .reduce((sum, k) => sum + (this.countByKind[k] ?? 0), 0);
+    });
+  }
+
+  /** Dernière page reçue du serveur, AVANT filtre commune/tri contact (tous deux client-side,
+   * voir ci-dessous) — permet de les réappliquer sans refaire d'appel réseau à chaque
+   * frappe/clic, contrairement aux autres filtres qui déclenchent tous un vrai rechargement. */
+  private lastFetchedRows: ReportRow[] = [];
+
+  /** Recalcule `pagedRows` depuis `lastFetchedRows` : filtre commune (substring, voir
+   * filterCommune) puis tri contact si actif — jamais de requête serveur ici. */
+  private applyCommuneFilterAndContactSort(): void {
+    const q = this.filterCommune.trim().toLowerCase();
+    const rows = q ? this.lastFetchedRows.filter(r => r.commune?.toLowerCase().includes(q)) : [...this.lastFetchedRows];
+    if (this.sortField === 'contact') this.sortRowsByContact(rows);
+    this.pagedRows = rows;
+  }
+
+  /** Filtre commune (voir filterCommune) : purement client, ne déclenche jamais de requête
+   * serveur — recalcule juste `pagedRows` depuis la page déjà chargée. */
+  onCommuneFilterChange(): void {
+    this.applyCommuneFilterAndContactSort();
+  }
+
+  private sortRowsByContact(rows: ReportRow[]): void {
+    rows.sort((a, b) => {
+      const va = (a.contact || '').toLowerCase();
+      const vb = (b.contact || '').toLowerCase();
+      if (va < vb) return this.sortAsc ? -1 : 1;
+      if (va > vb) return this.sortAsc ? 1 : -1;
+      return 0;
+    });
+  }
+
+  private afterRowsLoaded(): void {
+    this.isLoading = false;
+    this.pagedRows.filter(r => r.has_photo).forEach(r => this.loadRowPhoto(r));
+  }
+
+  /** Ouvre directement le détail d'une ligne arrivée via `?id=` (ex: lien depuis une
+   * notification) — en appel direct (retrieve), indépendamment de la page/des filtres
+   * actuellement chargés : cette ligne peut très bien ne pas être sur la page affichée, voir
+   * le plan pagination Signalements. `kind` n'étant pas connu depuis l'URL, on tente les 4
+   * types en parallèle et on garde le premier qui répond. */
+  private openByIdFromUrl(): void {
+    const targetId = this.route.snapshot.queryParamMap.get('id');
+    if (!targetId) return;
+    forkJoin({
+      Crisis: this.crisisService.getById(targetId).pipe(catchError(() => of(null))),
+      Offer: this.offerService.getById(targetId).pipe(catchError(() => of(null))),
+      Request: this.requestService.getById(targetId).pipe(catchError(() => of(null))),
+      Information: this.informationService.getById(targetId).pipe(catchError(() => of(null))),
+    }).pipe(takeUntil(this.destroy$)).subscribe(found => {
+      const kind = (Object.keys(found) as ReportKind[]).find(k => found[k] != null);
+      if (kind) this.openDetail(this.toRow(kind, found[kind] as any));
     });
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // BUILD UNIFIED ROWS
+  // BUILD ROW (un seul type brut -> ReportRow, réutilisé par le chargement de page normal,
+  // l'aperçu "Tout", l'annuaire de bénévoles et le lien profond ?id=)
   // ────────────────────────────────────────────────────────────────────────────
 
-  private buildRows(): void {
-    const crisisRows: ReportRow[] = this.rawCrises.map(c => ({
-      id:        c.id,
-      kind:      'Crisis',
-      title:     c.name,
-      contact:   '—',
-      email:     '—',
-      telephone: null,
-      status:    (c.status ?? Status.UNPROCESSED) as Status,
-      date:      c.start_date,
-      dateExp:   c.end_date,
-      crisis:     c.id,
-      crisis_nom: null,
-      author:    c.author,
-      author_nom: null,
-      latitude:  c.latitude ?? null,
-      longitude: c.longitude ?? null,
-      has_photo: !!c.has_photo,
-      commune:   null,
-      distanceFromCrisisKm: null,
-      authorType: null,
-      isSecoursAccount: false,
-      competencesLibelles: [],
-      description: c.description ?? null,
-      actif:     true,
-      _raw:      c,
-    }));
-
-    const offerRows: ReportRow[] = this.rawOffers.map(o => ({
-      id:        o.id,
-      kind:      'Offer',
-      title:     o.title,
-      contact:   `${o.first_name_offer} ${o.last_name_offer}`,
-      email:     o.email_offer,
-      telephone: o.phone_offer ?? o.author_phone ?? null,
-      status:    o.status,
-      date:      o.created_at,
-      dateExp:   o.expires_at,
-      crisis:     o.crisis,
-      crisis_nom: o.crisis_nom ?? null,
-      author:    o.author,
-      author_nom: o.author_nom ?? null,
-      latitude:  o.latitude ?? null,
-      longitude: o.longitude ?? null,
-      has_photo: !!o.has_photo,
-      commune:   o.commune ?? null,
-      distanceFromCrisisKm: o.distance_from_crisis_km ?? null,
-      authorType: o.author_type ?? null,
-      isSecoursAccount: o.author_type === 'SECOURS',
-      competencesLibelles: o.competences_libelles ?? [],
-      description: o.description ?? null,
-      materielLivraison: o.materiel_livraison ?? null,
-      diplomeSecourisme: !!o.diplome_secourisme,
-      ancienSapeurPompier: !!o.ancien_sapeur_pompier,
-      confirmationReglementaire: !!o.confirmation_reglementaire,
-      presencePhysique: o.presence_physique ?? null,
-      organisationNom: o.organisation_nom ?? null,
-      groupeId: o.groupe_id ?? null,
-      actif:     o.actif !== false,
-      _raw:      o,
-    }));
-
-    const requestRows: ReportRow[] = this.rawRequests.map(d => ({
-      id:        d.id,
-      kind:      'Request',
-      title:     d.title,
-      contact:   `${d.first_name_request} ${d.last_name_request}`,
-      email:     d.email_request,
-      telephone: d.phone_request,
-      status:    d.status,
-      date:      d.created_at,
-      dateExp:   d.expires_at,
-      crisis:     d.crisis,
-      crisis_nom: d.crisis_nom ?? null,
-      author:    d.author,
-      author_nom: d.author_nom ?? null,
-      latitude:  d.latitude ?? null,
-      longitude: d.longitude ?? null,
-      has_photo: !!d.has_photo,
-      commune:   d.commune ?? null,
-      distanceFromCrisisKm: d.distance_from_crisis_km ?? null,
-      authorType: d.author_type ?? null,
-      isSecoursAccount: d.author_type === 'SECOURS',
-      competencesLibelles: [],
-      description: d.description ?? null,
-      actif:     d.actif !== false,
-      _raw:      d,
-    }));
-
-    const infoRows: ReportRow[] = this.rawInformations.map(i => ({
-      id:        i.id,
-      kind:      'Information',
-      title:     i.title,
-      contact:   `${i.first_name_information} ${i.last_name_information}`,
-      email:     i.email_information,
-      telephone: i.phone_information,
-      status:    i.status,
-      date:      i.created_at,
-      dateExp:   i.expires_at,
-      crisis:     i.crisis,
-      crisis_nom: i.crisis_nom ?? null,
-      author:    i.author,
-      author_nom: i.author_nom ?? null,
-      latitude:  i.latitude ?? null,
-      longitude: i.longitude ?? null,
-      has_photo: !!i.has_photo,
-      commune:   i.commune ?? null,
-      distanceFromCrisisKm: i.distance_from_crisis_km ?? null,
-      authorType: i.author_type ?? null,
-      isSecoursAccount: i.author_type === 'SECOURS',
-      competencesLibelles: [],
-      description: null,
-      actif:     i.actif !== false,
-      _raw:      i,
-    }));
-
-    this.allRows = [...crisisRows, ...offerRows, ...requestRows, ...infoRows];
-    this.applyFilters();
-
-    this.allRows.filter(r => r.has_photo).forEach(r => this.loadRowPhoto(r));
-
-    const targetId = this.route.snapshot.queryParamMap.get('id');
-    const target = targetId ? this.allRows.find(r => r.id === targetId) : null;
-    if (target) this.openDetail(target);
+  private toRow(kind: ReportKind, raw: Crisis | Offer | Request | Information): ReportRow {
+    switch (kind) {
+      case 'Crisis': {
+        const c = raw as Crisis;
+        return {
+          id: c.id, kind: 'Crisis', title: c.name, contact: '—', email: '—', telephone: null,
+          status: (c.status ?? Status.UNPROCESSED) as Status, date: c.start_date, dateExp: c.end_date,
+          crisis: c.id, crisis_nom: null, author: c.author, author_nom: null,
+          latitude: c.latitude ?? null, longitude: c.longitude ?? null, has_photo: !!c.has_photo,
+          commune: null, distanceFromCrisisKm: null, authorType: null, isSecoursAccount: false,
+          competencesLibelles: [], description: c.description ?? null, actif: true, _raw: c,
+        };
+      }
+      case 'Offer': {
+        const o = raw as Offer;
+        return {
+          id: o.id, kind: 'Offer', title: o.title,
+          contact: `${o.first_name_offer} ${o.last_name_offer}`, email: o.email_offer,
+          telephone: o.phone_offer ?? o.author_phone ?? null, status: o.status, date: o.created_at,
+          dateExp: o.expires_at, crisis: o.crisis, crisis_nom: o.crisis_nom ?? null, author: o.author,
+          author_nom: o.author_nom ?? null, latitude: o.latitude ?? null, longitude: o.longitude ?? null,
+          has_photo: !!o.has_photo, commune: o.commune ?? null,
+          distanceFromCrisisKm: o.distance_from_crisis_km ?? null, authorType: o.author_type ?? null,
+          isSecoursAccount: o.author_type === 'SECOURS', competencesLibelles: o.competences_libelles ?? [],
+          description: o.description ?? null, materielLivraison: o.materiel_livraison ?? null,
+          diplomeSecourisme: !!o.diplome_secourisme, ancienSapeurPompier: !!o.ancien_sapeur_pompier,
+          confirmationReglementaire: !!o.confirmation_reglementaire, presencePhysique: o.presence_physique ?? null,
+          organisationNom: o.organisation_nom ?? null, groupeId: o.groupe_id ?? null,
+          actif: o.actif !== false, _raw: o,
+        };
+      }
+      case 'Request': {
+        const d = raw as Request;
+        return {
+          id: d.id, kind: 'Request', title: d.title,
+          contact: `${d.first_name_request} ${d.last_name_request}`, email: d.email_request,
+          telephone: d.phone_request, status: d.status, date: d.created_at, dateExp: d.expires_at,
+          crisis: d.crisis, crisis_nom: d.crisis_nom ?? null, author: d.author,
+          author_nom: d.author_nom ?? null, latitude: d.latitude ?? null, longitude: d.longitude ?? null,
+          has_photo: !!d.has_photo, commune: d.commune ?? null,
+          distanceFromCrisisKm: d.distance_from_crisis_km ?? null, authorType: d.author_type ?? null,
+          isSecoursAccount: d.author_type === 'SECOURS', competencesLibelles: [],
+          description: d.description ?? null, actif: d.actif !== false, _raw: d,
+        };
+      }
+      case 'Information': {
+        const i = raw as Information;
+        return {
+          id: i.id, kind: 'Information', title: i.title,
+          contact: `${i.first_name_information} ${i.last_name_information}`, email: i.email_information,
+          telephone: i.phone_information, status: i.status, date: i.created_at, dateExp: i.expires_at,
+          crisis: i.crisis, crisis_nom: i.crisis_nom ?? null, author: i.author,
+          author_nom: i.author_nom ?? null, latitude: i.latitude ?? null, longitude: i.longitude ?? null,
+          has_photo: !!i.has_photo, commune: i.commune ?? null,
+          distanceFromCrisisKm: i.distance_from_crisis_km ?? null, authorType: i.author_type ?? null,
+          isSecoursAccount: i.author_type === 'SECOURS', competencesLibelles: [], description: null,
+          actif: i.actif !== false, _raw: i,
+        };
+      }
+    }
   }
 
   /** Récupère la photo d'une ligne via l'action /preview/ access-contrôlée du bon
@@ -533,85 +668,28 @@ export class ReportingComponent implements OnInit, OnDestroy {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // FILTER / SORT / PAGINATE
+  // FILTER / SORT / PAGINATE (déclenchent un rechargement serveur, voir load())
   // ────────────────────────────────────────────────────────────────────────────
 
-  applyFilters(): void {
-    let list = [...this.allRows];
-
-    // Kind filter
-    if (this.filterKind !== 'ALL') {
-      list = list.filter(r => r.kind === this.filterKind);
-    }
-
-    // Statut filter
-    if (this.filterStatus !== 'ALL') {
-      list = list.filter(r => r.status === this.filterStatus);
-    }
-
-    // Commune filter (sous-chaîne, insensible à la casse — les noms de commune ne sont pas
-    // normalisés côté source, ex: "Saint-Étienne" vs "saint etienne")
-    const communeQuery = this.filterCommune.trim().toLowerCase();
-    if (communeQuery) {
-      list = list.filter(r => r.commune?.toLowerCase().includes(communeQuery));
-    }
-
-    // Compétence filter — ne concerne que les offres (seules à porter des compétences
-    // déclarées) : une demande/un signalement/une crise est exclu dès que ce filtre est actif.
-    if (this.filterCompetence !== 'ALL') {
-      list = list.filter(r => r.competencesLibelles.includes(this.filterCompetence));
-    }
-
-    // Matériel en centre de regroupement des moyens (vs à récupérer sur place) — ne concerne
-    // que les offres de type Matériel.
-    if (this.filterMaterielLivraison !== 'ALL') {
-      list = list.filter(r => r.materielLivraison === this.filterMaterielLivraison);
-    }
-
-    // Search
-    const q = this.searchQuery.trim().toLowerCase();
-    if (q) {
-      list = list.filter(r =>
-        r.title?.toLowerCase().includes(q)     ||
-        r.contact?.toLowerCase().includes(q)   ||
-        r.email?.toLowerCase().includes(q)     ||
-        r.telephone?.toLowerCase().includes(q) ||
-        r.kind?.toLowerCase().includes(q)
-      );
-    }
-
-    // Sort
-    list.sort((a, b) => {
-      let va: any = a[this.sortField] ?? '';
-      let vb: any = b[this.sortField] ?? '';
-      if (typeof va === 'string') va = va.toLowerCase();
-      if (typeof vb === 'string') vb = vb.toLowerCase();
-      if (va < vb) return this.sortAsc ? -1 :  1;
-      if (va > vb) return this.sortAsc ?  1 : -1;
-      return 0;
-    });
-
-    this.filteredRows = list;
-    this.totalPages   = Math.max(1, Math.ceil(list.length / this.pageSize));
-    this.currentPage  = Math.min(this.currentPage, this.totalPages);
-    this.paginate();
-  }
-
-  private paginate(): void {
-    const start   = (this.currentPage - 1) * this.pageSize;
-    this.pagedRows = this.filteredRows.slice(start, start + this.pageSize);
+  changeKind(kind: FilterKind): void {
+    this.filterKind = kind;
+    this.currentPage = 1;
+    this.load();
   }
 
   setSort(field: SortField): void {
     if (this.sortField === field) this.sortAsc = !this.sortAsc;
     else { this.sortField = field; this.sortAsc = true; }
-    this.applyFilters();
+    // 'contact' (champ chiffré) : tri local sur la page déjà affichée, pas de rechargement.
+    if (field === 'contact') { this.sortRowsByContact(this.pagedRows); return; }
+    this.load();
   }
 
   changePage(p: number): void {
-    if (p < 1 || p > this.totalPages) return;
+    if (p < 1 || p > this.totalPages || this.isOverview) return;
     this.currentPage = p;
-    this.paginate();
+    this.isLoading = true;
+    this.loadKindPage(this.filterKind as ReportKind);
   }
 
   resetFilters(): void {
@@ -622,7 +700,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
     this.filterCompetence = 'ALL';
     this.filterMaterielLivraison = 'ALL';
     this.currentPage   = 1;
-    this.applyFilters();
+    this.load();
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -734,7 +812,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
       next: (updated) => {
         const idx = this.teams.findIndex(t => t.id === updated.id);
         if (idx !== -1) this.teams[idx] = updated;
-        this.showSuccess(`Offre affectée à l'équipe ${team.name}.`);
+        this.showSuccess(`Offre affectée à l'équipe ${teamDisplayName(team)}.`);
         this.assignTeamId = null;
       },
       error: () => this.showError("Impossible d'affecter cette offre à l'équipe."),
@@ -754,7 +832,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
         if (res.already_assigned) {
           this.showSuccess('Cette demande était déjà affectée à cette équipe.');
         } else {
-          this.showSuccess(`Demande affectée à l'équipe ${team.name} — dossier ${res.numero} créé.`);
+          this.showSuccess(`Demande affectée à l'équipe ${teamDisplayName(team)} — dossier ${res.numero} créé.`);
         }
         this.assignTeamId = null;
       },
@@ -790,11 +868,14 @@ export class ReportingComponent implements OnInit, OnDestroy {
 
   toggleRowSelection(row: ReportRow): void {
     if (row.kind === 'Offer') {
-      this.selectedOfferIds.has(row.id) ? this.selectedOfferIds.delete(row.id) : this.selectedOfferIds.add(row.id);
+      if (this.selectedOfferIds.has(row.id)) { this.selectedOfferIds.delete(row.id); this.selectedOfferRowsMap.delete(row.id); }
+      else { this.selectedOfferIds.add(row.id); this.selectedOfferRowsMap.set(row.id, row); }
     } else if (row.kind === 'Request') {
-      this.selectedRequestIds.has(row.id) ? this.selectedRequestIds.delete(row.id) : this.selectedRequestIds.add(row.id);
+      if (this.selectedRequestIds.has(row.id)) { this.selectedRequestIds.delete(row.id); this.selectedRequestRowsMap.delete(row.id); }
+      else { this.selectedRequestIds.add(row.id); this.selectedRequestRowsMap.set(row.id, row); }
     } else if (row.kind === 'Information') {
-      this.selectedInformationIds.has(row.id) ? this.selectedInformationIds.delete(row.id) : this.selectedInformationIds.add(row.id);
+      if (this.selectedInformationIds.has(row.id)) { this.selectedInformationIds.delete(row.id); this.selectedInformationRowsMap.delete(row.id); }
+      else { this.selectedInformationIds.add(row.id); this.selectedInformationRowsMap.set(row.id, row); }
     }
   }
 
@@ -817,26 +898,34 @@ export class ReportingComponent implements OnInit, OnDestroy {
     return ids.length > 0 && ids.every(id => this.selectedInformationIds.has(id));
   }
 
+  /** "Tout sélectionner (page)" — porte explicitement sur la page affichée uniquement : il n'y
+   * a plus de table en mémoire contenant la totalité des résultats filtrés. */
   toggleSelectAllOffers(): void {
-    const ids = this.pagedOfferIds;
-    if (this.allPagedOffersSelected) ids.forEach(id => this.selectedOfferIds.delete(id));
-    else ids.forEach(id => this.selectedOfferIds.add(id));
+    const all = this.allPagedOffersSelected;
+    this.pagedRows.filter(r => r.kind === 'Offer').forEach(r => {
+      if (all) { this.selectedOfferIds.delete(r.id); this.selectedOfferRowsMap.delete(r.id); }
+      else { this.selectedOfferIds.add(r.id); this.selectedOfferRowsMap.set(r.id, r); }
+    });
   }
 
   toggleSelectAllRequests(): void {
-    const ids = this.pagedRequestIds;
-    if (this.allPagedRequestsSelected) ids.forEach(id => this.selectedRequestIds.delete(id));
-    else ids.forEach(id => this.selectedRequestIds.add(id));
+    const all = this.allPagedRequestsSelected;
+    this.pagedRows.filter(r => r.kind === 'Request').forEach(r => {
+      if (all) { this.selectedRequestIds.delete(r.id); this.selectedRequestRowsMap.delete(r.id); }
+      else { this.selectedRequestIds.add(r.id); this.selectedRequestRowsMap.set(r.id, r); }
+    });
   }
 
   toggleSelectAllInformations(): void {
-    const ids = this.pagedInformationIds;
-    if (this.allPagedInformationsSelected) ids.forEach(id => this.selectedInformationIds.delete(id));
-    else ids.forEach(id => this.selectedInformationIds.add(id));
+    const all = this.allPagedInformationsSelected;
+    this.pagedRows.filter(r => r.kind === 'Information').forEach(r => {
+      if (all) { this.selectedInformationIds.delete(r.id); this.selectedInformationRowsMap.delete(r.id); }
+      else { this.selectedInformationIds.add(r.id); this.selectedInformationRowsMap.set(r.id, r); }
+    });
   }
 
   get selectedRequestRows(): ReportRow[] {
-    return this.allRows.filter(r => this.selectedRequestIds.has(r.id));
+    return Array.from(this.selectedRequestRowsMap.values());
   }
 
   /** Une mission est rattachée à une seule crise : la création de mission depuis la sélection
@@ -887,7 +976,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
     if (!this.bulkInformationTeamId || this.selectedInformationIds.size === 0) return;
     this.informationService.bulkAssignTeam([...this.selectedInformationIds], this.bulkInformationTeamId).subscribe({
       next: (result) => {
-        let message = `${result.dossiers_created.length} signalement(s) affecté(s) à l'équipe « ${result.team.name} » (dossier créé pour chacun).`;
+        let message = `${result.dossiers_created.length} signalement(s) affecté(s) à l'équipe « ${teamDisplayName(result.team)} » (dossier créé pour chacun).`;
         if (result.already_assigned.length > 0) {
           message += ` ${result.already_assigned.length} déjà affecté(s) à cette équipe.`;
         }
@@ -896,6 +985,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
         }
         this.showSuccess(message);
         this.selectedInformationIds.clear();
+        this.selectedInformationRowsMap.clear();
         this.showBulkInformationModal = false;
       },
       error: (err) => this.showError(err?.error?.error || "Impossible d'affecter ces signalements."),
@@ -907,7 +997,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
   openBulkOfferModal(): void {
     // Pré-remplit le nom d'équipe avec l'organisation quand toutes les offres sélectionnées
     // viennent d'un même dépôt groupé — reste modifiable, juste un gain de temps.
-    const selected = this.allRows.filter(r => this.selectedOfferIds.has(r.id));
+    const selected = Array.from(this.selectedOfferRowsMap.values());
     const organisations = new Set(selected.map(r => r.organisationNom).filter(Boolean));
     this.bulkTeamName = organisations.size === 1 ? [...organisations][0]! : '';
     this.bulkRegulateurId = null;
@@ -945,6 +1035,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
         this.teams.push(team);
         this.showSuccess(`Équipe « ${team.name} » créée avec ${this.selectedOfferIds.size} offre(s).`);
         this.selectedOfferIds.clear();
+        this.selectedOfferRowsMap.clear();
         this.showBulkOfferModal = false;
       },
       error: (err) => this.showError(err?.error?.error || "Impossible de créer l'équipe."),
@@ -994,8 +1085,9 @@ export class ReportingComponent implements OnInit, OnDestroy {
         const extra = res.already_assigned.length ? `, ${res.already_assigned.length} déjà affectée(s)` : '';
         this.showSuccess(`${res.dossiers_created.length} dossier(s) créé(s)${extra}.`);
         this.selectedRequestIds.clear();
+        this.selectedRequestRowsMap.clear();
         this.showBulkRequestModal = false;
-        this.loadAll();
+        this.load();
       },
       error: (err) => this.showError(err?.error?.error || "Impossible d'affecter ces demandes."),
     });
@@ -1019,7 +1111,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
         this.showSuccess('Statut mis à jour.');
         this.showStatusModal = false;
         this.isSaving        = false;
-        this.loadAll();
+        this.reload();
       },
       error: () => { this.showError('Erreur lors de la mise à jour.'); this.isSaving = false; },
     });
@@ -1041,7 +1133,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
         this.showSuccess(isCrisis ? 'Supprimé.' : 'Désactivé.');
         this.showDeleteModal = false;
         this.selectedRow     = null;
-        this.loadAll();
+        this.reload();
       },
       error: () => this.showError(isCrisis ? 'Erreur lors de la suppression.' : 'Erreur lors de la désactivation.'),
     });
@@ -1052,7 +1144,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
     const obs = this.getReactiverObservable(row.kind, row.id);
     if (!obs) return;
     obs.subscribe({
-      next: () => { this.showSuccess('Réactivé.'); this.loadAll(); },
+      next: () => { this.showSuccess('Réactivé.'); this.reload(); },
       error: () => this.showError('Erreur lors de la réactivation.'),
     });
   }
@@ -1085,11 +1177,13 @@ export class ReportingComponent implements OnInit, OnDestroy {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // EXPORT CSV
+  // EXPORT CSV — porte désormais sur la page affichée, pas le résultat filtré complet (plus
+  // de table en mémoire les contenant tous — voir le plan pagination Signalements). Un export
+  // serveur du résultat filtré complet reste une amélioration de suivi possible.
   // ────────────────────────────────────────────────────────────────────────────
 
   exportCSV(): void {
-    const rows = this.filteredRows;
+    const rows = this.pagedRows;
     const headers = ['ID','Type','Titre','Contact','Email','Téléphone','Statut','Date','Date expiration','Latitude','Longitude','Crise','Auteur'];
     const lines = rows.map(r => [
       r.id, r.kind, r.title, r.contact, r.email,
@@ -1101,7 +1195,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
 
     const csv = [headers.join(','), ...lines].join('\n');
     const a   = document.createElement('a');
-    a.href    = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' }));
+    a.href    = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' }));
     a.download= `signalements_${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
@@ -1115,7 +1209,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
                      row.latitude ?? '', row.longitude ?? ''];
     const csv = [headers.join(','), values.map(v => `"${v}"`).join(',')].join('\n');
     const a   = document.createElement('a');
-    a.href    = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' }));
+    a.href    = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' }));
     a.download= `${row.kind}_${row.id.slice(0,8)}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
@@ -1194,7 +1288,7 @@ export class ReportingComponent implements OnInit, OnDestroy {
         this.isTransforming = false;
         this.showSuccess(`Transformé(e) en ${cibleLabel} avec succès.`);
         this.closeAll();
-        this.loadAll();
+        this.load();
       },
       error: (err) => {
         this.isTransforming = false;
@@ -1241,16 +1335,6 @@ export class ReportingComponent implements OnInit, OnDestroy {
     const end   = Math.min(this.totalPages, this.currentPage + 2);
     for (let i = start; i <= end; i++) pages.push(i);
     return pages;
-  }
-
-  get countByKind(): Record<string, number> {
-    return {
-      ALL:         this.allRows.length,
-      Crisis:       this.rawCrises.length,
-      Offer:       this.rawOffers.length,
-      Request:     this.rawRequests.length,
-      Information: this.rawInformations.length,
-    };
   }
 
   isCrisis(r: ReportRow['_raw']): r is Crisis         { return 'name'              in r; }

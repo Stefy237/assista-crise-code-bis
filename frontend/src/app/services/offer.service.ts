@@ -5,7 +5,7 @@ import { environment } from '../../environments/environment';
 import { Offer, OfferNationalPartial, OfferPayload, OfferType } from '../shared/models/offer.model';
 import { OfferMessage } from '../shared/models/offer-message.model';
 import { geoPointToLatLng, latLngToGeoJson } from '../shared/models/geopoint.model';
-import { StatsResponse } from '../shared/models/api.model';
+import { StatsResponse, PageResponse } from '../shared/models/api.model';
 import { Team } from '../shared/models/team.model';
 
 @Injectable({
@@ -106,6 +106,17 @@ export class OfferService {
    * (voir OfferViewSet.valider_accueil_intervenants, "Logement intervenants" 24/09). */
   validerAccueilIntervenants(id: string): Observable<Offer> {
     return this.http.post<Offer>(`${this.url}/${id}/valider-accueil-intervenants/`, {});
+  }
+
+  /** GET /api/offres/?page=&page_size=&... — pagination serveur opt-in (voir
+   * OptionalPageNumberPagination côté backend), toujours l'enveloppe {count,next,previous,
+   * results} puisque `page` est systématiquement envoyé ici -- utilisé par ReportingComponent
+   * (page Signalements) à la place de getAll() pour ne jamais charger la table entière. */
+  searchPage(params: Record<string, string>, page: number, pageSize: number): Observable<PageResponse<Offer>> {
+    const httpParams = this.toParams({ ...params, page: String(page), page_size: String(pageSize) });
+    return this.http
+      .get<PageResponse<Offer>>(`${this.url}/`, { params: httpParams })
+      .pipe(map(res => ({ ...res, results: res.results.map(this.normalize) })));
   }
 
   /** GET /api/offres/vue_mairie/ — offres de la commune de l'institution de l'utilisateur
