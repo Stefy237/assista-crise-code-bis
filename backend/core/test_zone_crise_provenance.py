@@ -10,7 +10,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import (
-    ContactInstitution, ContributionZoneCommune, Crisis, ImplicationInstitution, Institution,
+    Besoin, ContactInstitution, ContributionZoneCommune, Crisis, ImplicationInstitution, Institution,
     InstitutionType,
 )
 
@@ -90,9 +90,13 @@ class TestExtensionAutomatiqueZone:
 
         client = APIClient()
         client.force_authenticate(user=membre)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
         response = client.post(
             reverse('implicationinstitution-list'),
-            {"crise": str(crisis.id), "institution": str(association.id), "type_implication": "ACTEUR"},
+            {
+                "crise": str(crisis.id), "institution": str(association.id), "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
+            },
             format='json',
         )
         assert response.status_code == status.HTTP_201_CREATED

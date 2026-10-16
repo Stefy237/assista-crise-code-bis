@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import (
+    Besoin,
     ContactInstitution,
     Crisis,
     ImplicationInstitution,
@@ -60,10 +61,14 @@ class TestDeclarationActeurNonAutLocale:
     def test_association_declarant_acteur_reste_en_attente(self, membre_association, association, crisis, regulateur_mairie):
         client = APIClient()
         client.force_authenticate(user=membre_association)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(
             reverse('implicationinstitution-list'),
-            {"crise": str(crisis.id), "institution": str(association.id), "type_implication": "ACTEUR"},
+            {
+                "crise": str(crisis.id), "institution": str(association.id), "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
+            },
             format='json',
         )
 
@@ -91,10 +96,14 @@ class TestDeclarationActeurNonAutLocale:
         ContactInstitution.objects.create(institution=mairie, utilisateur=user, actif=True)
         client = APIClient()
         client.force_authenticate(user=user)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(
             reverse('implicationinstitution-list'),
-            {"crise": str(crisis.id), "institution": str(mairie.id), "type_implication": "ACTEUR"},
+            {
+                "crise": str(crisis.id), "institution": str(mairie.id), "type_implication": "ACTEUR",
+                "themes": [str(besoin.id)],
+            },
             format='json',
         )
 
@@ -104,12 +113,14 @@ class TestDeclarationActeurNonAutLocale:
     def test_client_ne_peut_pas_forcer_le_statut_a_la_creation(self, membre_association, association, crisis):
         client = APIClient()
         client.force_authenticate(user=membre_association)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(
             reverse('implicationinstitution-list'),
             {
                 "crise": str(crisis.id), "institution": str(association.id),
                 "type_implication": "ACTEUR", "statut": "VALIDEE",
+                "themes": [str(besoin.id)],
             },
             format='json',
         )

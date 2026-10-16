@@ -11,6 +11,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from core.imports import exemple_csv_personnel_communal, importer_personnel_communal, parse_fichier
+from core.crypto_fields import blind_index
 from core.models import ContactInstitution, Institution, InstitutionType, User
 
 
@@ -81,7 +82,7 @@ class TestImporterPersonnelCommunal:
         resultat = importer_personnel_communal(request, institution, lignes, mapping)
 
         assert resultat == {"crees": 1, "rattaches": 0, "erreurs": []}
-        user = User.objects.get(email="jeanne.martin@test.fr")
+        user = User.objects.get(email_bidx=blind_index("jeanne.martin@test.fr"))
         assert user.first_name == "Jeanne"
         assert user.last_name == "Martin"
         assert user.institution_id == institution.id
@@ -103,7 +104,7 @@ class TestImporterPersonnelCommunal:
         resultat = importer_personnel_communal(request, institution, lignes, mapping)
 
         assert resultat == {"crees": 0, "rattaches": 1, "erreurs": []}
-        assert User.objects.filter(email="deja-la@test.fr").count() == 1
+        assert User.objects.filter(email_bidx=blind_index("deja-la@test.fr")).count() == 1
         existant.refresh_from_db()
         assert existant.institution_id == institution.id
 
@@ -139,7 +140,7 @@ class TestImporterPersonnelCommunal:
 
         importer_personnel_communal(request, institution, lignes, mapping)
 
-        user = User.objects.get(email="jeanne2@test.fr")
+        user = User.objects.get(email_bidx=blind_index("jeanne2@test.fr"))
         # Aucun champ santé n'existe sur User : la seule vérification possible est qu'aucune
         # trace de "Allergies"/"Pénicilline" ne s'est glissée nulle part sur le compte créé.
         assert "Pénicilline" not in (user.first_name, user.last_name, user.phone_number or "")
@@ -196,7 +197,7 @@ class TestImportViews:
 
         assert response.status_code == 200
         assert response.data["crees"] == 1
-        assert User.objects.filter(email="jeanne.e2e@test.fr").exists()
+        assert User.objects.filter(email_bidx=blind_index("jeanne.e2e@test.fr")).exists()
 
     def test_import_without_email_mapping_returns_400(self, create_user):
         institution = _make_institution()

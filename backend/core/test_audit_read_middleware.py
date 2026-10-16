@@ -190,6 +190,7 @@ class TestRegisterViewAuditLog:
         })
         assert response.status_code in (200, 201)
 
-        user = User.objects.get(email="nouveau@test.fr")
+        from core.crypto_fields import blind_index
+        user = User.objects.get(email_bidx=blind_index("nouveau@test.fr"))
         entry = AuditLog.objects.filter(action__code="CREATION", objet_type="User", objet_id=user.id).first()
         assert entry is not None

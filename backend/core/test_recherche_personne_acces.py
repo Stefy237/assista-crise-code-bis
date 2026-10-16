@@ -50,12 +50,18 @@ class TestAccesRecherchePersonne:
         response = simple_client.get(reverse('recherchepersonne-detail', args=[recherche.id]))
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    def test_creation_refusee_a_un_compte_non_institutionnel(self, simple_client):
+    def test_creation_autorisee_a_un_compte_non_institutionnel(self, simple_client):
+        """Revu le 08/10 (voir le commentaire de RecherchePersonneViewSet.get_permissions) : le
+        DÉPÔT d'une fiche de recherche doit rester ouvert à tout compte authentifié, qu'il soit
+        institutionnel ou non -- un citoyen peut signaler la disparition d'un proche sans être
+        rattaché à une institution. Seules la consultation et la gestion du registre restent
+        réservées aux acteurs institutionnels (voir test_liste_refusee_a_un_compte_non_institutionnel
+        et test_detail_refuse_a_un_compte_non_institutionnel ci-dessus)."""
         response = simple_client.post(reverse('recherchepersonne-list'), {
             "nom": "Test", "prenom": "X", "age": 30, "source": "DOMICILE", "ville": "Testville",
             "contact_nom": "C", "contact_email": "c@test.fr", "contact_telephone": "0600000000",
         }, format='json')
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_201_CREATED
 
     def test_anonyme_refuse(self, recherche):
         client = APIClient()

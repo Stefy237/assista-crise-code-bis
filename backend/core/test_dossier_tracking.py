@@ -126,7 +126,8 @@ class TestAssignTeamCreatesTrackingAccess:
 
         assert response.status_code == status.HTTP_200_OK
         dossier = Dossier.objects.get(id=response.data["dossier"])
-        created_user = User.objects.get(email=anonymous_request.email_request)
+        from core.crypto_fields import blind_index
+        created_user = User.objects.get(email_bidx=blind_index(anonymous_request.email_request))
         assert DossierParticipant.objects.filter(
             dossier=dossier, utilisateur=created_user, role=DossierParticipant.Role.DEMANDEUR
         ).exists()

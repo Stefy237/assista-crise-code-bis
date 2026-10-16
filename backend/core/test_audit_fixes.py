@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import (
+    Besoin,
     ContactInstitution,
     Crisis,
     Dossier,
@@ -75,9 +76,11 @@ class TestMandatInstitutionActeur:
         ContactInstitution.objects.create(institution=mairie, utilisateur=user, actif=True)
         client = APIClient()
         client.force_authenticate(user=user)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(reverse('implicationinstitution-list'), {
             "crise": str(crisis.id), "institution": str(mairie.id), "type_implication": "ACTEUR",
+            "themes": [str(besoin.id)],
         }, format='json')
 
         assert response.status_code == status.HTTP_201_CREATED
@@ -88,9 +91,11 @@ class TestMandatInstitutionActeur:
         ContactInstitution.objects.create(institution=association, utilisateur=user, actif=True)
         client = APIClient()
         client.force_authenticate(user=user)
+        besoin = Besoin.objects.create(nom="Hébergement (test)")
 
         response = client.post(reverse('implicationinstitution-list'), {
             "crise": str(crisis.id), "institution": str(association.id), "type_implication": "ACTEUR",
+            "themes": [str(besoin.id)],
         }, format='json')
 
         assert response.status_code == status.HTTP_201_CREATED

@@ -311,7 +311,8 @@ class TestRequestZoneRechercheHebergement:
         }
         response = api_client.post(reverse('request-list'), payload, format='json')
         assert response.status_code == status.HTTP_201_CREATED
-        req = Request.objects.get(email_request="zone-recherche@test.fr")
+        from core.crypto_fields import blind_index
+        req = Request.objects.get(email_request_bidx=blind_index("zone-recherche@test.fr"))
         assert req.location is None
         assert req.zone_recherche_communes == ["38185", "38151"]
         assert req.zone_recherche_rayon_km == 20

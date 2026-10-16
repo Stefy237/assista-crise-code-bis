@@ -5,6 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from core.crypto_fields import blind_index
 from core.models import ContactInstitution, Crisis, Institution, InstitutionType, Offer, OfferType, Team
 
 
@@ -189,7 +190,7 @@ class TestAssignerRessource:
         response = client.post(reverse('team-assigner-ressource', args=[team_a.id]), {'offer_id': str(offer.id)}, format='json')
 
         assert response.status_code == status.HTTP_200_OK
-        assert team_a.members.filter(email__iexact='anna-nonyme@test.fr').exists()
+        assert team_a.members.filter(email_bidx=blind_index('anna-nonyme@test.fr')).exists()
 
     def test_adds_member_via_email_for_anonymous_offer_person_only(self, mairie_client, team_a, offer_type):
         """Personne seule sans matériel (ex: traducteur) — même correctif, aucune raison que
@@ -205,7 +206,7 @@ class TestAssignerRessource:
         response = client.post(reverse('team-assigner-ressource', args=[team_a.id]), {'offer_id': str(offer.id)}, format='json')
 
         assert response.status_code == status.HTTP_200_OK
-        assert team_a.members.filter(email__iexact='traducteur-benevole@test.fr').exists()
+        assert team_a.members.filter(email_bidx=blind_index('traducteur-benevole@test.fr')).exists()
 
     def test_marks_offer_unavailable_once_retained(self, mairie_client, team_a, offer):
         """Une ressource retenue par une équipe ne doit plus apparaître disponible dans le
@@ -236,7 +237,7 @@ class TestAssignerRessource:
 
         assert response.status_code == status.HTTP_200_OK
         assert team_a.assigned_offers.filter(id=offer.id).exists()
-        assert not team_a.members.filter(email__iexact='depose-seul@test.fr').exists()
+        assert not team_a.members.filter(email_bidx=blind_index('depose-seul@test.fr')).exists()
 
 
 @pytest.mark.django_db

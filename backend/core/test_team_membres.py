@@ -111,8 +111,9 @@ class TestInviterMembre:
             'phone_number': '0600000000', 'role_code': role_responsable.code,
         }, format='json')
 
+        from core.crypto_fields import blind_index
         assert response.status_code == status.HTTP_201_CREATED
-        user = User.objects.get(email='alice.martin@test.fr')
+        user = User.objects.get(email_bidx=blind_index('alice.martin@test.fr'))
         assert user.type == 'AUT_LOCALE'
         assert user.enabled is False
         assert user.is_active is False
@@ -204,8 +205,9 @@ class TestInviterMembre:
             'phone_number': '0600000000', 'role_code': role_responsable.code,
         }, format='json')
 
+        from core.crypto_fields import blind_index
         assert response.status_code == status.HTTP_201_CREATED
-        invited = User.objects.get(email='invite-via-delegation@test.fr')
+        invited = User.objects.get(email_bidx=blind_index('invite-via-delegation@test.fr'))
         assert invited.institution_id == institution_b.id
         assert ContactInstitution.objects.filter(institution=institution_b, utilisateur=invited, actif=True).exists()
 

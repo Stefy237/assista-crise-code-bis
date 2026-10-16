@@ -20,24 +20,24 @@ class TestEmailLinksUseCanonicalServerUrl:
             'first_name_request': 'Jean', 'last_name_request': 'Dupont',
             'email_request': 'jean.dupont@test.fr', 'phone_request': '0600000000',
             'request_type': str(request_type.id),
-        }, format='json', HTTP_HOST='172.16.1.113:4200')
+        }, format='json', HTTP_HOST='127.0.0.1:4200')
 
         assert response.status_code == status.HTTP_201_CREATED
         assert len(mail.outbox) == 1
         assert 'https://www.assista-crise.fr/api/delete-request/' in mail.outbox[0].body
-        assert '172.16.1.113' not in mail.outbox[0].body
+        assert '127.0.0.1' not in mail.outbox[0].body
 
     def test_offer_confirmation_email_uses_canonical_url(self, api_client, offer_type, settings):
         settings.SERVER_URL = "https://www.assista-crise.fr"
         response = api_client.post(reverse('offer-list'), {
             'title': 'Je peux aider', 'first_name_offer': 'Marie', 'last_name_offer': 'Curie',
             'email_offer': 'marie.curie@test.fr', 'offer_type': str(offer_type.id),
-        }, format='json', HTTP_HOST='172.16.1.113:4200')
+        }, format='json', HTTP_HOST='127.0.0.1:4200')
 
         assert response.status_code == status.HTTP_201_CREATED
         assert len(mail.outbox) == 1
         assert 'https://www.assista-crise.fr/api/delete-offer/' in mail.outbox[0].body
-        assert '172.16.1.113' not in mail.outbox[0].body
+        assert '127.0.0.1' not in mail.outbox[0].body
 
     def test_information_confirmation_email_uses_canonical_url(self, api_client, information_type, settings):
         settings.SERVER_URL = "https://www.assista-crise.fr"
@@ -46,9 +46,9 @@ class TestEmailLinksUseCanonicalServerUrl:
             'first_name_information': 'Paul', 'last_name_information': 'Martin',
             'email_information': 'paul.martin@test.fr', 'phone_information': '0600000000',
             'information_type': str(information_type.id),
-        }, format='json', HTTP_HOST='172.16.1.113:4200')
+        }, format='json', HTTP_HOST='127.0.0.1:4200')
 
         assert response.status_code == status.HTTP_201_CREATED
         assert len(mail.outbox) == 1
         assert 'https://www.assista-crise.fr/api/delete-information/' in mail.outbox[0].body
-        assert '172.16.1.113' not in mail.outbox[0].body
+        assert '127.0.0.1' not in mail.outbox[0].body

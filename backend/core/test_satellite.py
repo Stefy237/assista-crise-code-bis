@@ -234,10 +234,11 @@ class TestContact:
 
     def test_le_satellite_met_a_jour_son_propre_dernier_contact(self, mairie_a_client, satellite_en_attente):
         identifiants = self._valider(mairie_a_client, satellite_en_attente)
+        from core.crypto_fields import blind_index
         from core.models import User
         satellite_client = APIClient()
         satellite_client.force_authenticate(
-            user=User.objects.get(email=identifiants['identifiants_compte_service']['email'])
+            user=User.objects.get(email_bidx=blind_index(identifiants['identifiants_compte_service']['email']))
         )
 
         response = satellite_client.post(
@@ -260,9 +261,10 @@ class TestContact:
             reverse('satellite-valider', args=[autre_satellite.id]), {}, format='json'
         ).data['identifiants_compte_service']
 
+        from core.crypto_fields import blind_index
         from core.models import User
         usurpateur_client = APIClient()
-        usurpateur_client.force_authenticate(user=User.objects.get(email=autre_identifiants['email']))
+        usurpateur_client.force_authenticate(user=User.objects.get(email_bidx=blind_index(autre_identifiants['email'])))
 
         response = usurpateur_client.post(
             reverse('satellite-contact', args=[satellite_en_attente.id]), {}, format='json'

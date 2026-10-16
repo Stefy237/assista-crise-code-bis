@@ -94,7 +94,8 @@ class TestInviterBenevole:
 
         affectation = AffectationPointBenevole.objects.get(id=created["id"])
         assert affectation.benevole.email == "camille-benevole-affectation@test.fr"
-        assert point.equipe.members.filter(email="camille-benevole-affectation@test.fr").exists()
+        from core.crypto_fields import blind_index
+        assert point.equipe.members.filter(email_bidx=blind_index("camille-benevole-affectation@test.fr")).exists()
         assert DisponibilitePointEquipe.objects.filter(point=point, membre=affectation.benevole).exists()
 
         # 2 emails désormais (voir core/views.py, _notify_new_team_member ajouté au recrutement
@@ -201,8 +202,9 @@ class TestInviterBenevole:
         # 2 emails par bénévole désormais (lien magique d'accès à l'équipe + confirmation de
         # créneau, voir le commentaire équivalent dans test_invite_creates_affectation_and_sends_email).
         assert len(mail.outbox) == 4
-        alice = point.equipe.members.get(email="alice-bulk@test.fr")
-        bob = point.equipe.members.get(email="bob-bulk@test.fr")
+        from core.crypto_fields import blind_index
+        alice = point.equipe.members.get(email_bidx=blind_index("alice-bulk@test.fr"))
+        bob = point.equipe.members.get(email_bidx=blind_index("bob-bulk@test.fr"))
         assert DisponibilitePointEquipe.objects.filter(point=point, membre=alice, creneau="SOIR").exists()
         assert DisponibilitePointEquipe.objects.filter(point=point, membre=bob, creneau="MATIN").exists()
         assert not DisponibilitePointEquipe.objects.filter(point=point, membre=alice, creneau="MATIN").exists()

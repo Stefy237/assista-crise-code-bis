@@ -1,6 +1,7 @@
 import pytest
 from django.urls import reverse
 from rest_framework import status
+from core.crypto_fields import blind_index
 from core.models import User, Request, Offer, Information
 from unittest.mock import patch, MagicMock
 
@@ -16,7 +17,7 @@ class TestUserAuthentication:
         assert response.status_code == status.HTTP_201_CREATED
         assert 'user' in response.data
         assert response.data['user']['email'] == user_data['email']
-        assert User.objects.filter(email=user_data['email']).exists()
+        assert User.objects.filter(email_bidx=blind_index(user_data['email'])).exists()
     
     def test_register_duplicate_email(self, api_client, user_data, create_user):
         """Test inscription avec email existant"""

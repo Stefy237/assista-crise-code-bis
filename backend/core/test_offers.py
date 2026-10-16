@@ -218,7 +218,8 @@ class TestOfferEngagementFields:
         response = api_client.post(reverse('offer-list'), payload, format='json')
         assert response.status_code == status.HTTP_201_CREATED
         assert response.data['diplome_secourisme'] is True
-        assert Offer.objects.get(email_offer="secouriste@test.fr").diplome_secourisme is True
+        from core.crypto_fields import blind_index
+        assert Offer.objects.get(email_offer_bidx=blind_index("secouriste@test.fr")).diplome_secourisme is True
 
     def test_diplome_secourisme_defaults_to_false(self, offer):
         assert offer.diplome_secourisme is False
@@ -233,7 +234,8 @@ class TestOfferEngagementFields:
         response = api_client.post(reverse('offer-list'), payload, format='json')
         assert response.status_code == status.HTTP_201_CREATED
         assert response.data['ancien_sapeur_pompier'] is True
-        assert Offer.objects.get(email_offer="ancien-pompier@test.fr").ancien_sapeur_pompier is True
+        from core.crypto_fields import blind_index
+        assert Offer.objects.get(email_offer_bidx=blind_index("ancien-pompier@test.fr")).ancien_sapeur_pompier is True
 
     def test_ancien_sapeur_pompier_defaults_to_false(self, offer):
         assert offer.ancien_sapeur_pompier is False

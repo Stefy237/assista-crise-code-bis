@@ -112,8 +112,9 @@ class TestAutomaticPathParticipants:
 
         assert response.status_code == status.HTTP_201_CREATED
         dossier = Dossier.objects.get(crise=crisis, competence=competence)
+        from core.crypto_fields import blind_index
         assert DossierParticipant.objects.filter(
-            dossier=dossier, utilisateur__email="anonyme-unif@test.fr",
+            dossier=dossier, utilisateur__email_bidx=blind_index("anonyme-unif@test.fr"),
             role=DossierParticipant.Role.DEMANDEUR,
         ).exists()
 
@@ -165,8 +166,9 @@ class TestAutomaticPathParticipants:
 
         assert response.status_code == status.HTTP_201_CREATED
         dossier = Dossier.objects.get(crise=crisis, competence=None)
+        from core.crypto_fields import blind_index
         assert DossierParticipant.objects.filter(
-            dossier=dossier, utilisateur__email="sanscompunif@test.fr",
+            dossier=dossier, utilisateur__email_bidx=blind_index("sanscompunif@test.fr"),
             role=DossierParticipant.Role.DEMANDEUR,
         ).exists()
 

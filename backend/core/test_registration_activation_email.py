@@ -11,6 +11,7 @@ from django.core import mail
 from django.urls import reverse
 from rest_framework import status
 
+from core.crypto_fields import blind_index
 from core.models import AuditLog, User
 
 
@@ -35,7 +36,7 @@ class TestActivationEmailAutoriteLocale:
         assert mail.outbox[0].to == ["contact@collectivite-register-test.fr"]
         assert "activation" in mail.outbox[0].body.lower()
 
-        user = User.objects.get(email="contact@collectivite-register-test.fr")
+        user = User.objects.get(email_bidx=blind_index("contact@collectivite-register-test.fr"))
         log = AuditLog.objects.filter(
             action__code="ENVOI_EMAIL", commentaire__icontains=user.email,
         ).first()
@@ -59,7 +60,7 @@ class TestActivationEmailAutoriteLocale:
         # Le compte est créé malgré l'échec d'envoi (comportement inchangé) : seule la
         # traçabilité de l'échec est ajoutée par ce correctif.
         assert response.status_code == status.HTTP_201_CREATED
-        user = User.objects.get(email="contact@collectivite-echec-mail-test.fr")
+        user = User.objects.get(email_bidx=blind_index("contact@collectivite-echec-mail-test.fr"))
 
         log = AuditLog.objects.filter(
             action__code="ENVOI_EMAIL", commentaire__icontains=user.email,
