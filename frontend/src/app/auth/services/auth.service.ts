@@ -493,13 +493,14 @@ export class AuthService {
       role === UserRole.ADMIN || role === UserRole.REGULATEUR;
   }
 
-  /** Zones = découpage PCS/PICS, réservé aux mairies/intercommunalités — même critère que
-   * _institution_est_autorite_locale côté backend (core/views.py), qui bloque déjà la
-   * création côté API. Un admin (rôle PROD réel, voir isAdmin) voit toujours tout. */
+  /** Zones = découpage PCS/PICS, réservé aux collectivités territoriales (mairie/EPCI/
+   * département/région) — même critère que _institution_est_autorite_locale côté backend
+   * (core/views.py), qui bloque déjà la création côté API. Élargi de mairie/EPCI à CG/CR le
+   * 15/10 (demande utilisateur). Un admin (rôle PROD réel, voir isAdmin) voit toujours tout. */
   isAutoriteLocaleCommunale(): boolean {
     if (this.isAdmin()) return true;
     const code = this.getCurrentUser()?.institution_type_code;
-    return code === 'MAIRIE' || code === 'EPCI';
+    return code === 'MAIRIE' || code === 'EPCI' || code === 'CG' || code === 'CR';
   }
 
   /** Utilisé par adminGuard. Un compte n'ayant reçu qu'un accès démo (demo_role réglé, type
