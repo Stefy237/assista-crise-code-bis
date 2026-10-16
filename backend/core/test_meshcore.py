@@ -442,7 +442,10 @@ class TestContactMeshCore:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.data['synchronises'] == 2
-        assert ContactMeshCore.objects.filter(compagnon=compagnon, pubkey_hex='aa11', nom='Alice Terrain').exists()
+        # `nom` est un EncryptedTextField sans colonne `_bidx` -- pas de filtre exact possible
+        # en base, on récupère par pubkey_hex (en clair) et on vérifie nom en Python.
+        alice = ContactMeshCore.objects.get(compagnon=compagnon, pubkey_hex='aa11')
+        assert alice.nom == 'Alice Terrain'
         relais = ContactMeshCore.objects.get(compagnon=compagnon, pubkey_hex='bb22')
         assert relais.type_contact == 'REPEATER'
         assert relais.location is not None

@@ -33,6 +33,10 @@ export interface CompagnonMeshCore {
   derniere_connexion?: string | null;
   dernier_etat?: 'CONNECTE' | 'DECONNECTE' | 'ERREUR' | null;
   derniere_erreur?: string | null;
+  /** Valeur brute get_bat() (unité non confirmée, probablement mV) -- voir
+   * boucle_batterie_compagnon côté pont. */
+  derniere_batterie_niveau?: number | null;
+  derniere_batterie_date?: string | null;
 
   date_creation?: string;
 }

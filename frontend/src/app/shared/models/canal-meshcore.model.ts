@@ -36,6 +36,19 @@ export interface MessageCanalMeshCore {
   date_creation: string;
 }
 
+/** Canal dont un companion capte le trafic radio (paquet GRP_TXT, hash de clé toujours présent
+ * sur l'air) sans le connaître localement — ancienne clé d'équipe encore utilisée par des
+ * nœuds non à jour, ou canal tiers au voisinage radio. Indéchiffrable sans la clé : pas de fil
+ * de discussion possible, juste un signalement de présence. */
+export interface CanalMeshCoreDetecte {
+  id: string;
+  /** Hash de clé sur 1 octet (2 car. hex) tel que diffusé sur l'air. */
+  chan_hash: string;
+  premiere_vue: string;
+  derniere_vue: string;
+  nombre_paquets: number;
+}
+
 export interface MessageMeshLog {
   id: string;
   compagnon: string;

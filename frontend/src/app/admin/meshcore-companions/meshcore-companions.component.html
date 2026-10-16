@@ -117,8 +117,10 @@
           <th>Région</th>
           <th>Statut</th>
           <th class="sortable" (click)="trierCompagnons('derniere_connexion')">Dernière connexion {{ indicateurTri(companionTri, 'derniere_connexion', companionDirection) }}</th>
+          <th title="Valeur brute remontée par le companion -- unité non confirmée, probablement mV">Batterie</th>
           <th>ID (pour COMPAGNON_ID)</th>
           <th>Advert</th>
+          <th>Traceroute</th>
           <th></th>
         </tr>
       </thead>
@@ -144,6 +146,9 @@
             </td>
             <td><span class="statut" [ngClass]="statutClass(c)">{{ c.dernier_etat || 'jamais connecté' }}</span></td>
             <td>{{ c.derniere_connexion ? (c.derniere_connexion | date:'short') : '—' }}</td>
+            <td [title]="c.derniere_batterie_date ? ('Relevé ' + (c.derniere_batterie_date | date:'short')) : ''">
+              {{ c.derniere_batterie_niveau != null ? c.derniere_batterie_niveau : '—' }}
+            </td>
             <td class="mono id-cell" (click)="copierId(c)" title="Cliquer pour copier">{{ c.id }}</td>
             <td>
               <button type="button" class="btn-secondary-sm" [disabled]="advertEnCours === c.id" (click)="envoyerAdvert(c, false)" title="Annonce de présence zero-hop">
@@ -153,14 +158,135 @@
                 Flood
               </button>
             </td>
+            <td>
+              <button type="button" class="btn-secondary-sm" [disabled]="tracerouteEnCours === c.id" (click)="lancerTraceroute(c)" title="Diagnostic du chemin radio (répéteurs traversés, SNR par saut)">
+                {{ tracerouteEnCours === c.id ? 'En cours…' : 'Traceroute' }}
+              </button>
+            </td>
             <td><button type="button" class="btn-danger-sm" (click)="supprimer(c)">Supprimer</button></td>
           </tr>
         } @empty {
-          <tr><td colspan="10" class="empty">Aucun companion déclaré pour l'instant.</td></tr>
+          <tr><td colspan="12" class="empty">Aucun companion déclaré pour l'instant.</td></tr>
         }
       </tbody>
     </table>
   </div>
+}
+
+@if (tracerouteCompagnonId) {
+  <div class="table-wrapper">
+    <h3>Résultat du traceroute</h3>
+    @if (tracerouteErreur) {
+      <p class="error-message">{{ tracerouteErreur }}</p>
+    }
+    @if (tracerouteEnCours) {
+      <p class="page-hint">En attente de réponse du mesh (peut prendre jusqu'à une trentaine de secondes)…</p>
+    }
+    <table class="data-table">
+      <thead>
+        <tr><th>Lancé le</th><th>Statut</th><th>Chemin (saut par saut, SNR)</th></tr>
+      </thead>
+      <tbody>
+        @for (t of tracerouteResultats; track t.id) {
+          <tr>
+            <td>{{ t.date_creation | date:'short' }}</td>
+            <td>{{ t.statut }}</td>
+            <td>
+              @if (t.chemin && t.chemin.length > 0) {
+                {{ libelleChemin(t.chemin) }}
+              } @else if (t.erreur) {
+                <span class="error-message">{{ t.erreur }}</span>
+              } @else {
+                —
+              }
+            </td>
+          </tr>
+        } @empty {
+          <tr><td colspan="3" class="empty">Pas encore de résultat.</td></tr>
+        }
+      </tbody>
+    </table>
+  </div>
+}
+
+@if (alertesSOS.length > 0) {
+  <h2>Alertes SOS détectées <span class="badge-test">admin</span></h2>
+  <p class="page-hint">
+    Messages mesh entrants (MeshCore/Meshtastic) contenant un mot-clé d'urgence, ou arrivés sur
+    un canal dédié par convention (ex: "Fr_EMCOM") — chaque détection a déjà notifié les
+    administrateurs par email et message privé Element. Détection automatique par mot-clé : à
+    vérifier humainement, un faux positif reste possible.
+  </p>
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr><th>Reçu le</th><th>Protocole</th><th>Mot-clé</th><th>Canal</th><th>Expéditeur</th><th>Institution</th><th>Message</th></tr>
+      </thead>
+      <tbody>
+        @for (a of alertesSOS; track a.id) {
+          <tr>
+            <td>{{ a.date_creation | date:'short' }}</td>
+            <td>{{ a.protocole }}</td>
+            <td>{{ a.mot_cle_detecte }}</td>
+            <td>{{ a.canal_nom || 'DM' }}</td>
+            <td>{{ a.expediteur_nom || a.expediteur_identifiant || '—' }}</td>
+            <td>{{ a.institution_nom || '—' }}</td>
+            <td>{{ a.contenu }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+}
+
+@if (analyseSecurite && (analyseSecurite.cles_faibles.length > 0 || analyseSecurite.cles_dupliquees.length > 0)) {
+  <h2>Sécurité des clés</h2>
+  <p class="page-hint">
+    Analyse passive des clés publiques déjà connues (aucune requête radio) — clé à entropie
+    anormalement basse (génération ratée ou clé de test), ou même clé vue sous deux noms
+    différents (signe possible de clonage). Une détection reste une piste à vérifier, pas un
+    verdict automatique.
+  </p>
+
+  @if (analyseSecurite.cles_faibles.length > 0) {
+    <div class="table-wrapper">
+      <h3>Clés à entropie suspecte</h3>
+      <table class="data-table">
+        <thead>
+          <tr><th>Nom annoncé</th><th>Companion</th><th>Clé publique</th><th>Problème détecté</th></tr>
+        </thead>
+        <tbody>
+          @for (c of analyseSecurite.cles_faibles; track c.contact_id) {
+            <tr>
+              <td>{{ c.nom || '—' }}</td>
+              <td>{{ c.compagnon_nom }}</td>
+              <td class="mono">{{ c.pubkey_hex.slice(0, 16) }}…</td>
+              <td>{{ c.probleme }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  }
+
+  @if (analyseSecurite.cles_dupliquees.length > 0) {
+    <div class="table-wrapper">
+      <h3>Clés dupliquées entre identités différentes</h3>
+      <table class="data-table">
+        <thead>
+          <tr><th>Clé publique</th><th>Noms observés sous cette clé</th></tr>
+        </thead>
+        <tbody>
+          @for (d of analyseSecurite.cles_dupliquees; track d.pubkey_hex) {
+            <tr>
+              <td class="mono">{{ d.pubkey_hex.slice(0, 16) }}…</td>
+              <td>{{ d.noms.join(', ') }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  }
 }
 
 <h2>Répéteurs &amp; infrastructure MeshCore</h2>

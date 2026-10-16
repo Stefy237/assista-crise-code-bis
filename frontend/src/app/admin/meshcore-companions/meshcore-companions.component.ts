@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
@@ -6,13 +6,16 @@ import { CompagnonMeshCoreService } from '../../services/compagnon-meshcore.serv
 import { MeshLocalDetecterService } from '../../services/mesh-local-detecter.service';
 import { RelaisMeshCoreService } from '../../services/relais-meshcore.service';
 import { NoeudMeshUtilisateurService } from '../../services/noeud-mesh-utilisateur.service';
-import { ContactMeshCoreService } from '../../services/contact-meshcore.service';
+import { ContactMeshCoreService, AnalyseSecuriteMeshCore } from '../../services/contact-meshcore.service';
+import { TracerouteMeshCoreService } from '../../services/traceroute-meshcore.service';
+import { AlerteMeshSOSService } from '../../services/alerte-sos-mesh.service';
+import { AlerteMeshSOS } from '../../shared/models/alerte-sos-mesh.model';
 import { UserService } from '../../services/user.service';
 import { AuthService } from '../../auth/services/auth.service';
 import { CompagnonMeshCore, MeshCoreConnexionType } from '../../shared/models/compagnon-meshcore.model';
 import { RelaisMeshCore } from '../../shared/models/relais-meshcore.model';
 import { NoeudMeshUtilisateur } from '../../shared/models/noeud-mesh-utilisateur.model';
-import { ContactMeshCore } from '../../shared/models/contact-meshcore.model';
+import { ContactMeshCore, TracerouteMeshCore, SautTraceroute } from '../../shared/models/contact-meshcore.model';
 import { User } from '../../shared/models/user.model';
 
 type Direction = 'asc' | 'desc';
@@ -49,7 +52,7 @@ interface LigneInfrastructure {
   templateUrl: './meshcore-companions.component.html',
   styleUrl: './meshcore-companions.component.scss',
 })
-export class MeshcoreCompanionsComponent implements OnInit {
+export class MeshcoreCompanionsComponent implements OnInit, OnDestroy {
 
   companions: CompagnonMeshCore[] = [];
   loading = true;
@@ -98,6 +101,10 @@ export class MeshcoreCompanionsComponent implements OnInit {
   creatingNoeud = false;
 
   contacts: ContactMeshCore[] = [];
+  analyseSecurite: AnalyseSecuriteMeshCore | null = null;
+  /** Réservé aux administrateurs (voir AlerteMeshSOSViewSet) -- null tant que non chargé,
+   * jamais interrogé pour un compte institutionnel non-admin (évite un 403 systématique). */
+  alertesSOS: AlerteMeshSOS[] = [];
 
   // Recherche/tri companions — table du haut (devices physiques du pont).
   companionRecherche = '';
@@ -123,6 +130,8 @@ export class MeshcoreCompanionsComponent implements OnInit {
     private relaisService: RelaisMeshCoreService,
     private noeudService: NoeudMeshUtilisateurService,
     private contactService: ContactMeshCoreService,
+    private tracerouteService: TracerouteMeshCoreService,
+    private alerteSOSService: AlerteMeshSOSService,
     private userService: UserService,
     private authService: AuthService,
   ) {}
@@ -137,11 +146,31 @@ export class MeshcoreCompanionsComponent implements OnInit {
     this.loadRelais();
     this.loadNoeuds();
     this.loadContacts();
+    this.loadAnalyseSecurite();
+    if (this.authService.isAdmin()) this.loadAlertesSOS();
     this.userService.getAll().subscribe(data => { this.utilisateurs = data; });
+  }
+
+  private loadAlertesSOS(): void {
+    this.alerteSOSService.getAll().subscribe({
+      next: (data) => { this.alertesSOS = data; },
+      error: () => { /* non bloquant -- simple complément d'information */ },
+    });
+  }
+
+  ngOnDestroy(): void {
+    if (this.tracerouteSondage) clearInterval(this.tracerouteSondage);
   }
 
   loadContacts(): void {
     this.contactService.getAll().subscribe(data => { this.contacts = data; });
+  }
+
+  loadAnalyseSecurite(): void {
+    this.contactService.analyseSecurite().subscribe({
+      next: (data) => { this.analyseSecurite = data; },
+      error: () => { /* non bloquant -- simple complément d'information */ },
+    });
   }
 
   /** Companions personnels pas encore associés à un compte utilisateur — RESTREINT au type
@@ -533,5 +562,56 @@ export class MeshcoreCompanionsComponent implements OnInit {
         this.advertErreur = err.error?.detail || "Impossible de programmer cet advert.";
       },
     });
+  }
+
+  // Traceroute : même principe de file d'attente que l'advert (exécuté par le pont à son
+  // prochain cycle), mais la réponse met plus longtemps à revenir (paquet de trace en
+  // diffusion, voir TRACEROUTE_TIMEOUT_SECONDS côté pont) -- on repasse par l'historique
+  // toutes les 4s jusqu'à ce que la ligne la plus récente ne soit plus EN_ATTENTE, ou jusqu'à
+  // une limite de tentatives pour ne jamais boucler indéfiniment si le pont est hors ligne.
+  tracerouteCompagnonId: string | null = null;
+  tracerouteResultats: TracerouteMeshCore[] = [];
+  tracerouteEnCours: string | null = null;
+  tracerouteErreur = '';
+  private tracerouteSondage: ReturnType<typeof setInterval> | null = null;
+
+  lancerTraceroute(companion: CompagnonMeshCore): void {
+    this.tracerouteCompagnonId = companion.id;
+    this.tracerouteEnCours = companion.id;
+    this.tracerouteErreur = '';
+    this.tracerouteResultats = [];
+    if (this.tracerouteSondage) clearInterval(this.tracerouteSondage);
+
+    this.tracerouteService.lancer(companion.id).subscribe({
+      next: () => {
+        let tentatives = 0;
+        this.tracerouteSondage = setInterval(() => {
+          tentatives++;
+          this.tracerouteService.getHistorique(companion.id).subscribe({
+            next: (data) => {
+              this.tracerouteResultats = data;
+              const enCours = data[0]?.statut === 'EN_ATTENTE';
+              if (!enCours || tentatives >= 10) {
+                this.tracerouteEnCours = null;
+                if (this.tracerouteSondage) clearInterval(this.tracerouteSondage);
+              }
+            },
+            error: () => { /* on retentera au prochain cycle */ },
+          });
+        }, 4000);
+      },
+      error: (err) => {
+        this.tracerouteEnCours = null;
+        this.tracerouteErreur = err.error?.detail || "Impossible de lancer ce traceroute.";
+      },
+    });
+  }
+
+  libelleChemin(chemin: SautTraceroute[]): string {
+    // Le dernier élément n'a jamais de hash (réception par notre propre companion, voir
+    // docstring de TracerouteMeshCore.chemin) -- distingué du reste pour rester lisible.
+    return chemin
+      .map(saut => saut.hash ? `#${saut.hash} (${saut.snr.toFixed(1)} dB)` : `Companion (${saut.snr.toFixed(1)} dB)`)
+      .join(' → ');
   }
 }

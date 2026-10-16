@@ -88,6 +88,33 @@
   }
 }
 
+.rejoindre-canal-public {
+  display: flex;
+  gap: .4rem;
+  margin: 0 0 .8rem;
+
+  .form-input { flex: 1; padding: .4rem .6rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: .82rem; }
+
+  .btn-secondary {
+    padding: .4rem .8rem;
+    border-radius: 6px;
+    border: 1px solid #d1d5db;
+    background: #fff;
+    color: #374151;
+    cursor: pointer;
+    font-size: .82rem;
+    &:hover:not(:disabled) { background: #f9fafb; }
+    &:disabled { opacity: .5; cursor: not-allowed; }
+  }
+}
+
+.conversations-detectees li {
+  cursor: default;
+  color: #9ca3af;
+  &:hover { background: none; }
+  > .material-icons { color: #d97706; }
+}
+
 .conv-info {
   display: flex;
   flex-direction: column;

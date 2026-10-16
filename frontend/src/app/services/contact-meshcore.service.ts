@@ -17,4 +17,30 @@ export class ContactMeshCoreService {
   getAll(compagnonId?: string): Observable<ContactMeshCore[]> {
     return this.http.get<ContactMeshCore[]>(`${this.url}/`, { params: compagnonId ? { compagnon: compagnonId } : {} });
   }
+
+  /** GET /api/contacts-meshcore/analyse-securite/ — analyse passive des clés publiques déjà
+   * connues (aucune requête mesh) : clé à entropie anormalement basse, clé dupliquée entre
+   * deux identités différentes. Inspiré de MeshMonitor (github.com/Yeraze/meshmonitor). */
+  analyseSecurite(): Observable<AnalyseSecuriteMeshCore> {
+    return this.http.get<AnalyseSecuriteMeshCore>(`${this.url}/analyse-securite/`);
+  }
+}
+
+export interface CleFaibleMeshCore {
+  contact_id: string;
+  pubkey_hex: string;
+  nom: string;
+  compagnon_id: string;
+  compagnon_nom: string;
+  probleme: string;
+}
+
+export interface CleDupliqueeMeshCore {
+  pubkey_hex: string;
+  noms: string[];
+}
+
+export interface AnalyseSecuriteMeshCore {
+  cles_faibles: CleFaibleMeshCore[];
+  cles_dupliquees: CleDupliqueeMeshCore[];
 }

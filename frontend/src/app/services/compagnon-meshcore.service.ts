@@ -4,6 +4,7 @@ import { Observable } from 'rxjs';
 
 import { environment } from '../../environments/environment';
 import { CompagnonMeshCore } from '../shared/models/compagnon-meshcore.model';
+import { CanalMeshCoreDetecte } from '../shared/models/canal-meshcore.model';
 
 @Injectable({ providedIn: 'root' })
 export class CompagnonMeshCoreService {
@@ -21,6 +22,14 @@ export class CompagnonMeshCoreService {
    * DEMO, voir CompagnonMeshCoreViewSet). */
   envoyables(): Observable<Pick<CompagnonMeshCore, 'id' | 'nom' | 'principal'>[]> {
     return this.http.get<Pick<CompagnonMeshCore, 'id' | 'nom' | 'principal'>[]>(`${this.url}/envoyables/`);
+  }
+
+  /** GET /api/compagnons-meshcore/<id>/canaux-detectes/ — canaux dont ce companion capte le
+   * trafic radio (paquet GRP_TXT) sans les connaître localement : ancienne clé d'équipe encore
+   * utilisée par des nœuds non à jour, ou canal tiers au voisinage. Indéchiffrable sans la clé
+   * (pas de fil de discussion possible), simple signalement de présence. */
+  canauxDetectes(id: string): Observable<CanalMeshCoreDetecte[]> {
+    return this.http.get<CanalMeshCoreDetecte[]>(`${this.url}/${id}/canaux-detectes/`);
   }
 
   create(data: Partial<CompagnonMeshCore>): Observable<CompagnonMeshCore> {

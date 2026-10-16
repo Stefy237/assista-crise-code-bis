@@ -24,7 +24,7 @@
 
       <h4 class="section-titre">Canaux d'équipe</h4>
       <ul class="conversations">
-        @for (c of canaux; track c.id) {
+        @for (c of canauxEquipe; track c.id) {
           <li [class.actif]="estConversationActive({type: 'canal', canal: c})" (click)="selectionnerCanal(c)">
             <span class="material-icons">tag</span>
             <span class="conv-info">
@@ -40,20 +40,67 @@
         }
       </ul>
 
+      <h4 class="section-titre">Canaux publics</h4>
+      <ul class="conversations">
+        @for (c of canauxPublics; track c.id) {
+          <li [class.actif]="estConversationActive({type: 'canal', canal: c})" (click)="selectionnerCanal(c)">
+            <span class="material-icons">public</span>
+            <span class="conv-info">
+              <span class="conv-nom">{{ c.nom }}</span>
+            </span>
+            @if (!c.provisionne) {
+              <span class="material-icons conv-attente" title="En attente de provisionnement par le pont">hourglass_empty</span>
+            }
+          </li>
+        } @empty {
+          <li class="vide">Aucun canal public pour l'instant (le canal "Public" par défaut apparaît ici tout seul dès que du trafic radio le confirme).</li>
+        }
+      </ul>
+
+      <div class="rejoindre-canal-public">
+        <input
+          type="text" class="form-input" placeholder="#meteo"
+          [(ngModel)]="nouveauCanalPublicNom" (keyup.enter)="ajouterCanalPublic()"
+          title="Nom d'un canal public connu (clé dérivée automatiquement, pas de secret à connaître)."
+        >
+        <button
+          type="button" class="btn-secondary"
+          [disabled]="!nouveauCanalPublicNom.trim() || ajoutCanalEnCours"
+          (click)="ajouterCanalPublic()"
+        >
+          Rejoindre
+        </button>
+      </div>
+
       <h4 class="section-titre">Messages privés</h4>
       <ul class="conversations">
-        @for (n of noeuds; track n.id) {
-          <li [class.actif]="estConversationActive({type: 'dm', noeud: n})" (click)="selectionnerDm(n)">
+        @for (c of contactsPourDm; track c.pubkeyHex) {
+          <li [class.actif]="estConversationActive({type: 'dm', cible: c})" (click)="selectionnerDm(c)">
             <span class="material-icons">person</span>
             <span class="conv-info">
-              <span class="conv-nom">{{ n.nom_noeud || n.utilisateur_nom }}</span>
-              @if (n.nom_noeud && n.utilisateur_nom) { <span class="conv-meta">{{ n.utilisateur_nom }}</span> }
+              <span class="conv-nom">{{ c.titre }}</span>
+              @if (c.sousTitre) { <span class="conv-meta">{{ c.sousTitre }}</span> }
             </span>
           </li>
         } @empty {
-          <li class="vide">Aucun nœud personnel associé pour l'instant.</li>
+          <li class="vide">Aucun nœud connu pour l'instant.</li>
         }
       </ul>
+
+      @if (canauxDetectes.length > 0) {
+        <h4 class="section-titre">Canaux détectés (non provisionnés)</h4>
+        <ul class="conversations conversations-detectees">
+          @for (d of canauxDetectes; track d.id) {
+            <li [title]="'Trafic radio capté sur un canal inconnu — clé non connue, impossible à déchiffrer ni à rejoindre depuis ici.'">
+              <span class="material-icons">help_outline</span>
+              <span class="conv-info">
+                <span class="conv-nom">Canal #{{ d.chan_hash }}</span>
+                <span class="conv-meta">{{ d.nombre_paquets }} paquet(s) · vu {{ d.derniere_vue | date:'short' }}</span>
+              </span>
+            </li>
+          }
+        </ul>
+      }
     }
   </aside>
 
@@ -69,7 +116,7 @@
       @if (loadingMessages) {
         <p class="chargement">Chargement…</p>
       } @else {
-        <div class="messages">
+        <div class="messages" #messagesContainer>
           @for (m of messagesAffiches; track m.id) {
             <div class="message" [class.sortant]="m.direction === 'SORTANT'">
               <div class="message-meta">
