@@ -27,12 +27,86 @@ SECRET_KEY = os.environ.get(
     'django-insecure-HSLgGBNlaGBJ4kyaracScLRPa3tFJhK6LOEbYQs9ipBu-DaMMQfey725-fB-uq8Dabk',
 )
 
+# Chiffrement des colonnes sensibles au niveau applicatif (voir core/crypto_fields.py) --
+# PAS de valeur de repli ici contrairement à SECRET_KEY : un démarrage sans ces clés doit
+# échouer bruyamment (tout champ chiffré deviendrait illisible, ou pire, un nouveau déploiement
+# sans clé réelle chiffrerait avec une valeur différente de celle utilisée jusqu'ici). Clés
+# générées le 2026-10-06, remises à l'utilisateur en plus de leur présence ici (voir
+# ~/.config/assista-crise/secrets/backend.env, même traitement que SECRET_KEY/DB_PASS).
+FIELD_ENCRYPTION_KEY = os.environ.get('FIELD_ENCRYPTION_KEY', '')
+FIELD_BLIND_INDEX_KEY = os.environ.get('FIELD_BLIND_INDEX_KEY', '')
+
+# Chiffrement des FICHIERS sensibles (voir core/file_crypto.py -- EncryptedFileSystemStorage),
+# volontairement une clé À PART de FIELD_ENCRYPTION_KEY (même principe que
+# FIELD_ENCRYPTION_KEY/FIELD_BLIND_INDEX_KEY ci-dessus : jamais la même clé pour deux usages
+# cryptographiques différents). Même traitement que les autres secrets -- voir
+# ~/.config/assista-crise/secrets/backend.env.
+FILE_ENCRYPTION_KEY = os.environ.get('FILE_ENCRYPTION_KEY', '')
+
+# auth.E003 : Django exige que USERNAME_FIELD ('email') porte unique=True -- déplacé sur
+# User.email_bidx (voir core/crypto_fields.py), seul moyen de garantir l'unicité une fois email
+# chiffré de façon non déterministe (Fernet inclut un nonce aléatoire, deux lignes avec le même
+# email en clair n'ont jamais le même ciphertext). L'unicité réelle reste bien appliquée --
+# juste pas sur la colonne que ce check s'attend à voir contrainte.
+SILENCED_SYSTEM_CHECKS = ['auth.E003']
+
+# Alerte en cas d'erreur (email + Matrix) -- ajouté après l'incident du 07/10 (compte "Autorité
+# locale" créé sans que l'email d'activation ne parte jamais, et sans AUCUNE trace exploitable :
+# la config de logging par défaut de Django n'attache un handler console qu'en DEBUG=True
+# (filtre require_debug_true), donc tout logger.exception()/logger.error() en production
+# (DEBUG=False, le cas normal ici) partait dans le vide -- y compris le except de audit_log()
+# lui-même et celui de send_mail_logged() (voir core/audit.py). Deux canaux redondants :
+# mail_admins (mécanisme standard Django, voir ADMINS ci-dessous) et un salon Matrix dédié (voir
+# core/logging_handlers.py). Rattachés au ROOT logger plutôt qu'à 'django.request' seul (qui ne
+# couvre que les 500 HTTP) : toute erreur quelque part dans l'app (y compris Celery, les scripts
+# de migration, un logger.exception() dans n'importe quel module) doit alerter, pas seulement
+# celles qui traversent une requête HTTP.
+ADMINS = [("Sylvain", "sylvain.hazera@gmail.com")]
+MANAGERS = ADMINS
+SERVER_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'no-reply@assista-crise.fr')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{asctime}] {levelname} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'mail_admins': {
+            'level': 'ERROR',
+            'class': 'django.utils.log.AdminEmailHandler',
+        },
+        'matrix_alert': {
+            'level': 'ERROR',
+            'class': 'core.logging_handlers.MatrixAlertHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console', 'mail_admins', 'matrix_alert'],
+        'level': 'INFO',
+    },
+}
+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
     'localhost', '172.16.1.114', '127.0.0.1',
     'assista-crise.fr', 'www.assista-crise.fr', 'demo.assista-crise.fr', 'assista-crise.duckdns.org',
+    # Marque blanche Réserve Résilience / Casques Jaunes (voir core/branding.py,
+    # InstitutionWebDomaine) -- app.reserve-resilience.org est le domaine du partenaire, pointé
+    # en CNAME sur cj.assista-crise.fr : le Host vu par Django est celui réellement visité par
+    # le navigateur, donc les DEUX doivent être listés ici, pas seulement le CNAME cible.
+    'cj.assista-crise.fr', 'app.reserve-resilience.org',
     # Nom réseau Docker interne : nécessaire pour qu'un service du même réseau (ex: le
     # service-pont meshcore-bridge/) puisse appeler l'API via http://backend:8000/ plutôt
     # que par l'IP publique — sans ça Django répond 400 (DisallowedHost) à toute requête
@@ -46,6 +120,8 @@ CSRF_TRUSTED_ORIGINS = [
     "https://demo.assista-crise.fr",
     "https://demo.assista-crise.fr:4200",
     "https://assista-crise.duckdns.org",
+    "https://cj.assista-crise.fr",
+    "https://app.reserve-resilience.org",
 
     "http://172.16.1.114",
     "https://172.16.1.114",
@@ -195,6 +271,8 @@ CORS_ALLOWED_ORIGINS = [
     "https://assista-crise.fr",
     "https://demo.assista-crise.fr",
     "https://demo.assista-crise.fr:4200",
+    "https://cj.assista-crise.fr",
+    "https://app.reserve-resilience.org",
     "https://localhost:4200",
     "https://127.0.0.1:4200",
     "https://frontend:4200",  # Pour Docker

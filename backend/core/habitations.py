@@ -27,6 +27,9 @@ def _departement_code(commune_code: str) -> str:
     return commune_code[:2]
 
 
+# Importée telle quelle par core/vulnerabilites.py (registre des personnes vulnérables, même
+# logique de couverture géographique d'une délégation) -- un changement de signature ici doit
+# être répercuté là-bas aussi.
 def _delegation_couvre_commune(delegation: DelegationCompetence, commune_code: str) -> bool:
     if delegation.communes and commune_code in delegation.communes:
         return True

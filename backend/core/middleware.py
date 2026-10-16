@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,22 @@ class AuditTraceMiddleware:
             else:
                 objet_type = resolver_match.url_name or request.path
 
-            objet_id = resolver_match.kwargs.get('pk')
+            # resolver_match.kwargs['pk'] n'est PAS garanti être un UUID valide : une URL mal
+            # formée (typo, ancien lien, méthode non supportée) peut matcher la route
+            # générique "détail" d'un ViewSet avec n'importe quel segment en guise de pk (ex:
+            # POST /api/users/creer_mon_institution/ -- faute de frappe pour l'action réelle,
+            # hyphénée -- capture "creer_mon_institution" comme pk) -- AuditLog.objet_id est un
+            # UUIDField, le passer tel quel fait planter audit_log() (`to_python` lève
+            # ValidationError avant même d'atteindre la base). Repéré le 08/10 : ce plantage
+            # était jusqu'ici avalé silencieusement par le except plus bas ET par la config de
+            # logging par défaut de Django (voir LOGGING, config/settings.py) -- depuis l'ajout
+            # de l'alerte mail_admins/Matrix sur toute erreur, il déclenchait une fausse alerte
+            # à chaque URL mal formée de ce type.
+            pk_brut = resolver_match.kwargs.get('pk')
+            try:
+                objet_id = uuid.UUID(str(pk_brut)) if pk_brut is not None else None
+            except (ValueError, AttributeError, TypeError):
+                objet_id = None
             action_name = resolver_match.url_name or ''
             verbe = {"LECTURE": "Consultation", "CREATION": "Création", "MODIFICATION": "Modification",
                      "SUPPRESSION": "Suppression"}[self.ACTION_BY_METHOD[request.method]]

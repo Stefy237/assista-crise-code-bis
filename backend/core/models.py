@@ -1,11 +1,16 @@
+import hashlib
 import uuid
 import os
 from django.contrib.auth.models import AbstractUser, Group, Permission
+from django.contrib.auth.models import UserManager as DjangoUserManager
 from django.contrib.gis.db import models as gis_models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
 from core.validators import validate_image_file
-from .validators import validate_image_file
+from .validators import validate_image_file, validate_identity_document_file
+from .crypto_fields import EncryptedTextField, EncryptedEmailField, EncryptedJSONField, blind_index
+from .file_crypto import get_encrypted_file_storage
 
 # Nom de fichier stocké basé sur un UUID plutôt que le nom d'origine (même patron que
 # secure_document_path/secure_recherche_photo_path plus bas dans ce fichier, ici dupliqué par
@@ -19,6 +24,14 @@ from .validators import validate_image_file
 def secure_user_photo_path(instance, filename):
     extension = os.path.splitext(filename)[1].lower()
     return f"photos/{uuid.uuid4()}{extension}"
+
+
+# Logo d'institution (marque blanche) : contrairement à documents/photos/recherches, ce préfixe
+# n'est PAS bloqué par proxy/nginx.conf -- un logo doit être publiquement affichable (header du
+# site), c'est le but même du champ. Ne jamais réutiliser ce préfixe pour un fichier sensible.
+def institution_branding_path(instance, filename):
+    extension = os.path.splitext(filename)[1].lower()
+    return f"branding/{uuid.uuid4()}{extension}"
 
 
 def secure_crisis_photo_path(instance, filename):
@@ -158,10 +171,19 @@ class PointCommune(models.Model):
         return f"({self.lat}, {self.lon}) -> {self.commune_id or '?'}"
 
 
+class UserManager(DjangoUserManager):
+    """`email` étant chiffré (voir core/crypto_fields.py), la résolution par USERNAME_FIELD
+    (utilisée par Django authenticate()/ModelBackend et donc par la connexion JWT) doit passer
+    par `email_bidx`, pas par `email=` qui ne peut plus jamais matcher un ciphertext."""
+
+    def get_by_natural_key(self, username):
+        return self.get(email_bidx=blind_index(username))
+
+
 class User(AbstractUser):
     """Modèle utilisateur personnalisé"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    phone_number = models.CharField(max_length=20, null=True, blank=True)
+    phone_number = EncryptedTextField(null=True, blank=True)
     photo = models.ImageField(upload_to=secure_user_photo_path, max_length=255, null=True, blank=True, validators=[validate_image_file])
     type = models.CharField(
         max_length=20,
@@ -175,7 +197,7 @@ class User(AbstractUser):
         help_text="Rôle appliqué en zone de démonstration. Null = aucun accès à la démo. "
                    "Réglé manuellement par un administrateur, jamais hérité de `type`.",
     )
-    postal_code = models.CharField(max_length=5, null=True, blank=True)
+    postal_code = EncryptedTextField(null=True, blank=True)
     enabled = models.BooleanField(default=True)
 
     # Renseignements institutionnels déclarés à l'inscription, conservés jusqu'à la confirmation
@@ -195,10 +217,22 @@ class User(AbstractUser):
         related_name="utilisateurs"
     )
 
+    objects = UserManager()
+
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username']
-    
-    email = models.EmailField(unique=True)
+
+    # Chiffré (voir core/crypto_fields.py) : `unique=True` déplacé sur `email_bidx`, seul moyen
+    # de garantir l'unicité une fois `email` chiffré de façon non déterministe (Fernet inclut un
+    # nonce aléatoire -- deux lignes avec le même email en clair ont un ciphertext différent, la
+    # contrainte unique ne peut donc plus porter sur la colonne chiffrée elle-même).
+    email = EncryptedEmailField()
+    # Chiffré (voir core/crypto_fields.py) : `unique=True` déplacé ici depuis `email`, seul
+    # moyen de garantir l'unicité une fois `email` chiffré de façon non déterministe (Fernet
+    # inclut un nonce aléatoire -- deux lignes avec le même email en clair ont un ciphertext
+    # différent). Resserré en unique=True/NOT NULL par la migration 0183, après que la
+    # migration de données 0182 ait rempli cette colonne pour les lignes existantes.
+    email_bidx = models.CharField(max_length=64, unique=True, editable=False, db_index=True)
 
     affected_crisis = models.ForeignKey(
         "Crisis",
@@ -230,6 +264,24 @@ class User(AbstractUser):
         null=True, blank=True,
         related_name="validated_users"
     )
+
+    # Case "Je souhaite rejoindre la réserve" à l'inscription publique (voir RegisterView,
+    # Institution.reserve_active) -- `reserve_institution` identifie QUELLE réserve (résolue
+    # depuis le Host au moment de l'inscription, voir core/branding.py), `reserve_verifiee`
+    # bascule à True quand le responsable de cette institution a traité la candidature (voir
+    # UserViewSet.verifier_reserve). `reserve_a_verifier` côté serializer (souhaite ET pas
+    # encore vérifiée) pilote la bannière "à vérifier", même gabarit que
+    # UserSerializer.get_needs_institution_setup.
+    souhaite_rejoindre_reserve = models.BooleanField(default=False)
+    reserve_verifiee = models.BooleanField(default=False)
+    reserve_institution = models.ForeignKey(
+        "Institution", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="candidats_reserve",
+    )
+
+    def save(self, *args, **kwargs):
+        self.email_bidx = blind_index(self.email)
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.username
@@ -297,6 +349,15 @@ class Crisis(EnvironmentScopedModel):
 
     class Meta:
         verbose_name_plural = "Crisis"
+        indexes = [
+            models.Index(fields=["-start_date"]),
+            # GIN sur les JSONField de composition de zone -- cible le lookup
+            # Q(zone_communes__contains=[code])/Q(zone_departements__contains=[code]) de
+            # _crisis_zone_resolver (views.py), non indexé jusqu'ici. Coût d'écriture
+            # négligeable (table peu volumineuse comparée à Offer/Request/Information).
+            GinIndex(fields=["zone_communes"]),
+            GinIndex(fields=["zone_departements"]),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -509,7 +570,7 @@ class Request(HebergementDetailsMixin, EnvironmentScopedModel):
     """Demandes d'aide"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=150)
-    description = models.TextField(null=True, blank=True)
+    description = EncryptedTextField(null=True, blank=True)
     photo = models.ImageField(upload_to=secure_demande_photo_path, max_length=255, null=True, blank=True, validators=[validate_image_file])
     # Nullable (contrairement à l'origine) : une demande d'hébergement n'a pas d'adresse
     # précise à donner, seulement une zone de recherche (voir zone_recherche_communes) —
@@ -539,10 +600,14 @@ class Request(HebergementDetailsMixin, EnvironmentScopedModel):
     # et MaterielPoint.nombre_places_assises pour les deux autres rubriques véhicules de l'app.
     # Pas de champ transport_type ici contrairement à Offer : optionnel, sans condition d'affichage.
     nombre_places_assises = models.PositiveIntegerField(null=True, blank=True)
-    first_name_request = models.CharField(max_length=60)
-    last_name_request = models.CharField(max_length=80)
-    email_request = models.EmailField()
-    phone_request = models.CharField(max_length=20)
+    first_name_request = EncryptedTextField()
+    last_name_request = EncryptedTextField()
+    email_request = EncryptedEmailField()
+    # Voir User.email_bidx pour le raisonnement -- utilisé par resolve_or_invite_demandeur pour
+    # rapprocher cette demande d'un compte User existant (recherche EXACTE, jamais via le champ
+    # chiffré lui-même).
+    email_request_bidx = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    phone_request = EncryptedTextField()
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     deletion_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
@@ -575,6 +640,19 @@ class Request(HebergementDetailsMixin, EnvironmentScopedModel):
         blank=True,
         related_name="submitted_requests",
     )
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["-created_at"]),
+            # commune_code n'avait pas db_index=True contrairement à epci_code/departement_code/
+            # region_code -- pourtant le niveau de zone le plus courant pour une mairie (sa
+            # propre commune) passe par ce champ (voir zone_scoping.SECTEUR_CHAMP_PAR_NIVEAU).
+            models.Index(fields=["commune_code"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.email_request_bidx = blind_index(self.email_request) if self.email_request else None
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.title
@@ -619,10 +697,12 @@ class Information(EnvironmentScopedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=150)
     photo = models.ImageField(upload_to=secure_information_photo_path, max_length=255, null=True, blank=True, validators=[validate_image_file])
-    first_name_information = models.CharField(max_length=60)
-    last_name_information = models.CharField(max_length=80)
-    email_information = models.EmailField()
-    phone_information = models.CharField(max_length=20)
+    first_name_information = EncryptedTextField()
+    last_name_information = EncryptedTextField()
+    email_information = EncryptedEmailField()
+    # Voir User.email_bidx pour le raisonnement -- recherche EXACTE le cas échéant.
+    email_information_bidx = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    phone_information = EncryptedTextField()
     location = gis_models.PointField(srid=4326)
     commune_code = models.CharField(
         max_length=10, null=True, blank=True,
@@ -669,6 +749,18 @@ class Information(EnvironmentScopedModel):
         blank=True,
         related_name="submitted_informations",
     )
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["-created_at"]),
+            # Voir le commentaire équivalent sur Request.Meta.indexes -- même lacune, même
+            # correctif.
+            models.Index(fields=["commune_code"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.email_information_bidx = blind_index(self.email_information) if self.email_information else None
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.title
@@ -727,7 +819,7 @@ class Offer(HebergementDetailsMixin, EnvironmentScopedModel):
     """Offres d'aide"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=150)
-    description = models.TextField(null=True, blank=True)
+    description = EncryptedTextField(null=True, blank=True)
     photo = models.ImageField(upload_to=secure_offre_photo_path, max_length=255, null=True, blank=True, validators=[validate_image_file])
     location = gis_models.PointField(srid=4326, null=True, blank=True)
     # Résolus une seule fois à la création (voir OfferViewSet.perform_create), à partir de
@@ -738,12 +830,15 @@ class Offer(HebergementDetailsMixin, EnvironmentScopedModel):
     epci_code = models.CharField(max_length=10, null=True, blank=True, db_index=True)
     departement_code = models.CharField(max_length=3, null=True, blank=True, db_index=True)
     region_code = models.CharField(max_length=3, null=True, blank=True, db_index=True)
-    first_name_offer = models.CharField(max_length=60)
-    last_name_offer = models.CharField(max_length=80)
-    email_offer = models.EmailField()
+    first_name_offer = EncryptedTextField()
+    last_name_offer = EncryptedTextField()
+    email_offer = EncryptedEmailField()
+    # Voir User.email_bidx pour le raisonnement -- utilisé par resolve_or_invite_benevole pour
+    # rapprocher cette offre d'un compte User existant (recherche EXACTE).
+    email_offer_bidx = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     # Nullable côté modèle (pas de backfill à imposer aux offres déjà existantes) mais requis
     # côté formulaire public pour toute nouvelle soumission, même pattern que User.phone_number.
-    phone_offer = models.CharField(max_length=20, blank=True, null=True)
+    phone_offer = EncryptedTextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     deletion_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
@@ -804,13 +899,13 @@ class Offer(HebergementDetailsMixin, EnvironmentScopedModel):
     # est partagé par toutes les lignes d'une même soumission — simple étiquette de
     # regroupement pour le tableau de bord régulateur (ReportingComponent), pas une FK vers un
     # modèle de lot : un dépôt groupé n'a pas de cycle de vie propre au-delà de la sélection.
-    organisation_nom = models.CharField(max_length=150, blank=True, null=True)
+    organisation_nom = EncryptedTextField(blank=True, null=True)
     groupe_id = models.UUIDField(null=True, blank=True)
 
     # Précisions spécifiques à certaines catégories (OfferType.type), une seule
     # s'applique en pratique selon le type choisi — voir propose-help-form. hebergement_duree
     # et les autres champs Hébergement viennent de HebergementDetailsMixin (base de la classe).
-    numero_adeli_rpps = models.CharField(max_length=50, null=True, blank=True)
+    numero_adeli_rpps = EncryptedTextField(null=True, blank=True)
     transport_type = models.CharField(max_length=20, choices=TypeTransportOffre.choices, null=True, blank=True)
     materiel_type = models.CharField(max_length=20, choices=TypeMateriel.choices, null=True, blank=True)
     # Posé uniquement quand materiel_type == AUTRE : précise le matériel via le catalogue
@@ -858,7 +953,7 @@ class Offer(HebergementDetailsMixin, EnvironmentScopedModel):
 
     # Texte libre : une ou plusieurs plaques si l'offreur propose plusieurs véhicules sous la
     # même ligne d'offre. Vide pour un engin ne circulant jamais sur la voie publique.
-    immatriculation = models.CharField(max_length=100, null=True, blank=True)
+    immatriculation = EncryptedTextField(null=True, blank=True)
 
     # Pertinent quand transport_type == PERSONNES : combien de personnes le véhicule peut
     # transporter en plus du conducteur — même colonne "Nb de places" que le tableau "Véhicules
@@ -900,6 +995,18 @@ class Offer(HebergementDetailsMixin, EnvironmentScopedModel):
     # filtrer les candidats lors du recrutement sur un point opérationnel (PointOperationnel.
     # competences_requises est le pendant côté besoin, celui-ci est côté offre).
     competences = models.ManyToManyField("Competence", blank=True, related_name="offres")
+
+    class Meta:
+        indexes = [
+            # Sert le tri par défaut (-created_at) et toute pagination -- la table la plus
+            # volumineuse des quatre (7250+ lignes, cible 300-400k), cf. plan pagination
+            # Signalements.
+            models.Index(fields=["-created_at"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.email_offer_bidx = blind_index(self.email_offer) if self.email_offer else None
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return self.title
@@ -1290,6 +1397,10 @@ class Institution(EnvironmentScopedModel):
             elif niveau == "national":
                 self.secteur_nom = "France entière"
         super().save(*args, **kwargs)
+        if self.commune_code and self.type_id:
+            type_code = (self.type.code or "").upper()
+            if type_code in TYPES_COLLECTIVITE_TERRITORIALE:
+                _assurer_zone_mon_territoire(self)
 
     actif = models.BooleanField(
         default=True
@@ -1314,8 +1425,53 @@ class Institution(EnvironmentScopedModel):
     )
     convention_sous_traitance_version = models.CharField(max_length=10, blank=True)
 
+    # Marque blanche (voir InstitutionWebDomaine ci-dessous pour la résolution par Host, et
+    # core/branding.py pour l'usage) -- tous blank/vides par défaut, ce qui fait retomber
+    # resolve_institution_branding/get_mail_branding sur les valeurs par défaut "Assista-Crise".
+    # Volontairement en clair (pas de EncryptedTextField) : ce sont des informations publiques
+    # d'identité visuelle, pas des données personnelles.
+    nom_affichage = models.CharField(
+        max_length=255, blank=True,
+        help_text="Nom affiché en marque blanche (header, emails...). Vide = utilise `nom`.",
+    )
+    logo = models.ImageField(
+        upload_to=institution_branding_path, max_length=255, null=True, blank=True,
+        validators=[validate_image_file],
+    )
+    couleur_primaire = models.CharField(max_length=7, blank=True, help_text="Couleur hex, ex: #3c4d81.")
+    couleur_secondaire = models.CharField(max_length=7, blank=True, help_text="Couleur hex, ex: #2ea3f2.")
+    police_titre = models.CharField(max_length=100, blank=True, help_text="Police Google Fonts pour les titres, ex: Quicksand.")
+    police_texte = models.CharField(max_length=100, blank=True, help_text="Police Google Fonts pour le texte courant, ex: Open Sans.")
+    email_reply_to = models.EmailField(blank=True, help_text="Reply-To des emails envoyés au nom de cette institution.")
+
+    # Active la case "rejoindre la réserve" à l'inscription publique (voir RegisterView,
+    # register.component) quand le Host visité résout vers cette institution -- False pour
+    # toutes les institutions ordinaires, qui n'ont pas de réserve à recruter.
+    reserve_active = models.BooleanField(default=False)
+
     def __str__(self):
         return self.nom
+
+
+class InstitutionWebDomaine(EnvironmentScopedModel):
+    """Hostname HTTP (marque blanche) résolvant vers le branding/les emails de cette institution
+    -- voir core/branding.py::resolve_institution_branding. Volontairement un modèle À PART
+    d'InstitutionDomaine (qui est un domaine EMAIL, ex: "sdis33.fr", utilisé pour le
+    rattachement automatique par adresse mail, voir institution_attachment.py) : mélanger les
+    deux casserait ce mécanisme existant et n'a aucun sens fonctionnel (le Host d'une requête
+    web n'a aucun rapport avec le domaine de l'email de quelqu'un).
+
+    Une institution peut avoir plusieurs hostnames (ex: "cj.assista-crise.fr" ET
+    "app.reserve-resilience.org" si le partenaire pointe un CNAME dessus -- le navigateur
+    envoie le Host réellement visité, jamais la cible du CNAME, donc les deux doivent être
+    déclarés ici pour résoudre au même branding)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    institution = models.ForeignKey(Institution, on_delete=models.CASCADE, related_name="domaines_web")
+    hostname = models.CharField(max_length=255, unique=True)
+
+    def __str__(self):
+        return self.hostname
 
 
 class JournalCollectivite(EnvironmentScopedModel):
@@ -1953,6 +2109,292 @@ class Document(EnvironmentScopedModel):
         return str(self.id)
 
 
+class ConfigurationAlerteSismique(EnvironmentScopedModel):
+    """Active la diffusion automatique d'alertes sismiques sur les canaux mesh actifs d'une
+    institution -- voir core/management/commands/verifier_alertes_sismiques.py (exécuté par
+    cron, pas de celery-beat dans ce projet). Source : API publique du catalogue BCSF-Rénass/
+    EOST (api.franceseisme.fr, service FDSN event), confirmée fonctionnelle le 10/10 -- pas de
+    projet open source équivalent trouvé pour la diffusion vers un réseau mesh (recherche du
+    10/10), construit nativement, seul le PRINCIPE est inspiré de meshcore-bot (github.com/
+    agessaman/meshcore-bot, qui fait la même chose avec l'API sismique américaine USGS).
+
+    Centre géographique résolu depuis Institution.commune_code (référentiel Commune interne,
+    centre_latitude/centre_longitude) -- pas de lat/lon à saisir à la main, et rien ne se passe
+    pour une institution sans commune renseignée.
+
+    magnitude_min par défaut à 3.5 (revenu en arrière le 10/10, était passé à 4.0 un instant) --
+    en France métropolitaine (sismicité modérée, pas en bord de plaque), M3-3.5 est largement
+    RESSENTI mais ne cause quasiment jamais de dégât ; le seuil où un risque réel (dégâts
+    légers -- fissures, tuiles, cheminées) devient plausible se situe plutôt vers M4-4.5,
+    SURTOUT si l'épicentre est peu profond (ex: Le Teil, 2019, M4.9 à ~1-2km de profondeur --
+    dégâts significatifs inhabituels pour cette magnitude, justement à cause de la faible
+    profondeur). Décision utilisateur du 10/10 : être alerté dès que "ressenti" (3.5) reste
+    préférable, quitte à avoir plus de diffusions -- reste réglable par institution si besoin
+    de monter à 4+ pour se limiter aux séismes à risque réel de dégât."""
+
+    institution = models.OneToOneField(
+        "Institution", on_delete=models.CASCADE, related_name="configuration_alerte_sismique",
+    )
+    actif = models.BooleanField(default=False)
+    rayon_km = models.PositiveIntegerField(default=100)
+    magnitude_min = models.FloatField(default=3.5)
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Alerte sismique {self.institution.nom} ({'active' if self.actif else 'inactive'})"
+
+
+class SeismeDiffuse(EnvironmentScopedModel):
+    """Évènement sismique déjà diffusé sur le mesh -- anti-doublon entre deux cycles de
+    vérification (un même séisme reste dans le catalogue BCSF-Rénass pendant des jours, voir
+    verifier_alertes_sismiques). `institution=None` : diffusion communautaire (canal Fr_EMCOM,
+    pas propre à une institution -- voir _diffuser_emcom, demande utilisateur du 10/10), suivie
+    séparément des diffusions propres à chaque institution."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    institution = models.ForeignKey(
+        "Institution", on_delete=models.CASCADE, null=True, blank=True, related_name="seismes_diffuses",
+    )
+
+    # Identifiant de l'évènement côté API (ex: "fr2026uuqykq") -- PAS une clé primaire
+    # fonctionnelle ici, juste ce que le catalogue utilise, unique par institution (deux
+    # institutions à portée du même séisme doivent chacune recevoir leur propre diffusion).
+    event_id = models.CharField(max_length=64)
+
+    magnitude = models.FloatField()
+    lieu = models.CharField(max_length=255)
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    date_evenement = models.DateTimeField()
+    date_diffusion = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["institution", "event_id"], name="uq_seisme_diffuse_institution_event"),
+        ]
+
+    def __str__(self):
+        return f"M{self.magnitude} {self.lieu} -> {self.institution.nom}"
+
+
+class CategorieInterlocuteurPCS(models.TextChoices):
+    """Catégories types d'un annuaire de crise PCS/PICS -- structure confirmée via plusieurs
+    trames officielles (ministère de l'Intérieur, préfectures) : pas de liste nationale unique
+    figée, mais cette structure revient systématiquement (préfecture/secours/santé/élus/
+    réseaux/établissements sensibles/médias)."""
+    PREFECTURE = "PREFECTURE", "Préfecture (SIDPC/COD)"
+    SOUS_PREFECTURE = "SOUS_PREFECTURE", "Sous-préfecture"
+    GENDARMERIE_POLICE = "GENDARMERIE_POLICE", "Gendarmerie / Police"
+    SDIS = "SDIS", "SDIS (secours)"
+    SAMU = "SAMU", "SAMU"
+    ARS = "ARS", "ARS (santé)"
+    SERVICES_ETAT = "SERVICES_ETAT", "Services de l'État (DDT/DREAL...)"
+    ELU_PERSONNEL_COMMUNAL = "ELU_PERSONNEL_COMMUNAL", "Élu ou personnel communal"
+    EPCI_INTERCOMMUNALITE = "EPCI_INTERCOMMUNALITE", "Intercommunalité / EPCI (PICS)"
+    GESTIONNAIRE_RESEAU = "GESTIONNAIRE_RESEAU", "Gestionnaire de réseau (élec./gaz/eau)"
+    ETABLISSEMENT_SENSIBLE = "ETABLISSEMENT_SENSIBLE", "Établissement sensible (école, EHPAD...)"
+    ASSOCIATION_SECURITE_CIVILE = "ASSOCIATION_SECURITE_CIVILE", "Association agréée de sécurité civile"
+    MEDIA = "MEDIA", "Média local"
+    AUTRE = "AUTRE", "Autre"
+
+
+class ModeAlertePCS(models.TextChoices):
+    """Canal d'alerte préféré d'un interlocuteur PCS. TELEPHONE reste volontairement manuel
+    (pas d'envoi auto, juste la checklist) ; SMS/API_TIERCE sont des valeurs RÉSERVÉES -- aucun
+    envoi automatique implémenté pour elles pour l'instant (pas de passerelle SMS gratuite
+    disponible, demande utilisateur du 11/10) mais choisies dès maintenant pour qu'un
+    interlocuteur puisse déjà être catégorisé ainsi, prêt pour une intégration future (SMS,
+    Intramuros, Facebook...) sans migration de données -- voir core/alertes_pcs.py."""
+    EMAIL = "EMAIL", "Email"
+    MATRIX = "MATRIX", "Message Matrix"
+    TELEPHONE = "TELEPHONE", "Téléphone (manuel uniquement)"
+    SMS = "SMS", "SMS (pas encore disponible)"
+    API_TIERCE = "API_TIERCE", "Intégration tierce (Intramuros, Facebook...) -- pas encore disponible"
+    AUCUN = "AUCUN", "Aucun envoi automatique"
+
+
+class StatutNotificationPCS(models.TextChoices):
+    EN_ATTENTE = "EN_ATTENTE", "En attente"
+    ENVOYE_AUTO = "ENVOYE_AUTO", "Envoyé automatiquement"
+    ECHEC_AUTO = "ECHEC_AUTO", "Échec de l'envoi automatique"
+    # Le destinataire a cliqué lui-même le lien d'accusé de réception du mail -- à distinguer
+    # de CONFIRME_MANUEL (la mairie l'a coché à la main, typiquement après un appel
+    # téléphonique) : aucune des deux n'implique l'autre, voir docstring de NotificationAlertePCS.
+    CONFIRME_PAR_CONTACT = "CONFIRME_PAR_CONTACT", "Confirmé par le contact lui-même"
+    CONFIRME_MANUEL = "CONFIRME_MANUEL", "Confirmé manuellement"
+
+
+class ReponseContactPCS(models.TextChoices):
+    """Réponse rapide proposée sur la page publique d'accusé de réception (voir
+    AccuserReceptionAlertePCSPublicView) -- évite un appel téléphonique non nécessaire quand le
+    contact n'a rien à ajouter."""
+    PAS_DE_RAPPEL = "PAS_DE_RAPPEL", "Pas besoin de me rappeler"
+    MERCI_RAPPELER = "MERCI_RAPPELER", "Merci de me rappeler pour échanger sur la situation"
+    AUTRE = "AUTRE", "Autre (voir commentaire)"
+
+
+class InterlocuteurAlertePCS(EnvironmentScopedModel):
+    """Annuaire PARTAGÉ des interlocuteurs à prévenir lors d'une activation de PCS/PICS (voir
+    NotificationAlertePCS) -- demande utilisateur du 11/10. Volontairement PAS une FK unique
+    vers une institution (contrairement à ContactInstitution) : un même interlocuteur (ex: le
+    SIDPC d'une préfecture, le même pour tout un département) doit pouvoir être rattaché par
+    plusieurs communes/intercommunalités sans être ressaisi -- même esprit que le catalogue
+    partagé Competence/MaterielCatalogue (voir TagLikeViewSetMixin), mais EnvironmentScopedModel
+    ici (contrairement à ces deux-là) : ce modèle porte de vraies coordonnées externes utilisées
+    pour de vrais envois d'alerte, DEMO et PROD ne doivent jamais se mélanger dessus.
+
+    `nom`/`email`/`telephone`/`notes` chiffrés (voir core/crypto_fields.py, même convention que
+    Request/Offer/Information) -- PII d'une personne physique. `organisme` reste en clair
+    (information organisationnelle, ex: "Préfecture de la Gironde", comme Institution.nom)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    institutions = models.ManyToManyField(
+        "Institution", related_name="interlocuteurs_alerte_pcs", blank=True,
+    )
+
+    # Dénormalisé depuis l'institution qui crée le contact (même mécanisme que
+    # Institution.departement_code) -- sert UNIQUEMENT à borner la recherche d'un contact
+    # existant (?q=) au département de l'institution qui cherche, pour qu'une commune ne tombe
+    # jamais par recherche sur un contact purement local d'une commune d'un autre département.
+    # Pas une contrainte dure (une institution peut rattacher un contact hors de ce département).
+    departement_code = models.CharField(max_length=3, null=True, blank=True)
+
+    categorie = models.CharField(
+        max_length=30, choices=CategorieInterlocuteurPCS.choices, default=CategorieInterlocuteurPCS.AUTRE,
+    )
+
+    nom = EncryptedTextField()
+    organisme = models.CharField(max_length=255, blank=True)
+    email = EncryptedEmailField(null=True, blank=True)
+    telephone = EncryptedTextField(null=True, blank=True)
+    notes = EncryptedTextField(null=True, blank=True)
+
+    # Optionnel -- seulement pour un élu/agent communal ayant un compte applicatif, permet
+    # l'envoi Matrix (voir core/matrix.envoyer_dm, qui prend un User, pas un identifiant Matrix
+    # brut). SET_NULL : la suppression d'un compte ne doit jamais faire disparaître la fiche.
+    utilisateur = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="interlocuteurs_alerte_pcs",
+    )
+
+    mode_alerte = models.CharField(max_length=20, choices=ModeAlertePCS.choices, default=ModeAlertePCS.EMAIL)
+
+    actif = models.BooleanField(default=True)
+    ordre = models.PositiveIntegerField(default=0)
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["ordre", "categorie"]
+
+    def __str__(self):
+        return f"{self.nom} ({self.organisme or self.get_categorie_display()})"
+
+
+class NotificationAlertePCS(EnvironmentScopedModel):
+    """Une ligne par (crise, interlocuteur) -- créée (sans envoi) dès la déclaration de la
+    crise (voir CrisisViewSet.perform_create/core.alertes_pcs.preparer_checklist_pcs), fait
+    office de checklist manuelle ET de suivi d'un éventuel envoi automatique (email/Matrix).
+
+    `interlocuteur` en SET_NULL + champs `*_snapshot` : cette ligne est un historique attaché à
+    UNE déclaration de crise précise -- elle ne doit jamais changer de texte ni disparaître si
+    l'annuaire partagé est modifié/l'interlocuteur retiré après coup (même logique qu'un journal
+    d'audit). `institution_nom_snapshot` existe parce que `Crisis` n'a pas de FK institution
+    (résolue seulement au moment de la déclaration, voir CrisisViewSet.perform_create) -- sert
+    à afficher "la commune de X vous informe..." sur la page publique d'accusé de réception
+    sans dépendre d'un lien qui n'existe pas sur `Crisis` elle-même.
+
+    `token_confirmation` : même patron exact que AffectationPointBenevole/EngagementRessource
+    (secrets.token_urlsafe(32), généré à la création, pas d'expiration -- la protection est la
+    longueur du jeton, cohérent avec le reste de l'app). Permet au destinataire de cliquer un
+    lien dans le mail reçu pour accuser réception SANS AVOIR DE COMPTE (voir
+    AccuserReceptionAlertePCSPublicView) -- passe le statut à CONFIRME_PAR_CONTACT, évitant un
+    appel téléphonique de relance potentiellement inutile."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    crise = models.ForeignKey(Crisis, on_delete=models.CASCADE, related_name="notifications_alerte_pcs")
+
+    interlocuteur = models.ForeignKey(
+        InterlocuteurAlertePCS, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications",
+    )
+    nom_snapshot = EncryptedTextField()
+    organisme_snapshot = models.CharField(max_length=255, blank=True)
+    categorie_snapshot = models.CharField(max_length=30, choices=CategorieInterlocuteurPCS.choices)
+    institution_nom_snapshot = models.CharField(max_length=255, blank=True)
+
+    canal_tente = models.CharField(max_length=20, choices=ModeAlertePCS.choices)
+
+    statut = models.CharField(max_length=20, choices=StatutNotificationPCS.choices, default=StatutNotificationPCS.EN_ATTENTE)
+    detail_erreur = models.TextField(null=True, blank=True)
+
+    token_confirmation = models.CharField(max_length=64, unique=True)
+    # Texte réellement envoyé (choisi/modifié par l'utilisateur qui a déclenché l'envoi, "pour
+    # cette fois uniquement" -- demande utilisateur du 11/10) -- conservé pour trace, jamais
+    # réutilisé comme modèle par défaut ailleurs.
+    message_envoye = models.TextField(null=True, blank=True)
+
+    reponse_contact = models.CharField(max_length=20, choices=ReponseContactPCS.choices, null=True, blank=True)
+    commentaire_contact = EncryptedTextField(null=True, blank=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_envoi_auto = models.DateTimeField(null=True, blank=True)
+    date_confirmation = models.DateTimeField(null=True, blank=True)
+
+    # Rempli seulement pour CONFIRME_MANUEL (un utilisateur de l'app a coché la case après un
+    # appel) -- jamais pour CONFIRME_PAR_CONTACT, qui n'est l'action d'aucun utilisateur de
+    # l'app (le contact n'a pas de compte).
+    confirme_par = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications_pcs_confirmees",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["crise", "interlocuteur"], name="uq_notification_pcs_crise_interlocuteur"),
+        ]
+
+    def __str__(self):
+        return f"{self.nom_snapshot} / {self.crise.name} ({self.statut})"
+
+
+# Types d'institution correspondant à une collectivité territoriale au sens strict (par
+# opposition aux services de l'État qui partagent pourtant le même niveau de secteur -- SDIS,
+# gendarmerie, préfecture, voir SECTEUR_NIVEAU_PAR_TYPE_INSTITUTION dans geo_reference.py) :
+# seules celles-ci reçoivent une Zone "Mon territoire" automatique (voir
+# _assurer_zone_mon_territoire, appelée depuis Institution.save()) et l'accès élargi aux
+# fonctionnalités PCS/PICS (voir _institution_est_autorite_locale, core/views.py).
+TYPES_COLLECTIVITE_TERRITORIALE = {"MAIRIE", "EPCI", "CG", "CR"}
+
+
+def _assurer_zone_mon_territoire(institution) -> None:
+    """Crée (ou met à jour) la Zone "Mon territoire" d'une collectivité, couvrant toute sa
+    zone de compétence (une commune, ou toutes les communes de son EPCI/département/région,
+    voir geo_lookup.communes_de_secteur) -- jamais bloquant : une panne réseau ou une Commune
+    non résolue ne doit jamais empêcher la création/l'édition de l'Institution elle-même (même
+    principe que audit_log, voir core/audit.py)."""
+    from .geo_lookup import communes_de_secteur
+    try:
+        niveau = institution.secteur_niveau_effectif
+        if niveau == "commune":
+            communes = [institution.commune_code] if institution.commune_code else []
+        else:
+            code = {
+                "epci": institution.epci_code,
+                "departement": institution.departement_code,
+                "region": institution.region_code,
+            }.get(niveau)
+            communes = communes_de_secteur(niveau, code) if code else []
+        zone, created = Zone.objects.get_or_create(
+            institution=institution, nom="Mon territoire",
+            defaults={"communes": communes, "environment": institution.environment},
+        )
+        if not created and zone.communes != communes:
+            zone.communes = communes
+            zone.save(update_fields=["communes"])
+    except Exception:
+        pass
+
+
 class Zone(EnvironmentScopedModel):
     """Zone nommée propre à une institution (ex: "Quartier Nord", "Centre-ville") — permet de
     référencer une même zone depuis plusieurs équipes/points plutôt que de redessiner sa
@@ -2024,7 +2466,7 @@ class Habitation(EnvironmentScopedModel):
         help_text="Regroupement (quartier/secteur) pour le filtrage de la vue de suivi.",
     )
 
-    adresse = models.TextField()
+    adresse = EncryptedTextField()
 
     # Dénormalisé pour réutiliser zone_scoping.py (filtrage par commune/secteur de
     # l'institution) tel quel, comme Request/Offer -- voir SECTEUR_CHAMP_PAR_NIVEAU.
@@ -2138,9 +2580,13 @@ class RattachementHabitation(EnvironmentScopedModel):
         related_name="rattachements_habitations",
     )
 
-    nom_demandeur = models.CharField(max_length=255)
-    email_demandeur = models.EmailField()
-    telephone_demandeur = models.CharField(max_length=20, blank=True, null=True)
+    nom_demandeur = EncryptedTextField(max_length=255)
+    email_demandeur = EncryptedEmailField()
+    # Voir User.email_bidx pour le raisonnement -- utilisé par le garde-fou anti-doublon
+    # (recherche EXACTE, voir RattachementHabitationViewSet) et le rapprochement avec un compte
+    # User existant à l'acceptation.
+    email_demandeur_bidx = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    telephone_demandeur = EncryptedTextField(blank=True, null=True)
 
     type_lien = models.CharField(max_length=20, choices=TypeLienHabitation.choices)
 
@@ -2150,7 +2596,7 @@ class RattachementHabitation(EnvironmentScopedModel):
         default=StatutRattachementHabitation.EN_ATTENTE,
     )
 
-    message = models.TextField(
+    message = EncryptedTextField(
         blank=True, null=True,
         help_text="Complément fourni par le demandeur (justificatif à venir, précisions...).",
     )
@@ -2162,7 +2608,7 @@ class RattachementHabitation(EnvironmentScopedModel):
         related_name="rattachements_habitations_traites",
     )
     date_traitement = models.DateTimeField(null=True, blank=True)
-    motif_refus = models.TextField(blank=True, null=True)
+    motif_refus = EncryptedTextField(blank=True, null=True)
 
     # Justificatif (photo) fourni par le demandeur -- titre de propriété, bail, facture à son
     # adresse... Non requis à la création (déposable dès le formulaire public ou ajouté après
@@ -2175,8 +2621,45 @@ class RattachementHabitation(EnvironmentScopedModel):
         validators=[validate_image_file],
     )
 
+    def save(self, *args, **kwargs):
+        self.email_demandeur_bidx = blind_index(self.email_demandeur) if self.email_demandeur else None
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.nom_demandeur} ({self.type_lien}) -> {self.habitation.adresse}"
+
+
+class PieceIdentiteReserve(EnvironmentScopedModel):
+    """Photo recto/verso du permis de conduire (ou autre pièce d'identité) fournie par un
+    candidat à une réserve marque blanche (voir User.souhaite_rejoindre_reserve) -- exigence
+    assurance du partenaire, pas une fonctionnalité générique. Modèle à part plutôt que des
+    champs directs sur User : même raisonnement que RattachementHabitation.justificatif, et
+    évite d'alourdir User (déjà très chargé) d'un besoin propre à un seul type de compte.
+
+    Chiffré au repos (contrairement à tout le reste des ImageField du projet, voir
+    core/file_crypto.py -- EncryptedFileSystemStorage, clé FILE_ENCRYPTION_KEY dédiée) : une
+    pièce d'identité est plus sensible qu'une photo de profil ou un justificatif de domicile,
+    jamais lisible même avec un accès direct au volume/disque. `upload_to=secure_document_path`
+    réutilise délibérément le préfixe "documents/" (déjà bloqué par
+    `location /media/documents/ { return 403; }` dans proxy/nginx.conf) -- pas de nouveau bloc
+    nginx à ajouter, mais à ne JAMAIS changer sans ajouter le blocage correspondant."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    utilisateur = models.ForeignKey(User, on_delete=models.CASCADE, related_name="pieces_identite_reserve")
+
+    permis_recto = models.FileField(
+        storage=get_encrypted_file_storage, upload_to=secure_document_path, max_length=255,
+        null=True, blank=True, validators=[validate_identity_document_file],
+    )
+    permis_verso = models.FileField(
+        storage=get_encrypted_file_storage, upload_to=secure_document_path, max_length=255,
+        null=True, blank=True, validators=[validate_identity_document_file],
+    )
+
+    date_depot = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Pièce identité réserve — {self.utilisateur}"
 
 
 class ModuleDegatsCrise(EnvironmentScopedModel):
@@ -2447,6 +2930,19 @@ class Team(EnvironmentScopedModel):
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name="sous_equipes",
+    )
+
+    est_equipe_rcsc = models.BooleanField(
+        default=False,
+        help_text="Marque cette équipe comme LA Réserve Communale de Sécurité Civile (RCSC) de "
+                   "son institution (mairie) -- pas une Institution à part : une RCSC est "
+                   "placée sous l'autorité du maire, \"une équipe dans l'équipe\". Toute "
+                   "sous-équipe atteinte via equipe_parente hérite de ce statut sans avoir à "
+                   "cocher elle-même ce champ (voir vulnerabilites.equipes_rcsc) -- une RCSC "
+                   "scindée en sous-groupes reste UNE RCSC. Sans rapport avec Institution."
+                   "reserve_active/User.souhaite_rejoindre_reserve (réserve CITOYENNE de "
+                   "bénévoles marque blanche, un tout autre dispositif) -- nom volontairement "
+                   "distinct pour ne jamais confondre les deux.",
     )
 
     leader = models.ForeignKey(
@@ -2836,9 +3332,9 @@ class RecherchePersonne(EnvironmentScopedModel):
         editable=False
     )
 
-    nom = models.CharField(max_length=255)
+    nom = EncryptedTextField(max_length=255)
 
-    prenom = models.CharField(max_length=255)
+    prenom = EncryptedTextField(max_length=255)
 
     age = models.IntegerField()
 
@@ -2850,7 +3346,7 @@ class RecherchePersonne(EnvironmentScopedModel):
         validators=[validate_image_file],
     )
 
-    description = models.TextField(
+    description = EncryptedTextField(
         blank=True,
         null=True
     )
@@ -2864,23 +3360,23 @@ class RecherchePersonne(EnvironmentScopedModel):
         max_length=255
     )
 
-    adresse = models.TextField(
+    adresse = EncryptedTextField(
         blank=True,
         null=True
     )
 
-    ehpad_nom = models.CharField(
+    ehpad_nom = EncryptedTextField(
         max_length=255,
         blank=True,
         null=True
     )
 
-    ehpad_adresse = models.TextField(
+    ehpad_adresse = EncryptedTextField(
         blank=True,
         null=True
     )
 
-    contact_nom = models.CharField(
+    contact_nom = EncryptedTextField(
         max_length=255
     )
 
@@ -2890,9 +3386,9 @@ class RecherchePersonne(EnvironmentScopedModel):
         related_name="recherches_personnes"
     )
 
-    contact_email = models.EmailField()
+    contact_email = EncryptedEmailField()
 
-    contact_telephone = models.CharField(
+    contact_telephone = EncryptedTextField(
         max_length=50
     )
 
@@ -2919,7 +3415,7 @@ class RecherchePersonne(EnvironmentScopedModel):
         related_name="personnes_retrouvees"
     )
 
-    commentaire_retrouvee = models.TextField(
+    commentaire_retrouvee = EncryptedTextField(
         blank=True,
         null=True
     )
@@ -3132,6 +3628,52 @@ class RecherchePersonneLectureHistorique(
     date_action = models.DateTimeField(
         auto_now_add=True
     )
+
+class StatutSecteurRecherche(models.TextChoices):
+    A_FAIRE = "A_FAIRE", "À faire"
+    EN_COURS = "EN_COURS", "En cours"
+    FOUILLE = "FOUILLE", "Fouillé"
+
+
+class SecteurRecherche(EnvironmentScopedModel):
+    """Secteur de recherche (méthode SAR -- Search And Rescue) : découpe la zone de recherche
+    d'une RecherchePersonne en polygones distincts, affectés chacun à une équipe, pour suivre
+    ce qui a DÉJÀ été fouillé -- `NoeudMeshUtilisateurViewSet.positions_en_mission`/la carte
+    montrent où une équipe EST, pas ce qu'elle a déjà couvert, ce qui ne suffit pas à coordonner
+    une recherche au sol sans repasser deux fois au même endroit ni laisser de trou.
+
+    Idée native, demande utilisateur du 10/10 : aucun outil SAR open source équivalent trouvé
+    (recherche GitHub du 10/10 -- SARTopo, l'outil le plus proche, n'est pas open source),
+    construite pour s'articuler avec RecherchePersonne/Team déjà existants plutôt que reprendre
+    quoi que ce soit. Dessin du polygone côté frontend via le même composant que Zone
+    (ZoneMapComponent/TerraDraw), pas un nouvel outil de dessin."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    recherche_personne = models.ForeignKey(
+        RecherchePersonne, on_delete=models.CASCADE, related_name="secteurs_recherche",
+    )
+
+    nom = models.CharField(max_length=100)
+
+    polygone = gis_models.PolygonField(srid=4326)
+
+    equipe = models.ForeignKey(
+        "Team", on_delete=models.SET_NULL, null=True, blank=True, related_name="secteurs_recherche",
+    )
+
+    statut = models.CharField(
+        max_length=10, choices=StatutSecteurRecherche.choices, default=StatutSecteurRecherche.A_FAIRE,
+    )
+
+    commentaire = EncryptedTextField(blank=True, null=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_maj = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.nom} ({self.statut})"
+
 
 class AffectationRoleOperationnel(EnvironmentScopedModel):
 
@@ -3576,6 +4118,13 @@ class PointOperationnel(EnvironmentScopedModel):
         related_name="points_operationnels",
     )
 
+    # Même idiome que HebergementDetailsMixin.animaux_acceptes (hébergement chez l'habitant) --
+    # ici pour un centre d'accueil institutionnel : permet à une personne cherchant un centre de
+    # savoir si elle peut y amener son animal (demande utilisateur du 12/10, confirmée par la
+    # fiche "Assurer la protection du secteur évacué" d'un PCS réel : "trouver un centre
+    # d'accueil acceptant ces animaux").
+    accepte_animaux = models.BooleanField(default=False)
+
     def __str__(self):
         return self.nom
 
@@ -3675,6 +4224,25 @@ class Plan(EnvironmentScopedModel):
 
     points = models.ManyToManyField(
         "PointOperationnel", blank=True, related_name="plans",
+    )
+
+    risques = models.ManyToManyField(
+        "RisqueCommunal", blank=True, related_name="plans",
+        help_text="Risques communaux (déjà déclarés par l'institution, voir RisqueCommunal) que "
+                   "ce dispositif couvre -- jamais le catalogue RisqueMajeurType directement, "
+                   "toujours la déclaration propre à l'institution.",
+    )
+
+    contacts_internes = models.ManyToManyField(
+        "ContactInstitution", blank=True, related_name="plans",
+        help_text="Contacts internes de l'institution (déjà déclarés, voir ContactInstitution) "
+                   "mobilisables sur ce dispositif.",
+    )
+
+    interlocuteurs = models.ManyToManyField(
+        "InterlocuteurAlertePCS", blank=True, related_name="plans",
+        help_text="Interlocuteurs externes à prévenir (annuaire partagé, voir "
+                   "InterlocuteurAlertePCS) rattachés à ce dispositif.",
     )
 
     actif = models.BooleanField(default=True)
@@ -3891,7 +4459,7 @@ class ContributionMateriel(EnvironmentScopedModel):
 
     # Dénormalisé : reste lisible même sans offre liée, ou si l'offre est supprimée par la
     # suite — l'attribution "à qui appartient ce matériel" ne doit jamais disparaître avec elle.
-    fournisseur_nom = models.CharField(max_length=140, blank=True)
+    fournisseur_nom = EncryptedTextField(max_length=140, blank=True)
 
     quantite = models.PositiveIntegerField(default=1)
 
@@ -3947,7 +4515,7 @@ class RegistrePresence(EnvironmentScopedModel):
 
     type_personne = models.CharField(max_length=30, choices=TypePersonneAccueillie.choices)
 
-    nom = models.CharField(max_length=255, blank=True)
+    nom = EncryptedTextField(max_length=255, blank=True)
 
     nombre = models.PositiveIntegerField(default=1)
 
@@ -4055,8 +4623,8 @@ class SuiviMaterielEvenement(EnvironmentScopedModel):
     # "qui assure la réparation si nécessaire, ou, quand, combien (si c'est un réparateur
     # pro)" -- texte libre plutôt qu'un annuaire de réparateurs structuré, ce matériel de
     # secours n'a pas vocation à entretenir un tel référentiel.
-    reparateur_nom = models.CharField(max_length=255, blank=True, null=True)
-    reparateur_contact = models.CharField(max_length=255, blank=True, null=True)
+    reparateur_nom = EncryptedTextField(max_length=255, blank=True, null=True)
+    reparateur_contact = EncryptedTextField(max_length=255, blank=True, null=True)
     lieu_reparation = models.CharField(max_length=255, blank=True, null=True)
     date_reparation = models.DateField(null=True, blank=True)
     cout_reparation = models.PositiveIntegerField(
@@ -4119,9 +4687,9 @@ class DeclarationSecurite(EnvironmentScopedModel):
         max_length=20, choices=SituationDeclarant.choices, default=SituationDeclarant.RELOGE,
     )
 
-    nom_referent = models.CharField(max_length=80)
-    prenom_referent = models.CharField(max_length=60)
-    contact_referent = models.CharField(
+    nom_referent = EncryptedTextField(max_length=80)
+    prenom_referent = EncryptedTextField(max_length=60)
+    contact_referent = EncryptedTextField(
         max_length=255,
         help_text="Email ou téléphone de la personne qui se présente/déclare — elle-même pour "
                    "une personne seule, le référent désigné pour une famille ou un groupe.",
@@ -4135,7 +4703,7 @@ class DeclarationSecurite(EnvironmentScopedModel):
     # contraint pas la longueur à nombre_enfants côté modèle (saisie plus tard, correction
     # possible) — le formulaire (secrétariat) affiche autant de lignes d'âge que
     # nombre_enfants.
-    ages_enfants = models.JSONField(default=list, blank=True)
+    ages_enfants = EncryptedJSONField(default=list, blank=True)
 
     # Optionnelle : utile pour situer une auto-déclaration (ex: RELOGE ailleurs), mais pas
     # pertinente pour EN_CENTRE (le centre choisi fait déjà foi) ni exigible dans tous les cas
@@ -4168,7 +4736,7 @@ class DeclarationSecurite(EnvironmentScopedModel):
                    "rapprocher des équipes sur place pour le préciser.",
     )
 
-    commentaire = models.TextField(blank=True, null=True)
+    commentaire = EncryptedTextField(blank=True, null=True)
 
     declare_par = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
@@ -4189,6 +4757,147 @@ class DeclarationSecurite(EnvironmentScopedModel):
 
     def __str__(self) -> str:
         return f"{self.prenom_referent} {self.nom_referent} ({self.get_type_declarant_display()})"
+
+
+class RisqueMajeurType(models.Model):
+    """Catalogue partagé des types de risques majeurs -- même esprit que Competence/
+    MaterielCatalogue (voir TagLikeViewSetMixin) : librement extensible, n'importe quelle
+    commune peut déclarer un risque jamais vu ailleurs (ex: incendie de forêt) sans attendre
+    une mise à jour de l'app -- confirmé nécessaire (pas juste un confort) en croisant 3 vrais
+    PCS le 12/10 : aucune des 3 communes lues (Floirac, Saint-Sixt, Canet-de-Salars) n'a la même
+    liste de risques (nucléaire, rupture de barrage, radon... chacun propre à une poignée de
+    communes). `generalites` est le texte générique (indépendant de la commune, structure
+    "DICRIM" : nature du risque, mécanismes) -- à distinguer de RisqueCommunal, qui porte ce qui
+    est propre à CHAQUE commune (état des lieux, enjeux)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    nom = models.CharField(max_length=100, unique=True)
+    generalites = models.TextField(blank=True, help_text="Description générique du risque, indépendante de la commune.")
+    actif = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.nom
+
+
+class RisqueCommunal(EnvironmentScopedModel):
+    """Ce qu'UNE institution déclare à propos d'un RisqueMajeurType : son état des lieux local
+    (zones concernées, historique...) et ses enjeux (population/bâtiments exposés) -- voir
+    structure "État des lieux"/"Enjeux communaux" d'un PCS. EnvironmentScopedModel (contrairement
+    à RisqueMajeurType, catalogue global) : une déclaration DEMO ne doit jamais se mélanger avec
+    une vraie déclaration PROD."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    institution = models.ForeignKey("Institution", on_delete=models.CASCADE, related_name="risques_communaux")
+    risque_type = models.ForeignKey(RisqueMajeurType, on_delete=models.PROTECT, related_name="declarations_communales")
+    etat_des_lieux = models.TextField(blank=True)
+    enjeux = models.TextField(blank=True)
+    actif = models.BooleanField(default=True)
+    date_maj = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["institution", "risque_type"], name="uq_risque_communal_institution_type")]
+
+    def __str__(self):
+        return f"{self.risque_type.nom} / {self.institution.nom}"
+
+
+class TypeVulnerabilite(models.Model):
+    """Catalogue partagé des catégories de vulnérabilité pour le registre communal des personnes
+    vulnérables (voir PersonneVulnerable) -- même esprit que RisqueMajeurType/Competence (voir
+    TagLikeViewSetMixin) : librement extensible, un item non prévu peut être ajouté à la volée et
+    réutilisé ensuite par tout le monde. IMPORTANT (exigence RGPD actée avec Sylvain) :
+    description FONCTIONNELLE/OPÉRATIONNELLE uniquement (ce dont la personne a besoin en cas
+    d'évacuation/alerte) -- JAMAIS un diagnostic médical ni une donnée de santé (catégorie
+    spéciale RGPD art. 9, hors de portée de ce registre). C'est délibérément un catalogue
+    coché/pas coché plutôt qu'un champ de notes libres à côté : un champ "notes" est justement la
+    porte par laquelle une description médicale finirait par se glisser."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    nom = models.CharField(max_length=150, unique=True)
+    description = models.TextField(
+        blank=True,
+        help_text="Description fonctionnelle/opérationnelle uniquement -- jamais un diagnostic médical.",
+    )
+    actif = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.nom
+
+
+class ModeConsentementVulnerabilite(models.TextChoices):
+    VOLONTAIRE = "VOLONTAIRE", "Démarche volontaire de la personne ou de son représentant légal"
+    TIERS_AVEC_ACCORD = "TIERS_AVEC_ACCORD", "Signalée par un tiers, accord de la personne recueilli"
+    TIERS_SANS_ACCORD_FORMEL = "TIERS_SANS_ACCORD_FORMEL", "Signalée par un tiers, accord pas encore recueilli -- à confirmer"
+
+
+class PersonneVulnerable(EnvironmentScopedModel):
+    """Registre communal des personnes vulnérables (recensement PCS, voir art. L121-6-1 du
+    CASF) -- fiche PERMANENTE (pas liée à une crise précise, contrairement à Habitation), radiée
+    via `actif=False` mais jamais supprimée physiquement, même patron que RisqueCommunal.
+
+    Donnée très sensible : accès contrôlé exclusivement via core/vulnerabilites.py (jamais une
+    permission générique type IsInstitutionalActor seule) -- réservé à la RCSC/aux RESPONSABLE
+    désignés de la mairie compétente sur la commune, ou à une institution tierce avec une
+    DelegationCompetence active sur la compétence "Recensement personnes vulnérables" pour cette
+    commune. Champs identifiants chiffrés au repos (EncryptedTextField, clé FIELD_ENCRYPTION_KEY
+    déjà utilisée ailleurs dans ce fichier -- pas de nouvelle clé, ce n'est pas un fichier comme
+    PieceIdentiteReserve)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    institution_declarante = models.ForeignKey(
+        "Institution", on_delete=models.PROTECT, related_name="personnes_vulnerables",
+    )
+
+    commune_code = models.CharField(
+        max_length=10,
+        help_text="Dénormalisé (même convention que Habitation.commune_code) pour permettre le "
+                   "filtrage par compétence/délégation sans jointure.",
+    )
+    zone = models.ForeignKey(
+        Zone, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="personnes_vulnerables",
+        help_text="Quartier/secteur optionnel (catalogue Zone de l'institution déclarante).",
+    )
+
+    nom = EncryptedTextField()
+    prenom = EncryptedTextField()
+    adresse = EncryptedTextField()
+    telephone = EncryptedTextField(null=True, blank=True)
+
+    categories = models.ManyToManyField(
+        TypeVulnerabilite, related_name="personnes", blank=True,
+        help_text="Catégories fonctionnelles cochées -- voir TypeVulnerabilite.__doc__ (jamais de diagnostic).",
+    )
+
+    contact_aidant_nom = EncryptedTextField(null=True, blank=True)
+    contact_aidant_telephone = EncryptedTextField(null=True, blank=True)
+
+    mode_consentement = models.CharField(
+        max_length=30, choices=ModeConsentementVulnerabilite.choices,
+    )
+    demandeur_consentement = models.CharField(
+        max_length=255, blank=True,
+        help_text="Texte libre (pas de FK) : souvent un tiers non-institutionnel (voisin, CCAS "
+                   "cité par son nom) -- une FK obligerait à créer un faux contact institutionnel.",
+    )
+    date_consentement = models.DateField(null=True, blank=True)
+
+    actif = models.BooleanField(
+        default=True,
+        help_text="False = radiée (décès, déménagement, retrait du consentement) -- jamais "
+                   "supprimée physiquement, même patron que RisqueCommunal.actif.",
+    )
+
+    cree_par = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="personnes_vulnerables_creees",
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_maj = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date_creation"]
+        indexes = [models.Index(fields=["commune_code"])]
+
+    def __str__(self):
+        return f"Personne vulnérable ({self.commune_code})"
 
 
 class StatutAffectation(models.TextChoices):
@@ -4535,6 +5244,16 @@ class CompagnonMeshCore(EnvironmentScopedModel):
     )
     derniere_erreur = models.TextField(null=True, blank=True)
 
+    # Batterie du companion LUI-MÊME (pas un nœud de terrain) -- commande locale get_bat(),
+    # sans coût d'antenne mesh (voir boucle_batterie_compagnon côté pont) : interrogeable bien
+    # plus souvent qu'une télémétrie de nœud distant. Valeur BRUTE de la réponse firmware
+    # GET_BATT_AND_STORAGE (unité non confirmée sur le matériel réel de ce projet, probablement
+    # des millivolts) -- un autre client (Home Assistant) la sonde déjà via le même proxy
+    # toutes les 5s sans problème (voir meshcore-bridge/proxy.py), donc la fréquence n'est pas
+    # la contrainte ici, seulement l'incertitude d'unité.
+    derniere_batterie_niveau = models.PositiveIntegerField(null=True, blank=True)
+    derniere_batterie_date = models.DateTimeField(null=True, blank=True)
+
     date_creation = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -4552,7 +5271,7 @@ class NoeudMeshUtilisateur(EnvironmentScopedModel):
 
     pubkey_hex = models.CharField(max_length=64, unique=True)
 
-    nom_noeud = models.CharField(max_length=100, blank=True)
+    nom_noeud = EncryptedTextField(max_length=100, blank=True)
 
     actif = models.BooleanField(default=True)
 
@@ -4572,6 +5291,54 @@ class StatutMessageMesh(models.TextChoices):
     ENVOYE = "ENVOYE", "Envoyé"
     RECU = "RECU", "Reçu"
     ECHEC = "ECHEC", "Échec"
+
+
+class ProtocoleMesh(models.TextChoices):
+    MESHCORE = "MESHCORE", "MeshCore"
+    MESHTASTIC = "MESHTASTIC", "Meshtastic"
+
+
+class AlerteMeshSOS(EnvironmentScopedModel):
+    """Message mesh ENTRANT détecté comme une possible urgence -- mot-clé SOS/urgence (voir
+    core.views._detecter_mot_cle_sos), ou arrivé sur un canal nommé par convention
+    communautaire pour les communications d'urgence (ex: "Fr_EMCOM" chez Meshtastic/Gaulix,
+    voir core.views._canal_est_dedie_urgence). Adapté de la détection de mots-clés de
+    Mesh-Bridge (github.com/IceNet-01/Mesh-Bridge), demande utilisateur du 10/10.
+
+    Ne crée PAS automatiquement de Request/DeclarationSecurite : un faux positif deviendrait
+    sinon une fausse alerte officielle dans le système métier. Se contente de notifier les
+    administrateurs (email + DM Matrix, voir core.views._signaler_sos_mesh) pour une
+    vérification humaine rapide -- cette ligne EST la trace de cette notification."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    protocole = models.CharField(max_length=10, choices=ProtocoleMesh.choices)
+
+    institution = models.ForeignKey(
+        "Institution", on_delete=models.SET_NULL, null=True, blank=True, related_name="alertes_sos_mesh",
+    )
+
+    # Vide pour un message privé (DM) -- un canal seulement.
+    canal_nom = models.CharField(max_length=100, null=True, blank=True)
+
+    # Clé publique (MeshCore) ou node_num (Meshtastic, converti en texte) si connu -- sert de
+    # clé d'anti-rafale (voir _signaler_sos_mesh), pas une FK (l'expéditeur réel n'est pas
+    # toujours résolu en compte utilisateur, notamment sur un canal).
+    expediteur_identifiant = models.CharField(max_length=64, null=True, blank=True)
+    # Chiffrés (voir core/crypto_fields.py) comme les autres champs texte libre pouvant porter
+    # du PII dans ce projet (ex: RecherchePersonne.description, DeclarationSecurite.commentaire)
+    # -- un message mesh entrant peut contenir un nom, une localisation, une description de
+    # blessure, et c'est précisément le contenu capturé ici.
+    expediteur_nom = EncryptedTextField(max_length=100, blank=True)
+    contenu = EncryptedTextField()
+    mot_cle_detecte = models.CharField(max_length=50)
+
+    notification_envoyee = models.BooleanField(default=False)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"SOS mesh « {self.mot_cle_detecte} » ({self.protocole}, {self.date_creation:%d/%m %H:%M})"
 
 
 class MessageMeshLog(EnvironmentScopedModel):
@@ -4649,6 +5416,52 @@ class CommandeMeshCore(EnvironmentScopedModel):
 
     def __str__(self):
         return f"{self.get_type_commande_display()} — {self.compagnon.nom} ({self.statut})"
+
+
+class StatutTraceroute(models.TextChoices):
+    EN_ATTENTE = "EN_ATTENTE", "En attente d'exécution"
+    TERMINE = "TERMINE", "Terminé"
+    ECHEC = "ECHEC", "Échec ou sans réponse"
+
+
+class TracerouteMeshCore(EnvironmentScopedModel):
+    """Diagnostic réseau MeshCore : chemin radio (répéteurs traversés + SNR par saut) suivi par
+    un paquet de trace en diffusion (send_trace, lib meshcore_py) -- adapté de la fonctionnalité
+    traceroute de MeshMonitor (github.com/Yeraze/meshmonitor), demande utilisateur du 10/10.
+
+    Toujours en mode FLOOD (pas de chemin forcé en paramètre, même si send_trace le permettrait)
+    -- le plus simple et le plus fiable : mesure directement la couverture radio réelle du
+    companion (quels répéteurs sont traversés, quel SNR par saut), sans cible obligatoire.
+    Corrélation requête/réponse via `tag` (voir EventType.TRACE_DATA côté lib) -- un pur
+    identifiant protocolaire, pas une clé primaire fonctionnelle, conservé pour diagnostic.
+
+    Chaque ligne est un instantané : la topologie mesh est dynamique, le chemin peut changer
+    d'une exécution à l'autre, aucune corrélation garantie entre deux lignes consécutives."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    compagnon = models.ForeignKey(CompagnonMeshCore, on_delete=models.CASCADE, related_name="traceroutes")
+
+    # PositiveBigIntegerField : `tag` est un entier 32 bits NON SIGNÉ côté protocole
+    # (random.randint(1, 0xFFFFFFFF) côté pont, voir boucle_traceroutes) -- jusqu'à
+    # 4294967295, qui dépasse le plafond signé 32 bits d'un PositiveIntegerField ordinaire
+    # (2147483647) et provoque une erreur PostgreSQL "integer out of range" à l'écriture
+    # (constaté en test réel le 10/10, corrigé avant tout déploiement en prod).
+    tag = models.PositiveBigIntegerField(null=True, blank=True)
+
+    statut = models.CharField(max_length=10, choices=StatutTraceroute.choices, default=StatutTraceroute.EN_ATTENTE)
+
+    # [{"hash": "..", "snr": float}, ..., {"snr": float}] -- le dernier élément (sans "hash")
+    # est la réception par notre propre companion, voir parsePacketPayload/TRACE_DATA côté lib.
+    chemin = models.JSONField(null=True, blank=True)
+
+    erreur = models.TextField(null=True, blank=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_reponse = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Traceroute {self.compagnon_id} ({self.statut})"
 
 
 class RelaisMeshCore(EnvironmentScopedModel):
@@ -4739,8 +5552,101 @@ class CanalMeshCore(EnvironmentScopedModel):
 
     date_creation = models.DateTimeField(auto_now_add=True)
 
+    @staticmethod
+    def derive_cle_publique(nom: str) -> str:
+        """Dérivation de clé d'un canal public préfixé `#` (ex: "#meteo") -- même algorithme que
+        le firmware (set_channel, voir meshcore_py commands/device.py:
+        sha256(nom)[:16 octets]), calculable par n'importe qui connaissant juste le nom : c'est
+        tout le principe d'un canal public, contrairement à un canal d'équipe dont la clé doit
+        rester distribuée en privé (voir docstring de la classe). Voir CanalMeshCoreSerializer."""
+        return hashlib.sha256(nom.encode("utf-8")).hexdigest()[:32]
+
+    # Clé du canal "Public" PRÉCONFIGURÉ (slot 0, réservé -- voir docstring de
+    # CanalMeshCoreObsolete et meshcore-bridge/bridge.py:CANAL_IDX_MAX) de la même façon sur
+    # TOUT appareil MeshCore de sortie d'usine -- valeur documentée par le projet lui-même
+    # (docs.meshcore.io/companion_protocol), jamais une clé d'équipe ni spécifique à cette
+    # installation. Contrairement à un canal `#nom` choisi par quelqu'un (nom impossible à
+    # deviner depuis le seul chan_hash observé sur l'air, fonction à sens unique), celui-ci est
+    # universel et connu à l'avance : on peut donc le reconnaître et le rendre utilisable
+    # automatiquement dès qu'un companion capte effectivement son trafic (voir
+    # CompagnonMeshCoreViewSet.signaler_canaux_detectes), sans qu'un humain ait à le nommer ou
+    # fournir sa clé. Confirmé en conditions réelles le 11/10 : le canal détecté le plus actif
+    # (chan_hash "11", 47 paquets) correspondait exactement à cette clé.
+    SECRET_PUBLIC_PAR_DEFAUT = "8b3387e9c5cdea6ac9e5edbaa115cd72"
+
+    @staticmethod
+    def chan_hash_pour_secret(secret_hex: str) -> str:
+        """chan_hash (1 octet, 2 car. hex) annoncé en clair sur l'air pour un secret donné --
+        sha256(secret)[0:1 octet], voir meshcore_py reader.py et docstring de
+        CanalMeshCoreDetecte. Sert à reconnaître le canal Public par défaut (SECRET_PUBLIC_
+        PAR_DEFAUT) parmi les chan_hash remontés par signaler_canaux_detectes, sans jamais
+        avoir eu besoin de connaître un nom."""
+        return hashlib.sha256(bytes.fromhex(secret_hex)).hexdigest()[:2]
+
     def __str__(self):
         return self.nom
+
+
+class CanalMeshCoreDetecte(EnvironmentScopedModel):
+    """Canal MeshCore dont un companion capte le trafic radio (paquet GRP_TXT -- hash de clé
+    sur 1 octet, toujours présent sur l'air même sans connaître la clé, voir
+    EventType.RX_LOG_DATA côté pont) sans le connaître localement -- typiquement une ancienne
+    clé d'équipe encore utilisée par des nœuds qui n'ont pas reçu la rotation, ou un canal tiers
+    au voisinage radio. Affiché en lecture seule sur la page canaux MeshCore (demande
+    utilisateur du 10/10) : indéchiffrable sans la clé, donc pas de fil de discussion possible,
+    juste un signalement de présence. Une ligne par (compagnon, chan_hash) -- mise à jour plutôt
+    que recréée à chaque paquet, voir CompagnonMeshCoreViewSet.signaler_canaux_detectes."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    compagnon = models.ForeignKey(
+        "CompagnonMeshCore", on_delete=models.CASCADE, related_name="canaux_detectes",
+    )
+
+    chan_hash = models.CharField(max_length=2)
+
+    premiere_vue = models.DateTimeField(auto_now_add=True)
+    derniere_vue = models.DateTimeField(auto_now=True)
+    nombre_paquets = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        unique_together = [('compagnon', 'chan_hash')]
+
+    def __str__(self):
+        return f"Canal détecté #{self.chan_hash} ({self.compagnon_id})"
+
+
+class CanalMeshCoreObsolete(EnvironmentScopedModel):
+    """Ancien slot de canal MeshCore à libérer sur un companion après rotation de clé (voir
+    TeamViewSet.provisionner_canal_meshcore, regenerer=true) -- snapshot pris juste avant que
+    CanalMeshCore.canal_idx/compagnon ne soient réécrits sur la nouvelle clé, seul moment où
+    cette information (quel index libérer, sur quel companion) est encore connue : la rotation
+    écrase la seule ligne qui la portait, rien d'autre ne la mémorise.
+
+    Délai de grâce de 48h avant suppression effective (demande utilisateur du 10/10) : la clé
+    change immédiatement côté serveur, mais des messages déjà en vol sur l'ancien canal au
+    moment de la rotation pourraient encore arriver juste après. Voir
+    CompagnonMeshCoreViewSet.canaux_a_liberer / rapporter_canal_libere et
+    boucle_nettoyage_canaux côté pont -- "libérer" un slot MeshCore n'a pas de commande
+    firmware dédiée, c'est un set_channel avec un nom vide (même convention que
+    _trouver_canal_existant_ou_libre côté pont pour reconnaître un slot libre)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    canal = models.ForeignKey(
+        "CanalMeshCore", on_delete=models.CASCADE, related_name="anciens_slots",
+    )
+    compagnon = models.ForeignKey(
+        "CompagnonMeshCore", on_delete=models.CASCADE, related_name="slots_a_liberer",
+    )
+    canal_idx = models.PositiveSmallIntegerField()
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    supprimer_apres = models.DateTimeField()
+    supprime = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"Slot {self.canal_idx} de {self.compagnon_id} à libérer après {self.supprimer_apres}"
 
 
 class SalonMatrixEquipe(EnvironmentScopedModel):
@@ -4897,7 +5803,7 @@ class ContactMeshCore(EnvironmentScopedModel):
 
     pubkey_hex = models.CharField(max_length=64)
 
-    nom = models.CharField(max_length=100, blank=True)
+    nom = EncryptedTextField(max_length=100, blank=True)
 
     type_contact = models.CharField(max_length=12, choices=TypeContactMeshCore.choices, default=TypeContactMeshCore.INCONNU)
 
@@ -4920,6 +5826,17 @@ class ContactMeshCore(EnvironmentScopedModel):
     # pour un simple companion de terrain). Sert de repli dans
     # core.routage_mesh.meilleur_compagnon_pour_contact quand aucun chemin direct n'est connu.
     region_tag = models.CharField(max_length=20, blank=True)
+
+    # Télémétrie (canaux LPP "voltage"/"percentage" de la réponse à une requête
+    # BinaryReqType.TELEMETRY, voir meshcore-bridge/bridge.py:boucle_positions_missions) --
+    # capturée seulement pendant une mission EN_COURS (même requête déjà faite pour la
+    # position, voir sa docstring : aucune requête radio supplémentaire, on garde juste plus
+    # de la réponse qu'avant). Jamais écrasée par une valeur absente (voir
+    # CompagnonMeshCoreViewSet.synchroniser_contacts), donc reste la dernière mesure connue
+    # même longtemps après la fin d'une mission.
+    tension_batterie_v = models.FloatField(null=True, blank=True, help_text="Volts (canal LPP \"voltage\").")
+    niveau_batterie_pct = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Pourcentage (canal LPP \"percentage\").")
+    derniere_telemetrie = models.DateTimeField(null=True, blank=True)
 
     date_synchronisation = models.DateTimeField(auto_now=True)
 
@@ -5103,8 +6020,8 @@ class ContactMeshtastic(EnvironmentScopedModel):
 
     node_num = models.PositiveBigIntegerField()
 
-    long_name = models.CharField(max_length=40, blank=True)
-    short_name = models.CharField(max_length=4, blank=True)
+    long_name = EncryptedTextField(max_length=40, blank=True)
+    short_name = EncryptedTextField(max_length=4, blank=True)
     hardware_model = models.CharField(max_length=40, null=True, blank=True)
     # Clé publique X25519 annoncée par CE nœud (paquet NodeInfo, champ User.public_key) —
     # nécessaire pour lui envoyer un DM réellement chiffré par clé publique (PKI, firmware
@@ -5137,7 +6054,7 @@ class NoeudUtilisateurMeshtastic(EnvironmentScopedModel):
 
     node_num = models.PositiveBigIntegerField(unique=True)
 
-    nom_noeud = models.CharField(max_length=100, blank=True)
+    nom_noeud = EncryptedTextField(max_length=100, blank=True)
 
     actif = models.BooleanField(default=True)
 
@@ -5203,6 +6120,20 @@ class MessageCanalMeshtastic(EnvironmentScopedModel):
 
     expediteur = models.ForeignKey(
         "User", on_delete=models.SET_NULL, null=True, blank=True, related_name="messages_canal_meshtastic_envoyes",
+    )
+
+    # Cible UN companion précis plutôt que "le premier qui passe" -- nécessaire quand un même
+    # canal "partagé" (compagnon=None sur CanalMeshtastic, voir sa docstring) est en réalité
+    # servi par PLUSIEURS companions actifs en parallèle (ex: un companion TCP local ET le pont
+    # MQTT Gaulix) : sans ce champ, les deux pontes interrogent la même file EN_ATTENTE et SE
+    # DISPUTENT les mêmes lignes (le premier à répondre les marque ENVOYE, l'autre ne les voit
+    # plus jamais) -- aucun des deux chemins n'est alors garanti de transmettre. Laissé à None
+    # pour un message normal (comportement historique inchangé, "premier arrivé" reste la
+    # règle) ; renseigné explicitement par core.management.commands.verifier_alertes_sismiques
+    # pour garantir qu'une alerte Fr_EMCOM parte bien par CHAQUE companion, demande utilisateur
+    # du 10/10.
+    compagnon = models.ForeignKey(
+        "CompagnonMeshtastic", on_delete=models.SET_NULL, null=True, blank=True, related_name="messages_canal_cibles",
     )
 
     contact_node_num = models.PositiveBigIntegerField(null=True, blank=True)

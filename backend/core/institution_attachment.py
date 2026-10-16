@@ -6,18 +6,86 @@ institution réelle sur la seule foi d'un email non vérifié permettrait à qui
 passer pour un employé d'une institution (ex: une mairie, un SDIS) sans jamais recevoir ni
 cliquer sur aucun email.
 """
-from .audit import audit_log
+from .audit import audit_log, send_mail_logged
+from .branding import branding_for_institution, send_branded_mail
 from .auth_validation import InstitutionEmailValidator
+from .crypto_fields import blind_index
+from .matrix import MATRIX_SERVER_NAME
 from .models import (
     AffectationRoleOperationnel,
     ContactInstitution,
+    Environment,
     Institution,
     InstitutionDomaine,
     InstitutionType,
     RoleOperationnel,
+    Team,
     User,
     UserRole,
 )
+from .permissions import get_active_environment
+
+
+def get_or_create_institution_team(institution, request=None):
+    """Équipe "de tête" de l'institution, nommée d'après elle (Team.name = institution.nom) --
+    un seul tenant par institution : recherchée par institution+nom avant toute création,
+    jamais dupliquée même si plusieurs membres se rattachent en parallèle. Demande
+    utilisateur du 2026-10-08 : tout membre d'une institution doit se retrouver dans une
+    équipe à son nom, pas seulement les personnes explicitement ajoutées via l'écran Équipes
+    -- voir grant_institution_and_demo_access, qui appelle cette fonction pour CHAQUE
+    rattachement."""
+    team = Team.objects.filter(institution=institution, name=institution.nom).first()
+    if team is not None:
+        return team, False
+    environment = get_active_environment(request) if request is not None else Environment.PROD
+    team = Team.objects.create(name=institution.nom, institution=institution, environment=environment)
+    if request is not None:
+        audit_log(
+            request=request, action_code="CREATION", objet_type="Team", objet_id=team.id,
+            commentaire=f"Équipe « {institution.nom} » créée automatiquement pour l'institution",
+        )
+    return team, True
+
+
+def _envoyer_email_acces_messagerie_equipe(user, team, request):
+    """Email envoyé la première fois qu'un membre rejoint l'équipe de son institution :
+    comment accéder à la messagerie de groupe (Element X + connexion SSO Assista-Crise, voir
+    core/oidc.py -- aucun mot de passe Matrix séparé à retenir). Element X exige malgré tout de
+    connaître l'adresse du serveur AVANT de pouvoir rediriger vers la connexion SSO : sans
+    cette indication, un utilisateur qui ouvre l'app pour la première fois ne sait pas quoi
+    saisir (constaté le 2026-10-08, demande explicite de l'ajouter). Jamais appelée avec
+    request=None (voir grant_institution_and_demo_access) -- send_mail_logged/audit_log en
+    ont besoin pour la main courante et la bascule démo.
+
+    Branding (voir core/branding.py) : team.institution est TOUJOURS connue ici (voir
+    get_or_create_institution_team, un FK non-nullable) -- seul le nom affiché dans le corps est
+    personnalisé, pas l'infrastructure Matrix elle-même (un seul serveur partagé, pas un
+    déploiement Matrix par partenaire, voir la mémoire de conception marque blanche)."""
+    branding = branding_for_institution(team.institution)
+    message = (
+        f"Bonjour {user.first_name},\n\n"
+        f"Vous avez été rattaché à l'équipe « {team.name} » sur {branding.nom_affichage}, qui dispose "
+        "d'une messagerie de groupe intégrée.\n\n"
+        "Pour y accéder depuis votre téléphone :\n\n"
+        "1. Installez l'application Element X :\n"
+        "   - Android : https://play.google.com/store/apps/details?id=io.element.android.x\n"
+        "   - iPhone : https://apps.apple.com/us/app/element-x-secure-chat-call/id1631335820\n\n"
+        "2. Au démarrage, choisissez \"Se connecter\", puis \"Je possède déjà un compte\", et "
+        f"indiquez l'adresse de serveur suivante quand elle est demandée :\n{MATRIX_SERVER_NAME}\n\n"
+        f"3. Vous serez redirigé vers la page de connexion {branding.nom_affichage} : connectez-vous avec "
+        "votre compte habituel (les mêmes identifiants que sur la plateforme).\n\n"
+        "{signature}"
+    )
+    try:
+        send_branded_mail(
+            request, team.institution,
+            subject=f"Accès à la messagerie de l'équipe {team.name}",
+            message=message,
+            recipient_list=[user.email],
+            fail_silently=True,
+        )
+    except Exception:
+        pass
 
 
 def find_institution_by_known_domain(user):
@@ -127,13 +195,23 @@ def find_institution_for_pending_user(user, request=None):
     return institution
 
 
-def grant_institution_and_demo_access(user, institution):
+def grant_institution_and_demo_access(user, institution, request=None):
     """Pose User.institution (si pas déjà défini — ne bascule jamais le contexte "Vue Ma
     Collectivité" d'un compte déjà rattaché ailleurs, ex: un profil multi-institutions membre
     de plusieurs mairies) et accorde automatiquement le même rôle en zone DEMO (si aucun accès
     démo n'a déjà été réglé — manuellement ou par un rattachement précédent). Un compte
     institutionnel réel doit pouvoir essayer la démo sans dépendre d'un octroi manuel séparé par
-    un administrateur (voir AuthService.canAccessDemo côté frontend)."""
+    un administrateur (voir AuthService.canAccessDemo côté frontend).
+
+    Ajoute aussi `user` à l'équipe "de tête" de l'institution (voir
+    get_or_create_institution_team) et lui envoie, la toute première fois seulement, l'email
+    d'accès à la messagerie d'équipe -- appelée par TOUS les chemins de rattachement
+    (attach_user_with_role, attach_secours_user_to_institution, resolve_or_invite_responsable,
+    import CSV personnel communal), donc point unique pour garantir qu'aucun membre
+    d'institution n'y échappe. `request` volontairement optionnel (certains appelants
+    historiques n'en avaient pas besoin) mais SANS request l'email n'est pas envoyé
+    (send_mail_logged/audit_log en ont besoin) -- en pratique tous les appelants réels en
+    disposent (actions de vue authentifiées ou import, jamais un script sans contexte)."""
     update_fields = []
     if user.institution_id is None:
         user.institution = institution
@@ -143,6 +221,16 @@ def grant_institution_and_demo_access(user, institution):
         update_fields.append('demo_role')
     if update_fields:
         user.save(update_fields=update_fields)
+
+    team, _ = get_or_create_institution_team(institution, request)
+    if not team.members.filter(pk=user.pk).exists():
+        team.members.add(user)
+        if request is not None:
+            audit_log(
+                request=request, action_code="MODIFICATION", objet_type="Team", objet_id=team.id,
+                commentaire=f"{user.email} ajouté à l'équipe « {team.name} » (rattachement institution)",
+            )
+            _envoyer_email_acces_messagerie_equipe(user, team, request)
 
 
 def attach_user_with_role(user, institution, role_code, request=None, fonction='Membre', contact_principal=False):
@@ -166,7 +254,7 @@ def attach_user_with_role(user, institution, role_code, request=None, fonction='
             objet_id=contact.id,
             commentaire=f"Rattachement de {user.email} à l'institution {institution.nom} (confirmé par l'utilisateur)",
         )
-    grant_institution_and_demo_access(user, institution)
+    grant_institution_and_demo_access(user, institution, request)
 
     affectation, affectation_created = AffectationRoleOperationnel.objects.get_or_create(
         utilisateur=user, institution=institution, competence=None, role=role,
@@ -286,7 +374,7 @@ def attach_secours_user_to_institution(user, request=None):
                 objet_id=contact.id,
                 commentaire=f"Rattachement AASC de {user.email} à {matched_institution.nom}",
             )
-        grant_institution_and_demo_access(user, matched_institution)
+        grant_institution_and_demo_access(user, matched_institution, request)
         assign_default_institution_role(user, matched_institution)
 
     elif pending_type == 'rcsc':
@@ -304,7 +392,7 @@ def attach_secours_user_to_institution(user, request=None):
                     objet_id=contact.id,
                     commentaire=f"Rattachement RCSC de {user.email} à {matched_institution.nom}",
                 )
-            grant_institution_and_demo_access(user, matched_institution)
+            grant_institution_and_demo_access(user, matched_institution, request)
 
     _clear_pending_institution_fields(user)
     return matched_institution
@@ -360,14 +448,15 @@ def resolve_or_invite_responsable(responsable_id, responsable_email, institution
                 objet_id=contact.id,
                 commentaire=f"Rattachement de {user.email} comme régulateur pour {institution.nom}",
             )
-        grant_institution_and_demo_access(user, institution)
+        grant_institution_and_demo_access(user, institution, request)
         return user, False
 
     email = (responsable_email or '').strip().lower()
     if not email:
         return None, False
 
-    existing = User.objects.filter(email__iexact=email).first()
+    # email chiffré (voir core/crypto_fields.py) -- recherche exacte par index aveugle.
+    existing = User.objects.filter(email_bidx=blind_index(email)).first()
     if existing:
         if existing.type == UserRole.SIMPLE_USER:
             existing.type = UserRole.REGULATEUR
@@ -381,7 +470,7 @@ def resolve_or_invite_responsable(responsable_id, responsable_email, institution
                 objet_id=contact.id,
                 commentaire=f"Rattachement de {existing.email} comme régulateur pour {institution.nom}",
             )
-        grant_institution_and_demo_access(existing, institution)
+        grant_institution_and_demo_access(existing, institution, request)
         return existing, False
 
     user = User.objects.create_user(
@@ -406,4 +495,8 @@ def resolve_or_invite_responsable(responsable_id, responsable_email, institution
             objet_id=user.id,
             commentaire=f"Invitation de {email} comme régulateur pour {institution.nom}",
         )
+    # institution/demo_role déjà posés par create_user ci-dessus (no-op dans
+    # grant_institution_and_demo_access) -- l'appel reste nécessaire pour l'ajout à l'équipe de
+    # l'institution et l'email d'accès à la messagerie, comme pour tout autre rattachement.
+    grant_institution_and_demo_access(user, institution, request)
     return user, True

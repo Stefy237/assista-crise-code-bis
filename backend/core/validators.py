@@ -16,3 +16,31 @@ def validate_image_file(file):
             
     except Exception:
         raise ValidationError("Fichier image invalide. Le fichier est corrompu ou n'est pas une image.")
+
+
+def validate_identity_document_file(file):
+    """Pour les pièces d'identité (voir PieceIdentiteReserve) : contrairement à
+    validate_image_file, accepte aussi un PDF (scan) en plus d'une photo, et une limite plus
+    généreuse (un scan recto/verso dépasse facilement 5 Mo)."""
+    limit_mb = 10
+    if file.size > limit_mb * 1024 * 1024:
+        raise ValidationError(f"Fichier trop volumineux. La taille ne doit pas dépasser {limit_mb} Mo.")
+
+    position = file.tell()
+    header = file.read(5)
+    file.seek(position)
+    if header[:5] == b"%PDF-":
+        return
+
+    try:
+        img = Image.open(file)
+        img.verify()
+        allowed_formats = ['JPEG', 'PNG']
+        if img.format not in allowed_formats:
+            raise ValidationError(f"Format non supporté : {img.format}. Formats autorisés : {allowed_formats} ou PDF.")
+    except ValidationError:
+        raise
+    except Exception:
+        raise ValidationError("Fichier invalide. Le fichier est corrompu ou n'est ni une image JPEG/PNG ni un PDF.")
+    finally:
+        file.seek(position)

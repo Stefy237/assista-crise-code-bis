@@ -1,5 +1,7 @@
 import logging
 
+logger = logging.getLogger(__name__)
+
 from django.apps import apps
 from django.shortcuts import render
 from django.http import FileResponse, StreamingHttpResponse, HttpResponse
@@ -21,6 +23,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from urllib.parse import quote
 from django_filters import rest_framework as filters
+from rest_framework.filters import OrderingFilter
 from django.db import IntegrityError, transaction
 from django.db.models import Q, F, Prefetch, Count, Max
 from django.db.models.functions import TruncDate
@@ -34,14 +37,18 @@ import csv
 import io
 import datetime
 import os
+import re
 import secrets
 import math
+import unicodedata
 import uuid
+from collections import Counter
 import hashlib
 from django.core.files.base import ContentFile
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 
+from .alertes_pcs import preparer_checklist_pcs, envoyer_notifications
 from .audit import audit_log, get_client_ip, send_mail_logged, send_mail_with_attachment_logged
 from .export import build_crisis_export_zip
 from .institution_attachment import (
@@ -65,12 +72,21 @@ from .imports import (
     CHAMPS_PERSONNEL_COMMUNAL,
     CHAMPS_INSTITUTIONS,
     CHAMPS_HABITATIONS,
+    CHAMPS_CORRESPONDANTS_PCS,
+    CHAMPS_INTERLOCUTEURS_PCS,
+    CHAMPS_MATERIEL_POINT,
     exemple_csv_personnel_communal,
     exemple_csv_institutions,
     exemple_csv_habitations,
+    exemple_csv_correspondants_pcs,
+    exemple_csv_interlocuteurs_pcs,
+    exemple_csv_materiel_point,
     importer_personnel_communal,
     importer_institutions,
     importer_habitations,
+    importer_correspondants_pcs,
+    importer_interlocuteurs_pcs,
+    importer_materiel_point,
     parse_fichier,
 )
 from .pagination import OptionalPageNumberPagination, InstitutionPagination
@@ -130,6 +146,7 @@ def extract_exif_metadata(filepath):
     return metadata_publiques, metadata_privees
 
 
+from .crypto_fields import blind_index
 from .models import (
     Environment,
     UserRole,
@@ -156,7 +173,9 @@ from .models import (
     SuiviMaterielEvenement,
     CompagnonMeshCore, NoeudMeshUtilisateur, MessageMeshLog, DirectionMessageMesh, StatutMessageMesh,
     CommandeMeshCore, TypeCommandeMeshCore, StatutCommandeMeshCore,
+    TracerouteMeshCore, StatutTraceroute,
     RelaisMeshCore, CanalMeshCore, MessageCanalMeshCore, ContactMeshCore, TypeContactMeshCore,
+    CanalMeshCoreDetecte, CanalMeshCoreObsolete, AlerteMeshSOS, ProtocoleMesh,
     MeshCoreConnexionType, MeshtasticConnexionType,
     CompagnonMeshtastic, NoeudUtilisateurMeshtastic, MessageMeshtasticLog,
     CanalMeshtastic, MessageCanalMeshtastic, ContactMeshtastic,
@@ -179,6 +198,12 @@ from .models import (
     TypeSalonInstitution,
     HistoriquePositionUtilisateur,
     Zone,
+    ConfigurationAlerteSismique,
+    InterlocuteurAlertePCS, NotificationAlertePCS, ModeAlertePCS, StatutNotificationPCS, ReponseContactPCS,
+    RisqueMajeurType, RisqueCommunal,
+    TypeVulnerabilite, PersonneVulnerable,
+    TYPES_COLLECTIVITE_TERRITORIALE,
+    SecteurRecherche, StatutSecteurRecherche,
     Plan,
     PlanMissionModele,
     JournalCollectivite,
@@ -192,7 +217,10 @@ from .models import (
     StatutEvaluationHabitation,
     StatutChantierHabitation,
     ModuleDegatsCrise,
+    InstitutionWebDomaine,
+    PieceIdentiteReserve,
 )
+from .branding import resolve_institution_branding, branding_for_institution, send_branded_mail, send_branded_mail_env_aware
 
 
 MAGIC_LINK_SALT = "assista-crise-magic-link"
@@ -239,28 +267,31 @@ def send_institution_account_email(request, user):
     activation_link = build_magic_link(request, user, "activate-account")
     login_link = build_magic_link(request, user, "magic-login")
 
+    # Résolu depuis le Host de la requête d'inscription (voir core/branding.py) -- PAS depuis
+    # user.institution, qui n'est pas encore rattachée à ce stade (voir institution_attachment.py :
+    # le rattachement n'a lieu qu'après confirmation de l'email). Un compte créé depuis
+    # cj.assista-crise.fr reçoit donc un email signé Réserve Résilience même si son
+    # institution réelle n'est pas encore connue.
+    institution_branding = resolve_institution_branding(request)
+    branding = branding_for_institution(institution_branding)
+
     message = (
         "Bonjour,\n\n"
-        "Votre compte institutionnel sur Assista-Crise a été créé.\n\n"
+        f"Votre compte institutionnel sur {branding.nom_affichage} a été créé.\n\n"
         "Il est encore inactif : cliquez sur le lien ci-dessous pour confirmer que vous êtes bien "
         "le propriétaire de cette adresse email et activer votre compte.\n\n"
         f"- Activation du compte : {activation_link}\n\n"
         f"Vous pourrez ensuite vous reconnecter à tout moment via : {login_link}\n\n"
         "Ces liens sont valables pendant 7 jours.\n\n"
-        "La messagerie d'équipe intégrée à Assista-Crise s'appuie sur Element X : pour en "
-        "profiter pleinement sur votre téléphone (notifications comprises), installez "
-        "l'application dès maintenant :\n"
-        "- Android : https://play.google.com/store/apps/details?id=io.element.android.x\n"
-        "- iPhone : https://apps.apple.com/us/app/element-x-secure-chat-call/id1631335820\n\n"
-        "Cordialement,\n"
-        "L'équipe Assista-Crise"
+        "Une fois rattaché à votre institution, vous recevrez un second email avec les "
+        "instructions pour accéder à la messagerie de votre équipe.\n\n"
+        "{signature}"
     )
 
-    send_mail_logged(
-        request,
-        subject="Votre accès institutionnel Assista-Crise",
+    send_branded_mail(
+        request, institution_branding,
+        subject=f"Votre accès institutionnel {branding.nom_affichage}",
         message=message,
-        from_email=None,
         recipient_list=[user.email],
         fail_silently=False,
     )
@@ -313,25 +344,24 @@ def _traiter_acceptation_convention(request, institution, user):
 def send_crisis_regulateur_invite_email(request, user, crisis, institution):
     activation_link = build_magic_link(request, user, "activate-account")
     login_link = build_magic_link(request, user, "magic-login")
+    branding = branding_for_institution(institution)
 
     message = (
         "Bonjour,\n\n"
         f"Vous avez été désigné(e) responsable/régulateur par {institution.nom} "
-        f"pour la crise « {crisis.name} » sur Assista-Crise.\n\n"
+        f"pour la crise « {crisis.name} » sur {branding.nom_affichage}.\n\n"
         "Votre compte est encore inactif : cliquez sur le lien ci-dessous pour confirmer que "
         "vous êtes bien le propriétaire de cette adresse email et l'activer.\n\n"
         f"- Activation du compte : {activation_link}\n\n"
         f"Vous pourrez ensuite vous reconnecter à tout moment via : {login_link}\n\n"
         "Ces liens sont valables pendant 7 jours.\n\n"
-        "Cordialement,\n"
-        "L'équipe Assista-Crise"
+        "{signature}"
     )
 
-    send_mail_logged(
-        request,
-        subject="Vous avez été désigné responsable d'une crise sur Assista-Crise",
+    send_branded_mail(
+        request, institution,
+        subject=f"Vous avez été désigné responsable d'une crise sur {branding.nom_affichage}",
         message=message,
-        from_email=None,
         recipient_list=[user.email],
         fail_silently=False,
     )
@@ -386,6 +416,8 @@ from .serializers import (
     NoeudMeshUtilisateurSerializer,
     MessageMeshLogSerializer,
     CommandeMeshCoreSerializer,
+    TracerouteMeshCoreSerializer,
+    AlerteMeshSOSSerializer,
     RelaisMeshCoreSerializer,
     SatelliteSerializer,
     JetonEnrolementSatelliteSerializer,
@@ -422,6 +454,14 @@ from .serializers import (
     BesoinMaterielSerializer,
     DernierePositionUtilisateurSerializer,
     ZoneSerializer,
+    ConfigurationAlerteSismiqueSerializer,
+    InterlocuteurAlertePCSSerializer,
+    NotificationAlertePCSSerializer,
+    RisqueMajeurTypeSerializer,
+    RisqueCommunalSerializer,
+    TypeVulnerabiliteSerializer,
+    PersonneVulnerableSerializer,
+    SecteurRechercheSerializer,
     PlanSerializer,
     PlanMissionModeleSerializer,
     HabitationSerializer,
@@ -429,6 +469,7 @@ from .serializers import (
     HabitationHistoriqueSerializer,
     RattachementHabitationSerializer,
     ModuleDegatsCriseSerializer,
+    PieceIdentiteReserveSerializer,
 )
 
 class TagLikeViewSetMixin:
@@ -698,18 +739,21 @@ def _notify_dossier_closure(dossier, request):
         return
 
     verbe = "résolue" if dossier.statut == Dossier.Statut.RESOLU else "clôturée"
+    # Institution qui traite CE dossier (via l'équipe assignée, voir Team.institution) -- None
+    # si pas encore d'équipe assignée, auquel cas send_branded_mail_env_aware retombe sur le
+    # branding Assista-Crise par défaut (voir core/branding.py).
+    institution = dossier.equipe.institution if dossier.equipe else None
     try:
-        send_mail_env_aware(
-            request,
+        send_branded_mail_env_aware(
+            request, institution,
             subject=f"Votre {nature} « {titre} » a été {verbe}",
             message=(
                 f"Bonjour {prenom},\n\n"
                 f"Nous vous informons que votre {nature} « {titre} » (dossier {dossier.numero}) "
                 f"a été {verbe} par l'équipe {dossier.equipe.name if dossier.equipe else 'en charge'}.\n\n"
                 "Merci pour votre confiance,\n"
-                "L'équipe Assista-Crise"
+                "{signature}"
             ),
-            from_email=None,
             recipient_list=[destinataire],
             fail_silently=True,
         )
@@ -892,6 +936,7 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         if dossier.important:
             regulateurs = _regulateurs_pour_dossier(dossier, dossier.equipe)
+            institution = dossier.equipe.institution if dossier.equipe else None
             for regulateur in regulateurs:
                 Notification.objects.create(
                     utilisateur=regulateur,
@@ -901,18 +946,16 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     environment=dossier.environment,
                 )
                 try:
-                    send_mail_env_aware(
-                        request,
+                    send_branded_mail_env_aware(
+                        request, institution,
                         subject=f"Urgent : dossier {dossier.numero} marqué important",
                         message=(
                             f"Bonjour,\n\n"
                             f"Le dossier {dossier.numero} ({dossier.titre}) a été signalé "
                             f"comme important par {request.user.email}.\n\n"
                             "Connectez-vous pour plus de détails.\n\n"
-                            "Cordialement,\n"
-                            "L'équipe Assista-Crise"
+                            "{signature}"
                         ),
-                        from_email=None,
                         recipient_list=[regulateur.email],
                         fail_silently=True,
                     )
@@ -1137,7 +1180,14 @@ class DossierViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
 
 class AuthorEmailFilter(filters.FilterSet):
-    author_email = filters.CharFilter(field_name='author__email', lookup_expr='iexact')
+    author_email = filters.CharFilter(method='filter_author_email')
+
+    def filter_author_email(self, queryset, name, value):
+        # author__email est chiffré (voir core/crypto_fields.py) : une recherche exacte passe
+        # par l'index aveugle du compte auteur, jamais par le champ chiffré lui-même (une
+        # comparaison SQL directe sur un ciphertext Fernet ne peut jamais correspondre, même
+        # pour la même valeur en clair -- nonce aléatoire à chaque chiffrement).
+        return queryset.filter(author__email_bidx=blind_index(value))
 
 
 class OfferSearchFilter(AuthorEmailFilter):
@@ -1158,20 +1208,35 @@ class OfferSearchFilter(AuthorEmailFilter):
     # (en attente vs déjà validées) sans requêtes séparées.
     accueil_intervenants = filters.BooleanFilter(field_name='accueil_intervenants')
     accueil_intervenants_valide = filters.BooleanFilter(method='filter_accueil_intervenants_valide')
+    # Exact, en clair (Competence.nom, pas d'id) -- aligné sur ce que le select du front
+    # (ReportingComponent) envoie déjà (le nom de la compétence, pas son UUID).
+    competence = filters.CharFilter(field_name='competences__nom')
 
     def filter_accueil_intervenants_valide(self, queryset, name, value):
         return queryset.filter(accueil_intervenants_valide_par__isnull=not value)
 
     def filter_search(self, queryset, name, value):
-        return queryset.filter(
-            Q(first_name_offer__icontains=value)
-            | Q(last_name_offer__icontains=value)
-            | Q(email_offer__icontains=value)
-            | Q(title__icontains=value)
-            | Q(author__first_name__icontains=value)
-            | Q(author__last_name__icontains=value)
-            | Q(author__email__icontains=value)
-        )
+        # first_name_offer/last_name_offer/email_offer (et author__email, via la relation) sont
+        # chiffrés (voir core/crypto_fields.py) -- une recherche floue (icontains) ne peut pas
+        # porter sur un ciphertext, ni même un index aveugle (qui ne sait tester qu'une égalité
+        # exacte). Décision utilisateur du 2026-10-06 : filtrage côté Python après déchiffrement
+        # plutôt que d'abandonner la recherche -- acceptable au volume actuel (quelques milliers
+        # d'offres). Un seul passage couvre aussi title/author__first_name/author__last_name
+        # (en clair) pour rester simple, plutôt que de mélanger un filtre SQL partiel et un
+        # filtre Python -- queryset.filter(id__in=...) à la fin reste une QuerySet paresseuse,
+        # chaînable normalement par le reste du pipeline DRF (pagination, tri...).
+        value_lower = value.lower()
+        ids = [
+            o.id for o in queryset.select_related('author')
+            if value_lower in (o.title or '').lower()
+            or value_lower in (o.first_name_offer or '').lower()
+            or value_lower in (o.last_name_offer or '').lower()
+            or value_lower in (o.email_offer or '').lower()
+            or (o.author_id and value_lower in (o.author.first_name or '').lower())
+            or (o.author_id and value_lower in (o.author.last_name or '').lower())
+            or (o.author_id and value_lower in (o.author.email or '').lower())
+        ]
+        return queryset.filter(id__in=ids)
 
     def filter_exclude_type(self, queryset, name, value):
         return queryset.exclude(offer_type__type=value)
@@ -1182,7 +1247,74 @@ class OfferSearchFilter(AuthorEmailFilter):
         # "Offres" de la page Cellule de crise (?crisis=&status=DISPONIBLE), absents jusqu'ici :
         # ce FilterSet n'exposait aucun filtre par crise/statut, silencieusement ignorés côté
         # django-filter (pas d'erreur, juste tout le catalogue retourné sans filtrage réel).
+        # materiel_livraison ajouté pour le filtre dédié de ReportingComponent (offres de type
+        # Matériel uniquement).
+        fields = ['crisis', 'status', 'materiel_livraison']
+
+
+class RequestSearchFilter(AuthorEmailFilter):
+    """Même principe qu'OfferSearchFilter (recherche texte + crise/statut), dupliqué plutôt que
+    mutualisé en mixin -- chaque modèle déchiffre son propre jeu de champs, et ce FilterSet
+    reste assez court pour que dupliquer soit plus lisible qu'une abstraction à un seul autre
+    point d'usage pour l'instant (voir OfferSearchFilter.filter_search, même raisonnement).
+    Alimente la page Signalements (ReportingComponent), onglet Demandes."""
+    search = filters.CharFilter(method='filter_search')
+
+    def filter_search(self, queryset, name, value):
+        value_lower = value.lower()
+        ids = [
+            r.id for r in queryset.select_related('author')
+            if value_lower in (r.title or '').lower()
+            or value_lower in (r.first_name_request or '').lower()
+            or value_lower in (r.last_name_request or '').lower()
+            or value_lower in (r.email_request or '').lower()
+            or (r.author_id and value_lower in (r.author.first_name or '').lower())
+            or (r.author_id and value_lower in (r.author.last_name or '').lower())
+            or (r.author_id and value_lower in (r.author.email or '').lower())
+        ]
+        return queryset.filter(id__in=ids)
+
+    class Meta:
+        model = Request
         fields = ['crisis', 'status']
+
+
+class InformationSearchFilter(AuthorEmailFilter):
+    """Voir RequestSearchFilter -- même principe, pour l'onglet Informations de la page
+    Signalements."""
+    search = filters.CharFilter(method='filter_search')
+
+    def filter_search(self, queryset, name, value):
+        value_lower = value.lower()
+        ids = [
+            i.id for i in queryset.select_related('author')
+            if value_lower in (i.title or '').lower()
+            or value_lower in (i.first_name_information or '').lower()
+            or value_lower in (i.last_name_information or '').lower()
+            or value_lower in (i.email_information or '').lower()
+            or (i.author_id and value_lower in (i.author.first_name or '').lower())
+            or (i.author_id and value_lower in (i.author.last_name or '').lower())
+            or (i.author_id and value_lower in (i.author.email or '').lower())
+        ]
+        return queryset.filter(id__in=ids)
+
+    class Meta:
+        model = Information
+        fields = ['crisis', 'status']
+
+
+class CrisisSearchFilter(AuthorEmailFilter):
+    """Contrairement à Offer/Request/Information, Crisis.name/description sont en clair (pas
+    EncryptedTextField) -- recherche SQL directe, pas de déchiffrement Python nécessaire."""
+    search = filters.CharFilter(method='filter_search')
+
+    def filter_search(self, queryset, name, value):
+        return queryset.filter(Q(name__icontains=value) | Q(description__icontains=value))
+
+    class Meta:
+        model = Crisis
+        fields = []
+
 
 class UserViewSet(viewsets.ModelViewSet):
     # select_related('institution') : UserSerializer.get_ma_zone lit obj.institution sur
@@ -1224,7 +1356,7 @@ class UserViewSet(viewsets.ModelViewSet):
             return [IsInstitutionalActor()]
         if self.action in ('update', 'partial_update', 'destroy'):
             return [IsSelfOrInstitutional()]
-        if self.action in ('reactiver', 'actualiser_risques'):
+        if self.action in ('reactiver', 'actualiser_risques', 'verifier_reserve'):
             return [IsInstitutionalActor()]
         if self.action == 'preview':
             return [permissions.IsAuthenticated()]
@@ -1258,6 +1390,33 @@ class UserViewSet(viewsets.ModelViewSet):
             "risques": risques,
             "risques_date_maj": commune_risques_date_maj(institution.commune_code),
         })
+
+    @action(detail=True, methods=["post"], url_path="verifier-reserve")
+    def verifier_reserve(self, request, pk=None):
+        """Marque une candidature à la réserve comme traitée (voir User.reserve_verifiee,
+        UserSerializer.get_reserve_a_verifier) -- réservé au rôle RESPONSABLE de LA RÉSERVE
+        CONCERNÉE précisément (pas n'importe quel acteur institutionnel de n'importe quelle
+        institution, IsInstitutionalActor ci-dessus ne garantit que le TYPE de compte, pas le
+        rattachement) : même type de garde-fou que _resolve_institution_or_400 ailleurs dans ce
+        fichier -- vérifier l'appartenance réelle, jamais seulement le rôle générique."""
+        candidat = self.get_object()
+        if candidat.reserve_institution_id is None:
+            return Response({"error": "Cet utilisateur n'a candidaté à aucune réserve."}, status=status.HTTP_400_BAD_REQUEST)
+
+        est_responsable = AffectationRoleOperationnel.objects.filter(
+            utilisateur=request.user, institution_id=candidat.reserve_institution_id,
+            role__code="RESPONSABLE", actif=True,
+        ).exists()
+        if not est_responsable:
+            return Response({"error": "Réservé au responsable de cette réserve."}, status=status.HTTP_403_FORBIDDEN)
+
+        candidat.reserve_verifiee = True
+        candidat.save(update_fields=["reserve_verifiee"])
+        audit_log(
+            request=request, action_code="MODIFICATION", objet_type="User", objet_id=candidat.id,
+            commentaire=f"Candidature réserve vérifiée : {candidat.email}",
+        )
+        return Response(UserSerializer(candidat, context={"request": request}).data)
 
     def perform_destroy(self, instance):
         # Même effet que reject_account (is_active=False, voir le commentaire "Désactiver le
@@ -1314,12 +1473,17 @@ class UserViewSet(viewsets.ModelViewSet):
                 try:
                     send_institution_account_email(request, user)
                 except Exception as e:
-                    # send_mail_logged journalise déjà les échecs SMTP dans la main courante,
-                    # mais un échec AVANT cet appel (ex: build_magic_link) ne laissait jusqu'ici
-                    # aucune trace — juste un print() perdu dans les logs du conteneur, jamais
-                    # visible depuis l'app. Repéré en direct : un compte "Autorité locale" créé
-                    # sans que la personne ne reçoive jamais son lien d'activation, sans qu'un
-                    # administrateur n'ait aucun moyen de le savoir.
+                    # send_mail_logged journalise déjà les échecs SMTP dans la main courante ET
+                    # déclenche l'alerte mail_admins/Matrix (voir LOGGING, config/settings.py),
+                    # mais un échec AVANT cet appel (ex: build_magic_link) ne déclenchait
+                    # jusqu'ici ni l'un ni l'autre — juste un print() perdu dans les logs du
+                    # conteneur, jamais visible depuis l'app. Repéré en direct : un compte
+                    # "Autorité locale" créé sans que la personne ne reçoive jamais son lien
+                    # d'activation, sans qu'un administrateur n'ait aucun moyen de le savoir.
+                    logger.exception(
+                        'Échec de l\'envoi de l\'email d\'activation institutionnelle (user_id=%s, %s)',
+                        user.id, user.email,
+                    )
                     audit_log(
                         request=request,
                         action_code="ENVOI_EMAIL",
@@ -1541,9 +1705,11 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Authentifier par email
+        # Authentifier par email -- recherche par index aveugle (voir core/crypto_fields.py) :
+        # email est chiffré de façon non déterministe, une comparaison directe sur le champ ne
+        # pourrait jamais correspondre, même pour le bon email.
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email_bidx=blind_index(email))
             
             # Vérifier que le compte est actif ET validé
             if not user.is_active:
@@ -1651,6 +1817,12 @@ class UserViewSet(viewsets.ModelViewSet):
         # jamais avant. Capturé avant l'appel : attach_secours_user_to_institution efface les
         # pending_* en sortie, donc plus moyen de savoir après coup si c'était une RCSC.
         pending_type_secours = (user_to_approve.pending_institution_type or '').strip().lower()
+        # Institution résolue UNIQUEMENT pour la branche SECOURS (seul cas où une Institution
+        # réelle -- pas juste pending_institution_name, du texte libre -- est connue à ce
+        # stade : voir attach_secours_user_to_institution). Reste None pour les autres types
+        # (ex: LOCAL_AUTHORITY), dont l'institution n'est rattachée qu'au clic sur le lien
+        # d'activation (voir send_institution_account_email) -- jamais ici.
+        matched_institution = None
         if user_to_approve.type == UserRole.ORGANIZED_RESCUE:
             matched_institution = attach_secours_user_to_institution(user_to_approve, request)
             if pending_type_secours == 'rcsc' and matched_institution is None:
@@ -1674,19 +1846,18 @@ class UserViewSet(viewsets.ModelViewSet):
                 except Exception as e:
                     print(f"Erreur envoi email rattachement RCSC manuel : {e}")
 
-        # Envoyer email de confirmation
+        # Envoyer email de confirmation (branding : voir matched_institution ci-dessus --
+        # None hors branche SECOURS, retombe alors sur Assista-Crise par défaut)
         try:
-            send_mail_logged(
-                request,
+            send_branded_mail(
+                request, matched_institution,
                 subject="Votre compte a été validé !",
                 message=(
                     f"Bonjour {user_to_approve.first_name} {user_to_approve.last_name},\n\n"
                     f"Bonne nouvelle ! Votre compte ({user_to_approve.get_type_display()}) a été validé.\n"
                     "Vous pouvez maintenant vous connecter et accéder à toutes les fonctionnalités.\n\n"
-                    "Cordialement,\n"
-                    "L'équipe Assista-Crise"
+                    "{signature}"
                 ),
-                from_email=None,
                 recipient_list=[user_to_approve.email],
                 fail_silently=False,
             )
@@ -1764,24 +1935,26 @@ class UserViewSet(viewsets.ModelViewSet):
 
         target_user = self.get_object()
         reset_link = build_magic_link(request, target_user, "reset-password")
+        # target_user.institution : FK réelle déjà rattachée (compte actif), pas du texte
+        # libre pending_* -- contrairement à approve_account, pas de résolution spéculative
+        # ici.
+        branding = branding_for_institution(target_user.institution)
 
         message = (
             f"Bonjour {target_user.first_name} {target_user.last_name},\n\n"
-            "Un administrateur d'Assista-Crise a demandé la réinitialisation du mot de passe "
+            f"Un administrateur de {branding.nom_affichage} a demandé la réinitialisation du mot de passe "
             "de votre compte.\n\n"
             f"Pour choisir un nouveau mot de passe, cliquez sur le lien suivant :\n{reset_link}\n\n"
             "Ce lien est valable 7 jours et ne peut être utilisé qu'une seule fois. Si vous "
             "n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet email : votre mot "
             "de passe actuel reste valable.\n\n"
-            "Cordialement,\n"
-            "L'équipe Assista-Crise"
+            "{signature}"
         )
 
-        send_mail_env_aware(
-            request,
-            subject="Réinitialisation de votre mot de passe Assista-Crise",
+        send_branded_mail_env_aware(
+            request, target_user.institution,
+            subject=f"Réinitialisation de votre mot de passe {branding.nom_affichage}",
             message=message,
-            from_email=None,
             recipient_list=[target_user.email],
             fail_silently=False,
         )
@@ -1898,6 +2071,106 @@ class ImportInstitutionsExempleView(APIView):
     def get(self, request):
         response = HttpResponse(exemple_csv_institutions(), content_type="text/csv; charset=utf-8")
         response['Content-Disposition'] = 'attachment; filename="exemple-institutions.csv"'
+        return response
+
+
+class ImportCorrespondantsPCSView(APIView):
+    """Étape 2 de l'import des correspondants PCS (annuaire de rôles -- voir
+    imports.importer_correspondants_pcs) -- mêmes garde-fous que ImportPersonnelCommunalView."""
+    permission_classes = [IsInstitutionalActor]
+
+    def post(self, request):
+        institution = getattr(request.user, 'institution', None)
+        if institution is None:
+            return Response({"error": "Aucune institution associée à votre compte."}, status=status.HTTP_400_BAD_REQUEST)
+        fichier = request.FILES.get('fichier')
+        if not fichier:
+            return Response({"error": "Aucun fichier reçu."}, status=status.HTTP_400_BAD_REQUEST)
+        mapping = {champ: request.data.get(f"mapping_{champ}") for champ in CHAMPS_CORRESPONDANTS_PCS}
+        if not mapping.get("email") or not mapping.get("nom"):
+            return Response({"error": "Les colonnes Email et Nom doivent être associées avant de lancer l'import."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            _colonnes, lignes = parse_fichier(fichier)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        resultat = importer_correspondants_pcs(request, institution, lignes, mapping)
+        return Response(resultat)
+
+
+class ImportCorrespondantsPCSExempleView(APIView):
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request):
+        response = HttpResponse(exemple_csv_correspondants_pcs(), content_type="text/csv; charset=utf-8")
+        response['Content-Disposition'] = 'attachment; filename="exemple-correspondants-pcs.csv"'
+        return response
+
+
+class ImportInterlocuteursPCSView(APIView):
+    """Étape 2 de l'import de l'annuaire PCS (voir imports.importer_interlocuteurs_pcs)."""
+    permission_classes = [IsInstitutionalActor]
+
+    def post(self, request):
+        institution = getattr(request.user, 'institution', None)
+        if institution is None:
+            return Response({"error": "Aucune institution associée à votre compte."}, status=status.HTTP_400_BAD_REQUEST)
+        fichier = request.FILES.get('fichier')
+        if not fichier:
+            return Response({"error": "Aucun fichier reçu."}, status=status.HTTP_400_BAD_REQUEST)
+        mapping = {champ: request.data.get(f"mapping_{champ}") for champ in CHAMPS_INTERLOCUTEURS_PCS}
+        if not mapping.get("nom"):
+            return Response({"error": "La colonne Nom doit être associée avant de lancer l'import."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            _colonnes, lignes = parse_fichier(fichier)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        resultat = importer_interlocuteurs_pcs(request, institution, lignes, mapping)
+        return Response(resultat)
+
+
+class ImportInterlocuteursPCSExempleView(APIView):
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request):
+        response = HttpResponse(exemple_csv_interlocuteurs_pcs(), content_type="text/csv; charset=utf-8")
+        response['Content-Disposition'] = 'attachment; filename="exemple-interlocuteurs-pcs.csv"'
+        return response
+
+
+class ImportMaterielPointView(APIView):
+    """Étape 2 de l'import du matériel d'UN point (voir imports.importer_materiel_point) --
+    cible toujours un seul point, passé en paramètre (`point_id`), jamais une colonne du
+    fichier. Même garde-fou de permission que le reste de la gestion de stock d'un point
+    (_peut_gerer_stock_point, voir point-inventaire-modal)."""
+    permission_classes = [IsInstitutionalActor]
+
+    def post(self, request):
+        point_id = request.data.get('point_id')
+        point = PointOperationnel.objects.filter(pk=point_id).first() if point_id else None
+        if point is None:
+            return Response({"error": "Point opérationnel introuvable."}, status=status.HTTP_400_BAD_REQUEST)
+        if not _peut_gerer_stock_point(request, point):
+            return Response({"error": "Vous n'êtes pas autorisé à gérer le stock de ce point."}, status=status.HTTP_403_FORBIDDEN)
+        fichier = request.FILES.get('fichier')
+        if not fichier:
+            return Response({"error": "Aucun fichier reçu."}, status=status.HTTP_400_BAD_REQUEST)
+        mapping = {champ: request.data.get(f"mapping_{champ}") for champ in CHAMPS_MATERIEL_POINT}
+        if not mapping.get("nom_item"):
+            return Response({"error": "La colonne Nom du matériel doit être associée avant de lancer l'import."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            _colonnes, lignes = parse_fichier(fichier)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        resultat = importer_materiel_point(request, point, lignes, mapping)
+        return Response(resultat)
+
+
+class ImportMaterielPointExempleView(APIView):
+    permission_classes = [IsInstitutionalActor]
+
+    def get(self, request):
+        response = HttpResponse(exemple_csv_materiel_point(), content_type="text/csv; charset=utf-8")
+        response['Content-Disposition'] = 'attachment; filename="exemple-materiel-point.csv"'
         return response
 
 
@@ -2148,7 +2421,14 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     # qu'un .filter().exists() par crise.
     queryset = Crisis.objects.select_related('author').prefetch_related('implications')
     serializer_class = CrisisSerializer
-    filterset_class = AuthorEmailFilter
+    filterset_class = CrisisSearchFilter
+    filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
+    ordering_fields = ['start_date', 'name']
+    ordering = ['-start_date']
+    # Opt-in (voir OptionalPageNumberPagination) : seuls les appelants passant ?page= reçoivent
+    # l'enveloppe {count,next,previous,results} -- tous les autres (page d'accueil publique,
+    # etc.) gardent le tableau brut d'aujourd'hui.
+    pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -2235,6 +2515,13 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         return Response(self.get_serializer(crise).data)
 
     def perform_create(self, serializer):
+        # Garde-fou : un compte Autorité locale activé mais pas encore rattaché à son
+        # institution (fenêtre entre activation et confirmer-institution/creer-mon-institution,
+        # voir _verifier_onboarding_termine) ne doit pas pouvoir déclarer de crise — bloque
+        # explicitement plutôt que de laisser la crise se créer sans checklist PCS associable
+        # (c'est ce qui s'est passé avant l'ajout de ce garde, voir son docstring).
+        _verifier_onboarding_termine(self.request.user)
+
         # Une mairie couvre un territoire bien plus resserré qu'une intercommunalité/préfecture
         # : 1 km de rayon par défaut pour la zone composée (zone_secteurs) plutôt que les 10 km
         # génériques, uniquement si l'appelant n'a pas déjà précisé le sien — demande
@@ -2254,6 +2541,16 @@ class CrisisViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             crise=crise,
             commentaire=f"Création crise : {crise.name}",
         )
+
+        # Déclarer une crise EST l'activation du PCS/PICS dans cet outil (pas de bouton séparé,
+        # voir le plan de conception "Annuaire d'alerte PCS/PICS") -- prépare juste la checklist
+        # (aucun envoi ici, voir NotificationAlertePCSViewSet.envoyer_lot pour l'envoi explicite
+        # après relecture par l'utilisateur). Ne doit jamais empêcher la création de la crise.
+        try:
+            institution_pcs = _resolve_institution_or_400(self.request)
+            preparer_checklist_pcs(crise, institution_pcs)
+        except Exception:
+            logger.exception("Échec de préparation de la checklist PCS/PICS pour la crise %s.", crise.id)
 
     def perform_update(self, serializer):
         """Décision utilisateur du 2026-09-18 : un utilisateur d'une collectivité ne peut pas
@@ -2497,7 +2794,8 @@ def resolve_or_invite_demandeur(demande, request=None):
     if not email:
         return None, False
 
-    existing = User.objects.filter(email__iexact=email).first()
+    # email chiffré (voir core/crypto_fields.py) -- recherche exacte par index aveugle.
+    existing = User.objects.filter(email_bidx=blind_index(email)).first()
     if existing:
         return existing, False
 
@@ -2537,7 +2835,8 @@ def resolve_or_invite_benevole(offer, request=None):
     if not email:
         return None, False
 
-    existing = User.objects.filter(email__iexact=email).first()
+    # email chiffré (voir core/crypto_fields.py) -- recherche exacte par index aveugle.
+    existing = User.objects.filter(email_bidx=blind_index(email)).first()
     if existing:
         return existing, False
 
@@ -2601,13 +2900,13 @@ def send_point_volunteer_confirmation_email(request, affectation):
             contact += f" / {responsable.phone_number}"
         lignes.append(f"Responsable du point : {responsable.first_name} {responsable.last_name} ({contact})".strip())
 
-    lignes += ["", "Cordialement,", "L'équipe Assista-Crise"]
+    institution = point.equipe.institution if point.equipe else None
+    lignes += ["", "{signature}"]
 
-    send_mail_env_aware(
-        request,
+    send_branded_mail_env_aware(
+        request, institution,
         subject=f"Confirmation de disponibilité — {point.nom}",
         message="\n".join(lignes),
-        from_email=None,
         recipient_list=[affectation.benevole.email],
         fail_silently=False,
     )
@@ -2623,6 +2922,7 @@ def _notify_regulateurs_creneau_a_valider(affectation, request):
     if not destinataires:
         return
 
+    institution = point.equipe.institution if point.equipe else None
     message = (
         f"{affectation.benevole.first_name} {affectation.benevole.last_name} a confirmé sa "
         f"disponibilité pour le point « {point.nom} » — validation requise avant confirmation "
@@ -2634,11 +2934,10 @@ def _notify_regulateurs_creneau_a_valider(affectation, request):
             message=message, environment=affectation.environment,
         )
         try:
-            send_mail_env_aware(
-                request,
+            send_branded_mail_env_aware(
+                request, institution,
                 subject=f"Créneau à valider — {point.nom}",
-                message=f"Bonjour {user.first_name},\n\n{message}\n\nCordialement,\nL'équipe Assista-Crise",
-                from_email=None,
+                message=f"Bonjour {user.first_name},\n\n{message}\n\n{{signature}}",
                 recipient_list=[user.email],
                 fail_silently=True,
             )
@@ -2651,24 +2950,25 @@ def send_benevole_validation_result_email(request, affectation, decision):
     PointOperationnelViewSet.valider_benevole) — deuxième et dernier email de ce flux, après
     celui de send_point_volunteer_confirmation_email."""
     point = affectation.point
+    institution = point.equipe.institution if point.equipe else None
     if decision == "confirmer":
         subject = f"Créneau confirmé — {point.nom}"
         message = (
             f"Bonjour,\n\nVotre créneau sur le point « {point.nom} » du "
             f"{affectation.date_attendue.strftime('%d/%m/%Y à %H:%M')} a été validé par le "
             f"régulateur : votre participation est définitivement confirmée.\n\n"
-            "Cordialement,\nL'équipe Assista-Crise"
+            "{signature}"
         )
     else:
         subject = f"Créneau non retenu — {point.nom}"
         message = (
             f"Bonjour,\n\nMerci pour votre disponibilité sur le point « {point.nom} ». Le "
             f"régulateur n'a finalement pas retenu ce créneau. N'hésitez pas à consulter "
-            f"d'autres opportunités sur la plateforme.\n\nCordialement,\nL'équipe Assista-Crise"
+            f"d'autres opportunités sur la plateforme.\n\n{{signature}}"
         )
     try:
-        send_mail_env_aware(
-            request, subject=subject, message=message, from_email=None,
+        send_branded_mail_env_aware(
+            request, institution, subject=subject, message=message,
             recipient_list=[affectation.benevole.email], fail_silently=True,
         )
     except Exception as e:
@@ -2701,15 +3001,13 @@ def send_engagement_confirmation_email(request, engagement):
         "",
         lien,
         "",
-        "Cordialement,",
-        "L'équipe Assista-Crise",
+        "{signature}",
     ]
 
-    send_mail_env_aware(
-        request,
+    send_branded_mail_env_aware(
+        request, engagement.team.institution,
         subject=f"Confirmez votre disponibilité — {offer.title}",
         message="\n".join(lignes),
-        from_email=None,
         recipient_list=[destinataire],
         fail_silently=False,
     )
@@ -2949,18 +3247,16 @@ def _assign_request_to_team(demande, team, request, mission=None):
                 f"\nVous pouvez suivre l'avancement de votre dossier, ajouter des "
                 f"commentaires et des photos ici :\n{suivi_link}\n"
             )
-        send_mail_env_aware(
-            request,
+        send_branded_mail_env_aware(
+            request, team.institution,
             subject=f"Votre demande « {demande.title} » a été prise en charge",
             message=(
                 f"Bonjour {demande.first_name_request},\n\n"
                 f"Votre demande d'aide « {demande.title} » a été affectée à l'équipe {team.name}, "
                 f"qui va la traiter (dossier {dossier.numero}).\n"
                 f"{suivi_paragraph}\n"
-                "Cordialement,\n"
-                "L'équipe Assista-Crise"
+                "{signature}"
             ),
-            from_email=None,
             recipient_list=[demande.email_request],
             fail_silently=True,
         )
@@ -3041,17 +3337,16 @@ def _assign_information_to_team(signalement, team, request):
                 f"{_vue_equipe_link(request, team, signalement.author)}\n"
             )
         try:
-            send_mail_env_aware(
-                request,
+            send_branded_mail_env_aware(
+                request, team.institution,
                 subject=f"Votre signalement « {signalement.title} » a été pris en charge",
                 message=(
                     f"Bonjour {signalement.first_name_information},\n\n"
                     f"Votre signalement « {signalement.title} » a été affecté à l'équipe "
                     f"{team.name}, qui va s'en charger (dossier {dossier.numero}).\n{equipe_paragraph}\n"
                     "Merci pour votre vigilance,\n"
-                    "L'équipe Assista-Crise"
+                    "{signature}"
                 ),
-                from_email=None,
                 recipient_list=[signalement.email_information],
                 fail_silently=True,
             )
@@ -3237,7 +3532,14 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = Request.objects.select_related('author', 'crisis')
     serializer_class = RequestSerializer
     permission_classes = [AllowAny]
-    filterset_class = AuthorEmailFilter
+    filterset_class = RequestSearchFilter
+    filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
+    # distance_from_crisis : annotation inconditionnelle (annotate_distance_from_crisis),
+    # toujours présente, donc triable sans risque -- contrairement à distance_ma_zone
+    # (_apply_rayon_km), annotée seulement en mode rayon, volontairement absente d'ici.
+    ordering_fields = ['created_at', 'title', 'status', 'commune_code', 'distance_from_crisis']
+    ordering = ['-created_at']
+    pagination_class = OptionalPageNumberPagination
 
     def get_permissions(self):
         # get_permissions() étant surchargé, chaque @action avec son propre permission_classes
@@ -3507,8 +3809,13 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         try:
             print(f"Tentative d'envoi de mail à {demande.email_request}...")
 
-            send_mail_env_aware(
-                self.request,
+            # Pas encore d'équipe/institution affectée à ce stade (dépôt initial) -- branding
+            # par domaine d'ORIGINE (voir core/branding.py, mémoire de conception marque
+            # blanche : "elle ne voit QUE l'URL et le nom du partenaire... à l'inscription/
+            # dépôt"), pas par institution traitante (qui n'est pas encore connue).
+            origine = resolve_institution_branding(self.request)
+            send_branded_mail_env_aware(
+                self.request, origine,
                 subject="Confirmation de votre demande",
                 message=(
                     f"Bonjour {demande.first_name_request},\n\n"
@@ -3518,10 +3825,8 @@ class RequestViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"Pour modifier votre demande (compléter une information, changer une "
                     f"disponibilité…) :\n{edit_url}\n\n"
                     f"Pour la désactiver (elle ne sera plus visible) :\n{deletion_url}\n\n"
-                    "Cordialement,\n"
-                    "L'équipe Assista-Crise"
+                    "{signature}"
                 ),
-                from_email=None,  # Utilise DEFAULT_FROM_EMAIL défini dans settings.py
                 recipient_list=[demande.email_request],
                 fail_silently=False,
             )
@@ -3744,19 +4049,64 @@ def _notify_institution_referent_of_team(team, institution, request):
         message=message, environment=team.environment,
     )
     try:
-        send_mail_env_aware(
-            request,
+        send_branded_mail_env_aware(
+            request, institution,
             subject=f"Nouvelle équipe créée sous {institution.nom}",
             message=(
                 f"Bonjour {referent.first_name},\n\n{message}\n\n"
-                "Cordialement,\nL'équipe Assista-Crise"
+                "{signature}"
             ),
-            from_email=None,
             recipient_list=[referent.email],
             fail_silently=True,
         )
     except Exception as e:
         print(f"Erreur envoi email référent institution (équipe) : {e}")
+
+
+def _notifier_responsable_reserve(candidat, institution, request):
+    """Prévient le responsable d'une institution "réserve" (voir Institution.reserve_active,
+    User.souhaite_rejoindre_reserve) qu'une nouvelle candidature vient d'être déposée --
+    contrairement à _notify_institution_referent_of_team (qui cible le contact principal),
+    cible spécifiquement le rôle RESPONSABLE (AffectationRoleOperationnel), avec repli sur le
+    contact principal puis n'importe quel contact actif si aucun RESPONSABLE n'est encore
+    affecté (institution toute juste créée). Silencieux si l'institution n'a encore personne à
+    notifier : ne bloque jamais l'inscription elle-même."""
+    affectation_responsable = AffectationRoleOperationnel.objects.filter(
+        institution=institution, role__code="RESPONSABLE", actif=True,
+    ).select_related("utilisateur").first()
+    responsable = (
+        affectation_responsable.utilisateur if affectation_responsable
+        else getattr(
+            ContactInstitution.objects.filter(institution=institution, actif=True, contact_principal=True).first()
+            or ContactInstitution.objects.filter(institution=institution, actif=True).first(),
+            "utilisateur", None,
+        )
+    )
+    if responsable is None:
+        return
+
+    message = (
+        f"{candidat.first_name} {candidat.last_name} ({candidat.email}) souhaite rejoindre la "
+        f"réserve « {institution.nom_affichage or institution.nom} »."
+    )
+    Notification.objects.create(
+        utilisateur=responsable, titre="Nouvelle candidature à la réserve",
+        message=message, environment=get_active_environment(request),
+    )
+    try:
+        send_branded_mail(
+            request, institution,
+            subject=f"Nouvelle candidature à la réserve {institution.nom_affichage or institution.nom}",
+            message=(
+                f"Bonjour {responsable.first_name},\n\n{message}\n\n"
+                "Vous pouvez examiner cette candidature depuis la page Utilisateurs.\n\n"
+                "{signature}"
+            ),
+            recipient_list=[responsable.email],
+            fail_silently=True,
+        )
+    except Exception as e:
+        print(f"Erreur envoi email responsable réserve : {e}")
 
 
 def _declarer_institution_acteur_via_point(crise, institution, point, request):
@@ -3900,17 +4250,16 @@ def _notify_new_team_member(team, membre, request):
     if not membre.email:
         return
     try:
-        send_mail_env_aware(
-            request,
+        send_branded_mail_env_aware(
+            request, team.institution,
             subject=f"Vous avez été associé(e) à l'équipe {team.name}",
             message=(
                 f"Bonjour {membre.first_name},\n\n"
                 f"Vous avez été associé(e) à l'équipe « {team.name} ».\n\n"
                 "Vous pouvez consulter à tout moment la zone, les membres, les missions et les "
                 f"dossiers de votre équipe ici :\n{_vue_equipe_link(request, team, membre)}\n\n"
-                "Cordialement,\nL'équipe Assista-Crise"
+                "{signature}"
             ),
-            from_email=None,
             recipient_list=[membre.email],
             fail_silently=True,
         )
@@ -3975,6 +4324,306 @@ def _assurer_implication_impliquee(request, institution_id, crise):
         statut=StatutImplication.VALIDEE, utilisateur=request.user, actif=True,
         environment=get_active_environment(request),
     )
+
+
+def _normaliser_texte_sos(texte: str) -> str:
+    """Retire les accents et met en minuscules -- un message radio tapé vite ("URGENCE" vs
+    "urgence", "a l'aide" vs "à l'aide") ne doit pas échapper à la détection de mots-clés SOS
+    (voir _detecter_mot_cle_sos) pour une simple question de casse/accent."""
+    texte = unicodedata.normalize('NFKD', texte or '')
+    return ''.join(c for c in texte if not unicodedata.combining(c)).lower()
+
+
+# Mots-clés déclenchant une alerte SOS sur un message mesh ENTRANT -- inspiré de la détection
+# de mots-clés de Mesh-Bridge (github.com/IceNet-01/Mesh-Bridge), adapté au contexte
+# francophone d'assista-crise, demande utilisateur du 10/10. Liste volontairement conservatrice
+# (pas de simples "15"/"17"/"18" seuls, trop ambigus -- numéro de voie, heure de RDV...) : un
+# faux positif a un vrai coût (alerte envoyée aux administrateurs), mieux vaut rater un message
+# ambigu que spammer sur un détail de conversation ordinaire.
+MOTS_CLES_SOS_MESH = [
+    "sos", "mayday", "urgence", "au secours", "a l aide", "aidez moi", "aidez nous",
+    "danger de mort", "blesse grave", "blessee grave", "112",
+]
+
+
+def _detecter_mot_cle_sos(contenu: str) -> str | None:
+    """Premier mot-clé d'urgence détecté dans `contenu` (voir MOTS_CLES_SOS_MESH), ou None.
+    Recherche sur le texte normalisé (_normaliser_texte_sos) avec limites de mot (\\b) : un
+    mot-clé ne doit matcher qu'en tant que mot entier, jamais comme simple sous-chaîne d'un mot
+    plus long sans rapport (ex: "112" ne doit pas matcher dans "1125", un numéro de voie)."""
+    normalise = _normaliser_texte_sos(contenu)
+    for mot_cle in MOTS_CLES_SOS_MESH:
+        if re.search(r'\b' + re.escape(mot_cle) + r'\b', normalise):
+            return mot_cle
+    return None
+
+
+def _canal_est_dedie_urgence(canal_nom: str) -> bool:
+    """Convention communautaire Meshtastic (et reprise par certains réseaux MeshCore) : un
+    canal nommé "EMCOM" (ex: "Fr_EMCOM" chez Gaulix/mqtt.gaulix.fr, voir docstring de
+    CompagnonMeshtastic) est réservé par convention aux communications d'urgence -- signalé par
+    l'utilisateur le 10/10. TOUT message qui y arrive est donc traité comme potentiellement
+    urgent, indépendamment de son contenu."""
+    return 'emcom' in (canal_nom or '').lower()
+
+
+def _signaler_sos_mesh(
+    request, protocole, contenu, mot_cle_detecte, institution=None, canal_nom=None,
+    expediteur_identifiant=None, expediteur_nom='',
+) -> "AlerteMeshSOS":
+    """Enregistre une détection SOS (voir docstring d'AlerteMeshSOS) et notifie les
+    administrateurs assista-crise (email + DM Matrix, demande utilisateur du 10/10) -- jamais
+    les administrateurs d'une institution précise ici, contrairement à _alerter_panne_companion :
+    une urgence détectée sur le mesh doit atteindre QUELQU'UN capable d'agir même si
+    l'institution n'est pas encore identifiée (canal/contact inconnu).
+
+    Anti-rafale : la ligne est TOUJOURS créée (trace complète pour l'historique), mais pas de
+    nouvelle notification si le même expéditeur a déjà déclenché une alerte dans les dix
+    dernières minutes -- une personne en détresse répète souvent son appel, inutile de spammer
+    les administrateurs à chaque répétition du même message. Ne lève jamais d'exception : un
+    échec d'email ou de Matrix ne doit jamais faire perdre le message original qui a déclenché
+    la détection (voir les appelants, qui enveloppent déjà leur propre perform_create)."""
+    from datetime import timedelta
+    from .matrix import envoyer_dm
+
+    notification_recente = False
+    if expediteur_identifiant:
+        notification_recente = AlerteMeshSOS.objects.filter(
+            protocole=protocole, expediteur_identifiant=expediteur_identifiant,
+            date_creation__gte=timezone.now() - timedelta(minutes=10),
+        ).exists()
+
+    alerte = AlerteMeshSOS.objects.create(
+        environment=get_active_environment(request), protocole=protocole, institution=institution,
+        canal_nom=canal_nom, expediteur_identifiant=expediteur_identifiant, expediteur_nom=expediteur_nom,
+        contenu=contenu, mot_cle_detecte=mot_cle_detecte,
+    )
+    if notification_recente:
+        return alerte
+
+    sujet = f"[assista-crise] 🆘 Alerte SOS détectée sur le réseau mesh ({protocole})"
+    corps = (
+        f"Mot-clé détecté : « {mot_cle_detecte} »\n"
+        f"Canal : {canal_nom or 'message privé (DM)'}\n"
+        f"Expéditeur : {expediteur_nom or 'inconnu'} ({expediteur_identifiant or 'identifiant inconnu'})\n"
+        f"Institution : {institution.nom if institution else 'non rattachée'}\n\n"
+        f"Message :\n{contenu}\n\n"
+        "Détection automatique par mot-clé -- à vérifier humainement avant toute action, un "
+        "faux positif reste possible."
+    )
+    # `.exclude(email='')` ne filtrerait rien : User.email est chiffré (EncryptedEmailField,
+    # Fernet non déterministe) depuis le chantier de chiffrement des colonnes sensibles --
+    # comparer la colonne chiffrée à un littéral ne peut jamais matcher, il faut filtrer après
+    # déchiffrement (u.email, lu via from_db_value), pas dans la requête SQL elle-même.
+    admins = [u for u in User.objects.filter(type=UserRole.ADMINISTRATOR, is_active=True) if u.email]
+    try:
+        if admins:
+            send_mail_logged(request, sujet, corps, settings.DEFAULT_FROM_EMAIL, [u.email for u in admins])
+    except Exception:
+        logger.exception("Échec de notification email pour l'alerte SOS mesh %s.", alerte.id)
+    for u in admins:
+        try:
+            envoyer_dm(u, f"{sujet}\n\n{corps}")
+        except Exception:
+            logger.exception("Échec de notification Matrix pour l'alerte SOS mesh %s (destinataire %s).", alerte.id, u.id)
+    alerte.notification_envoyee = True
+    alerte.save(update_fields=['notification_envoyee'])
+    return alerte
+
+
+def _alerter_panne_companion(request, compagnon, en_panne: bool) -> None:
+    """Notifie un changement d'état de connexion d'un companion -- appelé seulement sur un vrai
+    changement d'état (edge-triggered, voir rapporter_etat des deux protocoles) pour ne jamais
+    spammer pendant une boucle de reconnexion prolongée (le pont réessaie toutes les
+    RECONNECT_DELAY_SECONDS indéfiniment tant que le companion reste inaccessible). `compagnon`
+    accepte indifféremment un CompagnonMeshCore ou un CompagnonMeshtastic -- les deux partagent
+    les champs utilisés ici (nom/connexion_type/institution/derniere_erreur). Inspiré du
+    watchdog de santé radio de meshcore-bot (github.com/agessaman/meshcore-bot), demande
+    utilisateur du 10/10."""
+    from .matrix import envoyer_dm
+
+    if en_panne:
+        logger.error(
+            "Companion %s « %s » hors ligne : %s", compagnon.connexion_type, compagnon.nom,
+            compagnon.derniere_erreur or "raison inconnue",
+        )
+        sujet = f"[assista-crise] Companion « {compagnon.nom} » hors ligne"
+        corps = (
+            f"Le companion « {compagnon.nom} » ({compagnon.connexion_type}) ne répond plus.\n"
+            f"Raison rapportée : {compagnon.derniere_erreur or 'inconnue'}."
+        )
+    else:
+        logger.info("Companion %s « %s » de nouveau connecté.", compagnon.connexion_type, compagnon.nom)
+        sujet = f"[assista-crise] Companion « {compagnon.nom} » de nouveau connecté"
+        corps = f"Le companion « {compagnon.nom} » ({compagnon.connexion_type}) est de nouveau connecté."
+
+    # "Le cas échéant" (demande utilisateur du 10/10) : rien de plus à faire si le companion
+    # n'est rattaché à aucune institution (phase de test, voir docstring de CompagnonMeshCore) --
+    # l'alerte ops ci-dessus (logger.error/info, qui déclenche mail_admins/Matrix ops en cas de
+    # panne, voir LOGGING dans config/settings.py) reste la seule notification dans ce cas.
+    if compagnon.institution_id is None:
+        return
+    # Filtrage Python, pas SQL -- voir le commentaire équivalent dans _signaler_sos_mesh
+    # (User.email est chiffré, `.exclude(email='')` ne filtrerait rien).
+    destinataires = [
+        u for u in User.objects.filter(institution=compagnon.institution, type__in=INSTITUTIONAL_TYPES, is_active=True)
+        if u.email
+    ]
+    emails = {u.email for u in destinataires}
+    if compagnon.institution.email:
+        emails.add(compagnon.institution.email)
+    try:
+        if emails:
+            send_mail_logged(request, sujet, corps, settings.DEFAULT_FROM_EMAIL, list(emails))
+    except Exception:
+        logger.exception("Échec de notification email de panne companion %s.", compagnon.id)
+    for u in destinataires:
+        try:
+            envoyer_dm(u, f"{sujet}\n\n{corps}")
+        except Exception:
+            logger.exception("Échec de notification Matrix de panne companion %s (destinataire %s).", compagnon.id, u.id)
+
+
+# Débit maximal d'envoi SORTANT par expéditeur humain et par cible (canal, ou contact pour un
+# DM) -- protège le temps d'antenne LoRa partagé contre un envoi en rafale depuis l'interface,
+# inspiré du débit appliqué par meshcore-bot (github.com/agessaman/meshcore-bot) à ses propres
+# réponses automatiques. Ne s'applique jamais à un message ENTRANT ni à un envoi fait par le
+# compte de service du pont (expediteur=None) -- voir _verifier_debit_mesh_sortant.
+MESH_DEBIT_FENETRE_SECONDES = 60
+MESH_DEBIT_MAX_PAR_FENETRE = 5
+
+
+def _verifier_debit_mesh_sortant(model_cls, expediteur, environment, **filtres_cible) -> None:
+    """Lève une ValidationError DRF si `expediteur` a déjà créé MESH_DEBIT_MAX_PAR_FENETRE
+    messages SORTANT sur cette cible dans les MESH_DEBIT_FENETRE_SECONDES dernières secondes --
+    voir docstring de MESH_DEBIT_FENETRE_SECONDES. `expediteur=None` (compte de service/non
+    authentifié) n'est jamais limité : seul un humain composant depuis l'interface peut
+    saturer la file de cette façon."""
+    if expediteur is None:
+        return
+    depuis = timezone.now() - datetime.timedelta(seconds=MESH_DEBIT_FENETRE_SECONDES)
+    nombre = model_cls.objects.filter(
+        expediteur=expediteur, direction=DirectionMessageMesh.SORTANT,
+        date_creation__gte=depuis, environment=environment, **filtres_cible,
+    ).count()
+    if nombre >= MESH_DEBIT_MAX_PAR_FENETRE:
+        raise ValidationError(
+            f"Trop de messages envoyés sur cette cible en moins d'une minute (max "
+            f"{MESH_DEBIT_MAX_PAR_FENETRE}) -- la portée radio est partagée, merci de patienter "
+            "avant d'en renvoyer."
+        )
+
+
+def _analyser_cle_pubkey(pubkey_hex: str) -> str | None:
+    """Heuristique de détection d'une clé publique anormalement non-aléatoire (génération
+    ratée, clé de test/placeholder restée en place, firmware buggé) -- inspirée de la
+    fonctionnalité "low-entropy key" de MeshMonitor (github.com/Yeraze/meshmonitor, demande
+    utilisateur du 10/10), adaptée aux clés MeshCore (`ContactMeshCore.pubkey_hex`, 32 octets
+    habituellement). Ne détecte PAS un clonage de clé entre deux appareils, voir
+    _detecter_cles_dupliquees pour ça -- seulement une clé qui, à elle seule, n'a
+    statistiquement pas pu être générée aléatoirement.
+
+    Purement passive : aucune requête mesh, analyse de données déjà synchronisées. Retourne
+    une description du problème si suspect, sinon None -- heuristique, pas une preuve
+    cryptographique : un faux positif reste possible (une vraie clé aléatoire peut par pure
+    chance présenter un motif), à traiter comme une piste à vérifier, pas un verdict
+    automatique."""
+    try:
+        valeur = bytes.fromhex(pubkey_hex)
+    except (ValueError, TypeError):
+        return None
+    if len(valeur) < 8:
+        return None
+    if len(set(valeur)) == 1:
+        return f"Clé constituée d'un seul octet répété (0x{valeur[0]:02x})."
+    pas = (valeur[1] - valeur[0]) % 256
+    if pas != 0 and all((valeur[i] - valeur[i - 1]) % 256 == pas for i in range(1, len(valeur))):
+        return "Clé constituée d'une séquence arithmétique régulière (ex: 00,01,02…) -- pas aléatoire."
+    distincts = len(set(valeur))
+    if distincts <= max(4, len(valeur) // 8):
+        return f"Seulement {distincts} octet(s) distinct(s) sur {len(valeur)} -- entropie anormalement basse."
+    compteur = Counter(valeur)
+    entropie = -sum((n / len(valeur)) * math.log2(n / len(valeur)) for n in compteur.values())
+    if entropie < 3.5:
+        return f"Entropie de {entropie:.1f} bit/octet (clé aléatoire attendue proche de 8) -- motif suspect."
+    return None
+
+
+def _detecter_cles_dupliquees(contacts) -> dict:
+    """Même pubkey_hex vu sous des noms différents -- signe possible de clonage/usurpation
+    d'identité (deux appareils physiques distincts ne devraient jamais partager la même paire
+    de clés MeshCore). Nécessite plusieurs companions actifs pour produire un vrai signal (voir
+    docstring de CompagnonMeshCore : un seul companion actif en phase de test actuellement --
+    cette fonction ne trouvera donc rien tant qu'un second n'est pas déployé, c'est attendu et
+    pas un bug)."""
+    noms_par_pubkey: dict = {}
+    for contact in contacts:
+        noms_par_pubkey.setdefault(contact.pubkey_hex, set()).add(contact.nom or '(sans nom)')
+    return {pubkey: noms for pubkey, noms in noms_par_pubkey.items() if len(noms) > 1}
+
+
+# Marges de repli prudentes sous la limite réelle de charge utile de chaque firmware -- aucune
+# des deux bibliothèques/ponts ne tronque ni ne découpe `contenu` de son côté (voir
+# boucle_envoi_canaux, meshtastic-bridge/bridge.py, et send_chan_msg, meshcore-bridge/bridge.py/
+# lib meshcore_py) : un message trop long est silencieusement rejeté ou corrompu par le
+# firmware si on ne le découpe pas nous-mêmes AVANT l'envoi.
+# Meshtastic : ~200-228 octets de charge utile TEXT_MESSAGE_APP selon le preset radio/la
+# version -- 200 est la valeur de repli déjà utilisée par les clients officiels.
+MESHTASTIC_MAX_OCTETS = 200
+# MeshCore : paquet LoRa nettement plus contraint que Meshtastic (demande utilisateur du
+# 10/10 : "encore plus limité") -- pas de constante publiée côté lib meshcore_py (elle envoie
+# le texte tel quel sans aucune validation de taille, voir MessagingCommands.send_chan_msg),
+# 130 est une marge prudente sous le payload utile réel d'un message de canal (chiffré, donc
+# avec l'overhead du MAC/hash de canal en plus de l'en-tête) -- à resserrer si un dépassement
+# constaté sur le terrain montre qu'il faut descendre encore.
+MESHCORE_MAX_OCTETS = 130
+
+
+def _prefixe_expediteur_mesh_sortant(user, institution=None) -> str:
+    """Nom à préfixer dans le TEXTE envoyé sur le réseau mesh lui-même (pas l'affichage web,
+    voir _resoudre_expediteur_mesh ci-dessus) -- sans lui, le réseau mesh n'affiche QUE
+    l'identité du compagnon radio (le boîtier physique, ex: "Mesh"), identique pour tous les
+    membres qui écrivent depuis l'app, puisque c'est LUI qui relaie le message, jamais la
+    personne qui l'a tapé (demande utilisateur du 10/10). `institution` : repli si le message
+    est émis par la plateforme pour son compte plutôt que par une personne précise (ex: `user`
+    None/anonyme) -- jamais la mention technique "Mesh" seule."""
+    if user is not None and getattr(user, 'is_authenticated', False):
+        return f"{user.first_name} {user.last_name}".strip() or user.email
+    if institution is not None:
+        return institution.nom
+    return "Assista-Crise"
+
+
+def _decouper_message_mesh(texte: str, max_octets: int) -> list:
+    """Découpe `texte` (préfixe expéditeur déjà inclus) en plusieurs messages si besoin, aucun
+    ne dépassant `max_octets` une fois encodé en UTF-8 -- jamais de coupe au milieu d'un
+    caractère multioctet (accents) ni, si possible, au milieu d'un mot. Un seul morceau renvoyé
+    sans suffixe de pagination si le texte tient déjà en un message ; plusieurs morceaux
+    reçoivent un suffixe " (i/N)" (demande utilisateur du 10/10 : "quitte à envoyer le message
+    en plusieurs fois"). Utilisée pour Meshtastic ET MeshCore -- seule la limite diffère (voir
+    MESHTASTIC_MAX_OCTETS/MESHCORE_MAX_OCTETS)."""
+    texte = texte.strip()
+    if len(texte.encode('utf-8')) <= max_octets:
+        return [texte]
+
+    morceaux = []
+    reste = texte
+    while reste:
+        # Marge fixe pour le suffixe " (i/N)" à ajouter après coup, une fois N connu -- large
+        # au-delà de ce qu'un message réel produira de morceaux.
+        budget = max_octets - 10
+        morceau = reste
+        while len(morceau.encode('utf-8')) > budget:
+            morceau = morceau[:-1]
+        if len(morceau) < len(reste):
+            coupe = morceau.rfind(' ')
+            if coupe > 0:
+                morceau = morceau[:coupe]
+        morceaux.append(morceau)
+        reste = reste[len(morceau):].lstrip()
+
+    total = len(morceaux)
+    return [f"{m} ({i}/{total})" for i, m in enumerate(morceaux, start=1)]
 
 
 def _nom_canal_meshtastic_equipe(team) -> str:
@@ -4107,6 +4756,25 @@ def _institutions_acteurs_liees(team):
         implications_crises__type_implication=TypeImplication.ACTEUR,
         implications_crises__statut=StatutImplication.VALIDEE,
     ).exclude(pk=team.institution_id).distinct()
+
+
+def _verifier_onboarding_termine(user):
+    """Un compte Autorité locale est activé (is_active=True, JWT délivré) par
+    AccountActivationView AVANT le rattachement effectif à son institution, qui se fait dans une
+    requête séparée et plus tardive (UserViewSet.confirmer_institution/creer_mon_institution,
+    voir institution_attachment.attach_user_with_role qui vide ensuite pending_institution_name)
+    -- IsInstitutionalActor ne vérifie que le type de compte, pas ce rattachement, donc un
+    utilisateur peut se glisser dans cette fenêtre (incident Thierry Larrivière, 15/10 : crise
+    déclarée 43s avant la fin de son rattachement, checklist PCS silencieusement non générée par
+    le garde existant dans CrisisViewSet.perform_create). Même condition que
+    UserSerializer.get_needs_institution_setup, mais exploitée ici comme un vrai garde-fou
+    bloquant plutôt qu'un simple indicateur d'affichage côté frontend."""
+    if user.type == UserRole.LOCAL_AUTHORITY and user.pending_institution_name:
+        raise ValidationError({
+            "onboarding": "Votre inscription n'est pas encore terminée : rattachez d'abord votre "
+                          "compte à votre institution (page « Finalisez votre inscription ») "
+                          "avant de déclarer une crise.",
+        })
 
 
 def _resolve_institution_or_400(request):
@@ -4337,6 +5005,406 @@ class ZoneViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         instance.save(update_fields=['actif'])
 
 
+class ConfigurationAlerteSismiqueViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Réglages de diffusion automatique d'alertes sismiques pour une institution -- voir
+    docstring du modèle et core/management/commands/verifier_alertes_sismiques.py. Un seul
+    enregistrement par institution (OneToOneField) : le frontend liste (toujours 0 ou 1
+    résultat pour une institution donnée), crée au premier réglage, PATCH ensuite."""
+
+    queryset = ConfigurationAlerteSismique.objects.select_related('institution').all()
+    serializer_class = ConfigurationAlerteSismiqueSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        institution_id = self.request.query_params.get('institution')
+        if institution_id:
+            qs = qs.filter(institution_id=institution_id)
+        if get_effective_role(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        mes_institutions = ContactInstitution.objects.filter(
+            utilisateur=self.request.user, actif=True
+        ).values_list('institution_id', flat=True)
+        return qs.filter(institution_id__in=mes_institutions)
+
+    def perform_create(self, serializer):
+        institution_id = self.request.data.get('institution')
+        institution = Institution.objects.filter(pk=institution_id).first() if institution_id else None
+        if institution is None:
+            institution = _resolve_institution_or_400(self.request)
+        if ConfigurationAlerteSismique.objects.filter(institution=institution).exists():
+            raise ValidationError("Une configuration d'alerte sismique existe déjà pour cette institution.")
+        serializer.save(institution=institution, environment=get_active_environment(self.request))
+
+
+class InterlocuteurAlertePCSViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Annuaire PARTAGÉ des interlocuteurs PCS/PICS -- voir docstring du modèle. PAS le patron
+    `ConfigurationAlerteSismiqueViewSet` (FK unique vers une institution) : un même contact
+    (ex: le SIDPC d'une préfecture) peut être rattaché par plusieurs institutions à la fois via
+    `rattacher`/`detacher`, jamais par un PATCH direct sur `institutions` (voir leurs
+    docstrings). Recherche par `?q=` sur `organisme` (jamais `nom`, chiffré donc non indexable
+    pour une recherche floue -- même limite déjà actée pour Request/Offer), bornée par défaut
+    au département de l'institution appelante pour qu'une commune ne tombe jamais par recherche
+    sur un contact purement local d'une commune d'un autre département."""
+
+    queryset = InterlocuteurAlertePCS.objects.select_related('utilisateur').prefetch_related('institutions').all()
+    serializer_class = InterlocuteurAlertePCSSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy', 'rattacher', 'detacher'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        institution_id = self.request.query_params.get('institution')
+        if institution_id:
+            qs = qs.filter(institutions__id=institution_id)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        query = request.query_params.get('q', '').strip()
+        if not query:
+            return super().list(request, *args, **kwargs)
+
+        queryset = self.filter_queryset(self.get_queryset()).filter(organisme__icontains=query)
+        if get_effective_role(request) != UserRole.ADMINISTRATOR:
+            try:
+                institution = _resolve_institution_or_400(request)
+            except ValidationError:
+                institution = None
+            if institution is not None and institution.departement_code:
+                queryset = queryset.filter(departement_code=institution.departement_code)
+
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page if page is not None else queryset, many=True)
+        return (
+            self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
+        )
+
+    def perform_create(self, serializer):
+        institution_id = self.request.data.get('institution')
+        institution = Institution.objects.filter(pk=institution_id).first() if institution_id else None
+        if institution is None:
+            institution = _resolve_institution_or_400(self.request)
+        # Annuaire PCS/PICS -- réservé aux collectivités (même critère que ZoneViewSet/
+        # PlanViewSet), pas aux services de l'État/associations qui ne déclarent jamais de crise.
+        if get_effective_role(self.request) != UserRole.ADMINISTRATOR and not _institution_est_autorite_locale(institution):
+            raise PermissionDenied(
+                "L'annuaire d'alerte PCS/PICS est réservé aux mairies et intercommunalités."
+            )
+        interlocuteur = serializer.save(
+            departement_code=institution.departement_code, environment=get_active_environment(self.request),
+        )
+        interlocuteur.institutions.add(institution)
+
+    @action(detail=True, methods=['post'])
+    def rattacher(self, request, pk=None):
+        """Rattache l'institution appelante à un interlocuteur EXISTANT (trouvé via `?q=`) --
+        jamais de doublon créé. Voir docstring de classe."""
+        interlocuteur = self.get_object()
+        institution = _resolve_institution_or_400(request)
+        interlocuteur.institutions.add(institution)
+        return Response(self.get_serializer(interlocuteur).data)
+
+    @action(detail=True, methods=['post'])
+    def detacher(self, request, pk=None):
+        """Retire SEULEMENT l'institution appelante -- jamais le rattachement d'une autre
+        institution. L'interlocuteur reste en base même si `institutions` devient vide (une
+        autre commune pourra le retrouver/rattacher plus tard)."""
+        interlocuteur = self.get_object()
+        institution = _resolve_institution_or_400(request)
+        interlocuteur.institutions.remove(institution)
+        return Response(self.get_serializer(interlocuteur).data)
+
+
+class RisqueMajeurTypeViewSet(TagLikeViewSetMixin, viewsets.ModelViewSet):
+    """Catalogue partagé des types de risques majeurs -- même patron que CompetenceViewSet, mais
+    création réservée aux acteurs institutionnels (contrairement à Competence/MaterielCatalogue,
+    jamais consommé depuis un formulaire public) : une commune peut déclarer un risque jamais vu
+    ailleurs (ex: "Incendie de forêt") sans attendre une mise à jour de l'app -- voir docstring
+    du modèle, confirmé nécessaire en croisant 3 vrais PCS le 12/10."""
+
+    queryset = RisqueMajeurType.objects.all()
+    serializer_class = RisqueMajeurTypeSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+
+class RisqueCommunalViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Ce qu'une institution déclare à propos d'un risque majeur -- même patron que
+    ConfigurationAlerteSismiqueViewSet, mais plusieurs déclarations par institution (une par
+    RisqueMajeurType, pas un seul réglage)."""
+
+    queryset = RisqueCommunal.objects.select_related('institution', 'risque_type').all()
+    serializer_class = RisqueCommunalSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        institution_id = self.request.query_params.get('institution')
+        if institution_id:
+            qs = qs.filter(institution_id=institution_id)
+        if get_effective_role(self.request) == UserRole.ADMINISTRATOR:
+            return qs
+        mes_institutions = ContactInstitution.objects.filter(
+            utilisateur=self.request.user, actif=True
+        ).values_list('institution_id', flat=True)
+        return qs.filter(institution_id__in=mes_institutions)
+
+    def perform_create(self, serializer):
+        # _resolve_institution_or_400 vérifie déjà que l'institution explicitement choisie dans
+        # le payload appartient bien à l'appelant (ou qu'il est administrateur) -- un lookup
+        # Institution.objects.filter(pk=...) non vérifié en amont aurait permis à n'importe quel
+        # acteur institutionnel de déclarer un risque pour une commune qui n'est pas la sienne.
+        institution = _resolve_institution_or_400(self.request)
+        serializer.save(institution=institution, environment=get_active_environment(self.request))
+
+    @action(detail=False, methods=["get"], url_path="suggestions-georisques")
+    def suggestions_georisques(self, request):
+        """Pistes de risques à déclarer pour la commune d'une institution, depuis l'API
+        publique Géorisques (même source/cache que la Vue Ma Collectivité, voir
+        geo_lookup.commune_risques) -- une simple liste de suggestions, jamais appliquée
+        automatiquement : chaque suggestion est acceptée ou ignorée une à une côté front
+        (RisqueMajeurType.create, qui dédoublonne par nom exact, puis RisqueCommunal.create)."""
+        institution_id = request.query_params.get('institution')
+        institution = None
+        if institution_id:
+            qs = Institution.objects.filter(pk=institution_id)
+            if get_effective_role(request) != UserRole.ADMINISTRATOR:
+                mes_institutions = ContactInstitution.objects.filter(
+                    utilisateur=request.user, actif=True
+                ).values_list('institution_id', flat=True)
+                qs = qs.filter(id__in=mes_institutions)
+            institution = qs.first()
+        if institution is None:
+            contact = ContactInstitution.objects.filter(
+                utilisateur=request.user, actif=True
+            ).select_related("institution").first()
+            institution = contact.institution if contact else None
+        if institution is None:
+            return Response(
+                {"error": "Aucune institution associée à votre compte."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not institution.commune_code:
+            return Response(
+                {"error": "Aucune commune associée à cette institution."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        force = request.query_params.get('force') == '1'
+        risques_gaspar = commune_risques(institution.commune_code, force=force)
+        deja_declares = {
+            nom.strip().lower() for nom in
+            RisqueCommunal.objects.filter(institution=institution).values_list('risque_type__nom', flat=True)
+        }
+
+        suggestions = []
+        vus = set()
+        for r in risques_gaspar:
+            libelle = (r.get("libelle_risque_long") or "").strip()
+            num_risque = r.get("num_risque") or ""
+            # La nomenclature GASPAR mêle risques de premier niveau (ex: "11" Inondation) et
+            # leurs sous-types détaillés (ex: "112" Par une crue à débordement lent de cours
+            # d'eau) sous le même num_risque préfixé -- vérifié en direct sur une commune réelle
+            # (SDIS 38) : 16 entrées pour seulement 7 risques de premier niveau. On ne garde que
+            # le premier niveau (code à 2 chiffres), seul comparable à notre catalogue
+            # RisqueMajeurType (ex: "Inondation", pas "Par ruissellement et coulée de boue").
+            if len(num_risque) > 2 or not libelle or libelle.lower() in vus:
+                continue
+            vus.add(libelle.lower())
+            suggestions.append({
+                "num_risque": num_risque,
+                "libelle": libelle,
+                "deja_declare": libelle.lower() in deja_declares,
+            })
+
+        return Response({
+            "suggestions": suggestions,
+            "date_maj": commune_risques_date_maj(institution.commune_code),
+        })
+
+
+class TypeVulnerabiliteViewSet(TagLikeViewSetMixin, viewsets.ModelViewSet):
+    """Catalogue partagé des catégories de vulnérabilité (voir TypeVulnerabilite.__doc__) --
+    même patron que RisqueMajeurTypeViewSet : extensible par tout acteur institutionnel, un item
+    non prévu peut être ajouté à la volée, dédoublonné par nom via TagLikeViewSetMixin."""
+
+    queryset = TypeVulnerabilite.objects.all()
+    serializer_class = TypeVulnerabiliteSerializer
+
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsInstitutionalActor()]
+        return [permissions.IsAuthenticated()]
+
+
+class PersonneVulnerableViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Registre communal des personnes vulnérables (voir PersonneVulnerable.__doc__) -- JAMAIS
+    AllowAny (contrairement à HabitationViewSet) : donnée bien plus sensible, aucune lecture
+    publique. Tout l'accès (lecture comme écriture) passe par core/vulnerabilites.py : réservé à
+    la RCSC/aux RESPONSABLE désignés de la mairie compétente sur la commune, ou à une institution
+    tierce avec une délégation de compétence active."""
+
+    queryset = PersonneVulnerable.objects.select_related(
+        'institution_declarante', 'zone', 'cree_par'
+    ).prefetch_related('categories').all()
+    serializer_class = PersonneVulnerableSerializer
+    filterset_fields = ['commune_code', 'zone', 'actif']
+
+    def get_permissions(self):
+        return [IsInstitutionalActor()]
+
+    def get_queryset(self):
+        from .vulnerabilites import filter_personnes_vulnerables_queryset
+        qs = super().get_queryset()
+        if self.action == 'list':
+            qs = _filter_actif(self.request, qs)
+        return filter_personnes_vulnerables_queryset(self.request, qs)
+
+    def _refuser_si_non_accede(self, commune_code):
+        from .vulnerabilites import institution_accede_commune
+        if not institution_accede_commune(self.request, commune_code):
+            raise PermissionDenied(
+                "Vous n'avez pas accès au registre des personnes vulnérables de cette commune "
+                "(réservé à la RCSC/au RESPONSABLE de la mairie, ou à une délégation de "
+                "compétence active)."
+            )
+
+    def _institution_declarante_or_400(self):
+        # Volontairement `request.user.institution` (FK direct, le rattachement AUT_LOCALE/
+        # "Vue Ma Collectivité") et PAS _resolve_institution_or_400 (basé sur ContactInstitution,
+        # un mécanisme distinct et non synchronisé) -- c'est cette même source que
+        # core/vulnerabilites.py utilise pour TOUT le contrôle d'accès (institution_accede_
+        # commune), institution déclarante et institution vérifiée pour l'accès doivent être
+        # la même, sous peine d'enregistrer une fiche pour une institution différente de celle
+        # qui vient d'être validée.
+        institution = getattr(self.request.user, 'institution', None)
+        if institution is None:
+            raise ValidationError(
+                {"institution": "Aucune institution rattachée à votre compte."}
+            )
+        return institution
+
+    def perform_create(self, serializer):
+        institution = self._institution_declarante_or_400()
+        commune_code = serializer.validated_data.get('commune_code') or institution.commune_code
+        self._refuser_si_non_accede(commune_code)
+        personne = serializer.save(
+            environment=get_active_environment(self.request),
+            institution_declarante=institution,
+            commune_code=commune_code,
+            cree_par=self.request.user,
+        )
+        audit_log(
+            request=self.request, action_code="CREATION", objet_type="PersonneVulnerable",
+            objet_id=personne.id, commentaire="Recensement personne vulnérable",
+        )
+
+    def perform_update(self, serializer):
+        self._refuser_si_non_accede(serializer.instance.commune_code)
+        serializer.save()
+        audit_log(
+            request=self.request, action_code="MODIFICATION", objet_type="PersonneVulnerable",
+            objet_id=serializer.instance.id, commentaire="Modification fiche personne vulnérable",
+        )
+
+    def perform_destroy(self, instance):
+        # Radiation = désactivation, jamais suppression physique d'une donnée sensible (même
+        # patron que RisqueCommunal.actif).
+        self._refuser_si_non_accede(instance.commune_code)
+        instance.actif = False
+        instance.save(update_fields=['actif'])
+        audit_log(
+            request=self.request, action_code="SUPPRESSION", objet_type="PersonneVulnerable",
+            objet_id=instance.id, commentaire="Radiation personne vulnérable",
+        )
+
+
+class NotificationAlertePCSViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Checklist/suivi d'alerte PCS/PICS -- lecture + deux actions, jamais de création/
+    modification directe (les lignes sont créées par core.alertes_pcs.preparer_checklist_pcs,
+    voir CrisisViewSet.perform_create)."""
+
+    queryset = NotificationAlertePCS.objects.select_related('interlocuteur', 'crise', 'confirme_par').all()
+    serializer_class = NotificationAlertePCSSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        crise_id = self.request.query_params.get('crise')
+        if crise_id:
+            qs = qs.filter(crise_id=crise_id)
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def confirmer(self, request, pk=None):
+        """La mairie coche "prévenu" à la main -- typiquement après un appel téléphonique
+        (canal TELEPHONE/SMS/API_TIERCE, ou un contact email/Matrix finalement relancé par
+        téléphone). Distinct de CONFIRME_PAR_CONTACT (voir AccuserReceptionAlertePCSPublicView)."""
+        notification = self.get_object()
+        notification.statut = StatutNotificationPCS.CONFIRME_MANUEL
+        notification.confirme_par = request.user
+        notification.date_confirmation = timezone.now()
+        notification.save(update_fields=['statut', 'confirme_par', 'date_confirmation'])
+        return Response(self.get_serializer(notification).data)
+
+    @action(detail=False, methods=['post'])
+    def envoyer_lot(self, request):
+        """Envoi explicite (email/Matrix), déclenché par l'utilisateur après relecture --
+        jamais automatique à la déclaration de la crise (voir core.alertes_pcs). Le message est
+        celui fourni ici, choisi/modifié "pour cette fois uniquement" -- jamais persisté comme
+        nouveau modèle par défaut ailleurs."""
+        crise_id = request.data.get('crise')
+        notification_ids = request.data.get('notification_ids') or []
+        message = (request.data.get('message') or '').strip()
+        if not crise_id or not notification_ids or not message:
+            return Response(
+                {"detail": "crise, notification_ids et message sont requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        notifications = list(self.get_queryset().filter(crise_id=crise_id, id__in=notification_ids))
+        traitees = envoyer_notifications(request, notifications, message)
+        return Response({
+            "traitees": traitees,
+            "notifications": self.get_serializer(notifications, many=True).data,
+        })
+
+
+class SecteurRechercheViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
+    """Secteurs de recherche (méthode SAR) d'une RecherchePersonne -- voir docstring du modèle.
+    Visibilité alignée sur RecherchePersonneViewSet.list/retrieve (institutionnel uniquement) :
+    les assignations d'équipe par secteur ne doivent pas être visibles par un simple
+    déposant."""
+
+    queryset = SecteurRecherche.objects.select_related('equipe', 'recherche_personne').all()
+    serializer_class = SecteurRechercheSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        recherche_id = self.request.query_params.get('recherche_personne')
+        if recherche_id:
+            qs = qs.filter(recherche_personne_id=recherche_id)
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(environment=get_active_environment(self.request))
+
+
 def _notifier_activation_plan_destinataire(request, user, titre, message, crise):
     Notification.objects.create(
         utilisateur=user, titre=titre, message=message, crise=crise, environment=crise.environment,
@@ -4543,7 +5611,12 @@ class HabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         qs = super().get_queryset()
         recherche = self.request.query_params.get('recherche')
         if recherche:
-            qs = qs.filter(adresse__icontains=recherche)
+            # adresse chiffrée (voir core/crypto_fields.py) -- icontains impossible sur un
+            # ciphertext, filtrage côté Python après déchiffrement (décision utilisateur du
+            # 2026-10-06, acceptable au volume actuel).
+            recherche_lower = recherche.lower()
+            ids = [h.id for h in qs if recherche_lower in (h.adresse or '').lower()]
+            qs = qs.filter(id__in=ids)
         est_admin = self.request.user.is_authenticated and get_effective_role(self.request) == UserRole.ADMINISTRATOR
         if self.action in ('list', 'retrieve') and not est_admin:
             # Le module est désactivé par défaut (voir ModuleDegatsCrise.__doc__) : une
@@ -4820,7 +5893,9 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
         utilisateur = self.request.user if self.request.user.is_authenticated else None
         statut_existant = RattachementHabitation.objects.filter(
             habitation=serializer.validated_data.get('habitation'),
-            email_demandeur__iexact=email,
+            # email_demandeur chiffré (voir core/crypto_fields.py) -- recherche exacte par
+            # index aveugle.
+            email_demandeur_bidx=blind_index(email),
             type_lien=serializer.validated_data.get('type_lien'),
             statut=StatutRattachementHabitation.EN_ATTENTE,
         ).exists()
@@ -4851,10 +5926,18 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
             rattachement.motif_refus = request.data.get('motif_refus') or None
         rattachement.save(update_fields=['statut', 'traite_par', 'date_traitement', 'motif_refus'])
 
+        # L'institution qui TRAITE ce rattachement (voir institution_accede_commune ci-dessus,
+        # qui a déjà vérifié que request.user.institution a bien les droits -- direct ou par
+        # délégation -- sur cette commune) : jamais spéculatif, c'est la même institution que
+        # le contrôle d'accès vient de valider.
+        institution = getattr(request.user, 'institution', None)
+
         if accepter:
             utilisateur = rattachement.utilisateur
             if utilisateur is None:
-                utilisateur = User.objects.filter(email__iexact=rattachement.email_demandeur).first()
+                # Compare directement les deux index aveugles déjà calculés (même clé HMAC,
+                # voir core/crypto_fields.py) -- évite de recalculer celui de email_demandeur.
+                utilisateur = User.objects.filter(email_bidx=rattachement.email_demandeur_bidx).first()
             if utilisateur is None:
                 nom_parts = (rattachement.nom_demandeur or '').split(' ', 1)
                 utilisateur = User.objects.create_user(
@@ -4882,17 +5965,16 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
                 request, utilisateur, "magic-login", next_url=f"/habitation-suivi/{rattachement.habitation.id}"
             )
             try:
-                send_mail_env_aware(
-                    request,
+                send_branded_mail_env_aware(
+                    request, institution,
                     subject="Votre rattachement à une habitation a été accepté",
                     message=(
                         f"Bonjour {rattachement.nom_demandeur},\n\n"
                         f"Votre demande de rattachement ({rattachement.get_type_lien_display()}) à "
                         f"l'habitation « {rattachement.habitation.adresse} » a été acceptée.\n\n"
                         f"Vous pouvez suivre son état et échanger avec le référent en charge du dossier ici :\n{suivi_link}\n\n"
-                        "Cordialement,\nL'équipe Assista-Crise"
+                        "{signature}"
                     ),
-                    from_email=None,
                     recipient_list=[rattachement.email_demandeur],
                     fail_silently=True,
                 )
@@ -4900,17 +5982,16 @@ class RattachementHabitationViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
                 pass
         else:
             try:
-                send_mail_env_aware(
-                    request,
+                send_branded_mail_env_aware(
+                    request, institution,
                     subject="Votre demande de rattachement n'a pas été acceptée",
                     message=(
                         f"Bonjour {rattachement.nom_demandeur},\n\n"
                         f"Votre demande de rattachement ({rattachement.get_type_lien_display()}) à "
                         f"l'habitation « {rattachement.habitation.adresse} » n'a pas été acceptée."
                         + (f"\n\nMotif : {rattachement.motif_refus}" if rattachement.motif_refus else "")
-                        + "\n\nCordialement,\nL'équipe Assista-Crise"
+                        + "\n\n{signature}"
                     ),
-                    from_email=None,
                     recipient_list=[rattachement.email_demandeur],
                     fail_silently=True,
                 )
@@ -4996,7 +6077,8 @@ class PlanViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     zones déjà existants, activable en un geste sur une crise réelle (voir `activer`)."""
 
     queryset = Plan.objects.select_related('institution').prefetch_related(
-        'zones', 'equipes', 'points'
+        'zones', 'equipes', 'points',
+        'risques__risque_type', 'contacts_internes__utilisateur', 'interlocuteurs',
     ).all()
     serializer_class = PlanSerializer
 
@@ -5203,7 +6285,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             'rattacher_equipe', 'detacher_equipe',
             'definir_statut_ressource', 'reactiver', 'vue_mairie', 'equipes_institution', 'institutions_liees',
             'ressources_mobilisees', 'assigner_crise', 'provisionner_canal_meshcore',
-            'provisionner_canal_meshtastic', 'provisionner_salon_matrix',
+            'provisionner_canal_meshtastic', 'provisionner_salon_matrix', 'designer_rcsc',
         ):
             return [IsInstitutionalActor()]
         return [permissions.IsAuthenticated()]
@@ -5238,6 +6320,29 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
             objet_type="Team",
             objet_id=team.id,
             commentaire=f"Réactivation équipe : {team.name}",
+        )
+        return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=["post"], url_path="designer-rcsc", permission_classes=[IsInstitutionalActor])
+    def designer_rcsc(self, request, pk=None):
+        """Bascule est_equipe_rcsc -- réservé à l'autorité locale de l'institution de l'équipe
+        (ou ADMIN) : désigner sa RCSC est une décision structurante (elle conditionne l'accès au
+        registre des personnes vulnérables, voir core/vulnerabilites.py), pas une simple édition
+        d'équipe ouverte à tout acteur institutionnel."""
+        team = self.get_object()
+        role = get_effective_role(request)
+        if role != UserRole.ADMINISTRATOR:
+            institution = getattr(request.user, 'institution', None)
+            if not (role == UserRole.LOCAL_AUTHORITY and institution is not None and institution.id == team.institution_id):
+                raise PermissionDenied("Seule l'autorité locale de cette institution peut désigner sa RCSC.")
+        team.est_equipe_rcsc = not team.est_equipe_rcsc
+        team.save(update_fields=['est_equipe_rcsc'])
+        audit_log(
+            request=request,
+            action_code="MODIFICATION",
+            objet_type="Team",
+            objet_id=team.id,
+            commentaire=f"RCSC {'désignée' if team.est_equipe_rcsc else 'retirée'} : {team.name}",
         )
         return Response(TeamSerializer(team, context=self.get_serializer_context()).data)
 
@@ -5644,8 +6749,14 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         l'ajoute directement à l'équipe, et lui donne les droits collectivité locale sur la
         plateforme — quel que soit le rôle FONCTIONNEL choisi (RoleOperationnel), qui ne décrit
         que sa place dans l'équipe, pas ses permissions applicatives. Si un compte existe déjà
-        pour cet email, son `type` n'est jamais rétrogradé ni changé : seul le rattachement à
-        l'institution/l'équipe est ajouté."""
+        pour cet email et qu'il s'agit d'un simple utilisateur, il est promu AUT_LOCALE (même
+        logique que resolve_or_invite_responsable pour REGULATEUR) : un élu ou un agent peut
+        très bien s'être inscrit avec son adresse personnelle (toutes les mairies n'ont pas les
+        moyens de payer des boîtes pro à leurs élus -- demande utilisateur du 2026-10-08), la
+        validation de domaine institutionnel n'a alors plus lieu d'être puisque c'est
+        l'institution elle-même, via un acteur déjà rattaché, qui vouche pour cette personne.
+        Jamais de RÉTROGRADATION en revanche : un compte déjà ADMIN/SECOURS/AUT_LOCALE/
+        REGULATEUR garde son type tel quel."""
         team = self.get_object()
         if team.institution is None:
             return Response(
@@ -5686,7 +6797,7 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         if team.institution_delegataire_id and _appartient_a_institution(request, team.institution_delegataire):
             target_institution = team.institution_delegataire
 
-        user = User.objects.filter(email__iexact=email).first()
+        user = User.objects.filter(email_bidx=blind_index(email)).first()
         invited = False
         if user is None:
             user = User.objects.create_user(
@@ -5696,6 +6807,9 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 enabled=False, is_active=False,
             )
             invited = True
+        elif user.type == UserRole.SIMPLE_USER:
+            user.type = UserRole.LOCAL_AUTHORITY
+            user.save(update_fields=['type'])
 
         _get_or_create_contact_institution(target_institution, user, role.libelle)
         AffectationRoleOperationnel.objects.get_or_create(
@@ -6225,6 +7339,17 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 environment=get_active_environment(request),
             )
         elif regenerer:
+            # Avant d'écraser canal_idx/compagnon : si l'ancien canal était déjà provisionné
+            # sur un companion, on garde une trace de CET emplacement précis pour que le pont
+            # puisse le libérer lui-même 48h plus tard (voir CanalMeshCoreObsolete) -- une fois
+            # canal.save() exécuté ci-dessous, cette information n'existe plus nulle part
+            # ailleurs.
+            if canal.canal_idx is not None and canal.compagnon_id is not None:
+                CanalMeshCoreObsolete.objects.create(
+                    canal=canal, compagnon=canal.compagnon, canal_idx=canal.canal_idx,
+                    supprimer_apres=timezone.now() + datetime.timedelta(hours=48),
+                    environment=get_active_environment(request),
+                )
             canal.cle_partagee_hex = secrets.token_hex(16)
             # La clé change : l'ancien provisionnement local (compagnon/canal_idx) ne
             # correspond plus à rien, le pont doit reconfigurer son slot avec la nouvelle clé
@@ -6502,6 +7627,10 @@ class TeamViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 canal_meshcore = CanalMeshCore.objects.filter(equipe=team).first()
 
             if canal_meshtastic is not None:
+                # contenu reste le texte brut tapé (affiché tel quel côté web, qui montre déjà
+                # l'expéditeur séparément) -- le préfixe nom/institution et la découpe sous la
+                # limite Meshtastic sont appliqués uniquement à l'envoi, voir
+                # MessageCanalMeshtasticViewSet.a_envoyer.
                 MessageCanalMeshtastic.objects.create(
                     canal=canal_meshtastic, direction=DirectionMessageMesh.SORTANT,
                     expediteur=request.user, contenu=texte,
@@ -6866,6 +7995,10 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     serializer_class = OfferSerializer
     permission_classes = [AllowAny]
     filterset_class = OfferSearchFilter
+    filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
+    ordering_fields = ['created_at', 'title', 'status', 'commune_code', 'distance_from_crisis']
+    ordering = ['-created_at']
+    pagination_class = OptionalPageNumberPagination
 
     def get_permissions(self):
         # Voir le commentaire équivalent sur RequestViewSet.get_permissions : même correctif
@@ -6967,17 +8100,18 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
 
         reponse_url = f"{settings.SERVER_URL.rstrip('/')}/repondre-offre/{offre.reponse_token}/"
         try:
-            send_mail_env_aware(
-                request,
+            # Institution de l'auteur du message (request.user, voir auteur_equipe ci-dessus) --
+            # c'est elle qui parle ici, jamais spéculatif.
+            send_branded_mail_env_aware(
+                request, getattr(request.user, 'institution', None),
                 subject=f"Nouveau message à propos de votre offre « {offre.title} »",
                 message=(
                     f"Bonjour {offre.first_name_offer},\n\n"
                     "Vous avez reçu un nouveau message à propos de votre offre :\n\n"
                     f"« {contenu} »\n\n"
                     f"Vous pouvez y répondre ou modifier votre offre ici :\n{reponse_url}\n\n"
-                    "Cordialement,\nL'équipe Assista-Crise"
+                    "{signature}"
                 ),
-                from_email=None,
                 recipient_list=[offre.email_offer],
                 fail_silently=True,
             )
@@ -7170,8 +8304,11 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         try:
             print(f"Tentative d'envoi de mail à {offre.email_offer}...")
 
-            send_mail_env_aware(
-                self.request,
+            # Même raisonnement que RequestViewSet.perform_create : pas encore d'équipe/
+            # institution affectée, branding par domaine d'ORIGINE du dépôt.
+            origine = resolve_institution_branding(self.request)
+            send_branded_mail_env_aware(
+                self.request, origine,
                 subject=f"Confirmation : Votre offre '{offre.title}' a bien été enregistrée",
                 message=(
                     f"Bonjour {offre.first_name_offer},\n\n"
@@ -7181,10 +8318,8 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"Pour modifier votre offre (compléter une information, changer une "
                     f"disponibilité…) :\n{reponse_url}\n\n"
                     f"Pour la désactiver (elle ne sera plus visible) :\n{deletion_url}\n\n"
-                    "Cordialement,\n"
-                    "L'équipe Assista-Crise"
+                    "{signature}"
                 ),
-                from_email=None,
                 recipient_list=[offre.email_offer],
                 fail_silently=False,
             )
@@ -7223,8 +8358,8 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                 commentaire=f"{offer.author.email} affecté au dossier {dossier.numero} en tant qu'offrant",
             )
             try:
-                send_mail_env_aware(
-                    request,
+                send_branded_mail_env_aware(
+                    request, dossier.equipe.institution if dossier.equipe else None,
                     subject=f"Votre offre « {offer.title} » a été affectée à un dossier",
                     message=(
                         f"Bonjour {offer.first_name_offer},\n\n"
@@ -7232,9 +8367,8 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                         f"{dossier.numero}, dont l'équipe {dossier.equipe.name if dossier.equipe else 'en charge'} "
                         "s'occupe activement.\n\n"
                         "Merci pour votre aide,\n"
-                        "L'équipe Assista-Crise"
+                        "{signature}"
                     ),
-                    from_email=None,
                     recipient_list=[offer.email_offer],
                     fail_silently=True,
                 )
@@ -7302,17 +8436,20 @@ class OfferViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"et les dossiers de votre équipe ici :\n{_vue_equipe_link(request, team, offre.author)}\n"
                 )
             try:
-                send_mail_env_aware(
-                    request,
+                # team.institution n'est pas toujours posé par ce bulk_create (voir
+                # Team.institution.__doc__, "auto-complété depuis request.user.institution
+                # sinon" -- fait au niveau vue/serializer ailleurs, pas ici) : on utilise
+                # directement l'institution de l'acteur qui crée l'équipe, non spéculatif.
+                send_branded_mail_env_aware(
+                    request, getattr(request.user, 'institution', None),
                     subject=f"Votre offre « {offre.title} » a été affectée à l'équipe {team.name}",
                     message=(
                         f"Bonjour {offre.first_name_offer},\n\n"
                         f"Votre offre d'aide « {offre.title} » a été affectée à l'équipe {team.name}, "
                         f"qui va s'en charger.\n{equipe_paragraph}\n"
                         "Merci pour votre aide,\n"
-                        "L'équipe Assista-Crise"
+                        "{signature}"
                     ),
-                    from_email=None,
                     recipient_list=[offre.email_offer],
                     fail_silently=True,
                 )
@@ -7419,7 +8556,11 @@ class DisponibiliteOffreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVie
     """Créneaux de disponibilité (matin/midi/soir/nuit, 8 jours) déclarés avec une offre d'aide."""
     queryset = DisponibiliteOffre.objects.all()
     serializer_class = DisponibiliteOffreSerializer
-    filterset_fields = ["offer"]
+    # 'in' en plus de 'exact' : ?offer__in=<id1>,<id2>,... -- permet à un appelant qui a déjà
+    # résolu un lot d'offres (ex: celles d'une crise) de ne récupérer QUE leurs créneaux, sans
+    # jamais avoir à lister la table entière (27k+ lignes mesurées, croît avec Offer -- voir
+    # cellule-crise.component.ts/teams.component.ts, qui faisaient ça avant ce correctif).
+    filterset_fields = {"offer": ["exact", "in"]}
 
     def get_permissions(self):
         # list/retrieve/create restent AllowAny : la déclaration de créneaux fait partie du
@@ -7450,7 +8591,11 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = Information.objects.select_related('author', 'crisis')
     serializer_class = InformationSerializer
     permission_classes = [AllowAny]
-    filterset_class = AuthorEmailFilter
+    filterset_class = InformationSearchFilter
+    filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
+    ordering_fields = ['created_at', 'title', 'status', 'commune_code', 'distance_from_crisis']
+    ordering = ['-created_at']
+    pagination_class = OptionalPageNumberPagination
 
     def get_permissions(self):
         # Voir le commentaire équivalent sur RequestViewSet.get_permissions : même correctif
@@ -7608,8 +8753,11 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
         try:
             print(f"Tentative d'envoi de mail à {info.email_information}...")
 
-            send_mail_env_aware(
-                self.request,
+            # Même raisonnement que RequestViewSet/OfferViewSet.perform_create : pas encore
+            # d'équipe/institution affectée, branding par domaine d'ORIGINE du dépôt.
+            origine = resolve_institution_branding(self.request)
+            send_branded_mail_env_aware(
+                self.request, origine,
                 subject=f"Confirmation : Votre information '{info.title}' a bien été partagée",
                 message=(
                     f"Bonjour {info.first_name_information},\n\n"
@@ -7618,10 +8766,8 @@ class InformationViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet):
                     f"Récapitulatif de votre signalement :\n- {info.title}\n\n"
                     f"Pour modifier votre signalement :\n{edit_url}\n\n"
                     f"Pour le désactiver (il ne sera plus visible) :\n{deletion_url}\n\n"
-                    "Cordialement,\n"
-                    "L'équipe Assista-Crise"
+                    "{signature}"
                 ),
-                from_email=None,
                 recipient_list=[info.email_information],
                 fail_silently=False,
             )
@@ -7935,6 +9081,51 @@ class EngagementRessourcePublicView(APIView):
         return Response(self._serialize(engagement))
 
 
+class AccuserReceptionAlertePCSPublicView(APIView):
+    """Page publique d'accusé de réception d'une alerte PCS/PICS -- jeton opaque
+    (NotificationAlertePCS.token_confirmation), pas de compte requis, même patron exact que
+    EngagementRessourcePublicView. Permet au destinataire d'un mail d'alerte de confirmer
+    lui-même qu'il a bien été prévenu, avec une réponse rapide ("pas besoin de me rappeler" /
+    "merci de me rappeler") -- évite un appel téléphonique de relance potentiellement inutile.
+    Statut CONFIRME_PAR_CONTACT (distinct de CONFIRME_MANUEL, coché à la main par la mairie
+    après un appel -- voir NotificationAlertePCSViewSet.confirmer)."""
+    permission_classes = [AllowAny]
+
+    def _serialize(self, notification):
+        return {
+            "crise_nom": notification.crise.name,
+            "institution_nom": notification.institution_nom_snapshot,
+            "organisme": notification.organisme_snapshot,
+            "statut": notification.statut,
+            "statut_libelle": notification.get_statut_display(),
+            "deja_confirme": notification.statut in (
+                StatutNotificationPCS.CONFIRME_PAR_CONTACT, StatutNotificationPCS.CONFIRME_MANUEL,
+            ),
+            "reponse_contact": notification.reponse_contact,
+            "commentaire_contact": notification.commentaire_contact,
+        }
+
+    def get(self, request, token):
+        notification = get_object_or_404(NotificationAlertePCS, token_confirmation=token)
+        return Response(self._serialize(notification))
+
+    def post(self, request, token):
+        notification = get_object_or_404(NotificationAlertePCS, token_confirmation=token)
+        if notification.statut in (StatutNotificationPCS.CONFIRME_PAR_CONTACT, StatutNotificationPCS.CONFIRME_MANUEL):
+            return Response({"detail": "Cette alerte a déjà été accusée réception."}, status=status.HTTP_400_BAD_REQUEST)
+
+        reponse = request.data.get('reponse')
+        if reponse not in ReponseContactPCS.values:
+            return Response({"detail": "Réponse invalide."}, status=status.HTTP_400_BAD_REQUEST)
+
+        notification.statut = StatutNotificationPCS.CONFIRME_PAR_CONTACT
+        notification.reponse_contact = reponse
+        notification.commentaire_contact = (request.data.get('commentaire') or '').strip() or None
+        notification.date_confirmation = timezone.now()
+        notification.save(update_fields=['statut', 'reponse_contact', 'commentaire_contact', 'date_confirmation'])
+        return Response(self._serialize(notification))
+
+
 def _notify_equipes_hebergement(request, offer, titre, message_texte):
     """Notifie (Notification + email) tous les membres des équipes ayant le thème
     "Hébergement" et assignées à la crise de cette offre (Team.themes/Team.assigned_crises) —
@@ -8077,6 +9268,91 @@ class MyTokenRefreshView(TokenRefreshView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
 
+class BrandingView(APIView):
+    """GET /api/branding/ -- résout le branding marque blanche depuis le Host de LA requête
+    (voir core/branding.py::resolve_institution_branding), public (AllowAny) : nécessaire avant
+    toute authentification, c'est justement ce qui habille la page de connexion/inscription.
+    Jamais de paramètre client pour le Host -- request.get_host() seul fait foi, voir le
+    docstring de resolve_institution_branding."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        institution = resolve_institution_branding(request)
+        branding = branding_for_institution(institution)
+        return Response({
+            "nom_affichage": branding.nom_affichage,
+            "logo_url": request.build_absolute_uri(branding.logo_url) if branding.logo_url else None,
+            "couleur_primaire": branding.couleur_primaire,
+            "couleur_secondaire": branding.couleur_secondaire,
+            "police_titre": branding.police_titre,
+            "police_texte": branding.police_texte,
+            "reserve_active": branding.reserve_active,
+        })
+
+
+class PieceIdentiteReserveViewSet(viewsets.ModelViewSet):
+    """Photos recto/verso de pièce d'identité pour une candidature réserve (voir
+    PieceIdentiteReserve) -- chiffrées au repos (core/file_crypto.py), jamais exposées comme URL
+    /media/ directe (voir PieceIdentiteReserveSerializer, write_only). Un candidat ne voit/gère
+    QUE sa propre pièce ; le responsable de SA réserve peut uniquement la télécharger
+    (recto/verso), jamais la lister/modifier celle d'un autre candidat au hasard."""
+    queryset = PieceIdentiteReserve.objects.all()
+    serializer_class = PieceIdentiteReserveSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        # Jamais toute la table : chacun ne voit que la sienne. Un responsable de réserve
+        # télécharge via les actions dédiées ci-dessous (vérification faite là, pas ici) plutôt
+        # que par une liste — pas de vue d'ensemble de toutes les pièces d'identité nécessaire
+        # pour l'instant (voir le plan, "UI minimale").
+        return PieceIdentiteReserve.objects.filter(utilisateur=self.request.user)
+
+    def perform_create(self, serializer):
+        # Jamais l'utilisateur fourni par le client -- même garde-fou que RisqueCommunal plus
+        # tôt dans ce projet (ne jamais faire confiance à un id de propriétaire envoyé par le
+        # client), ici d'autant plus sensible (pièce d'identité).
+        serializer.save(utilisateur=self.request.user)
+
+    def _peut_telecharger(self, request, piece):
+        if piece.utilisateur_id == request.user.id:
+            return True
+        if piece.utilisateur.reserve_institution_id is None:
+            return False
+        return AffectationRoleOperationnel.objects.filter(
+            utilisateur=request.user, institution_id=piece.utilisateur.reserve_institution_id,
+            role__code="RESPONSABLE", actif=True,
+        ).exists()
+
+    def _telecharger_champ(self, request, pk, champ):
+        piece = PieceIdentiteReserve.objects.filter(pk=pk).select_related("utilisateur").first()
+        if piece is None:
+            return Response(status=404)
+        if not self._peut_telecharger(request, piece):
+            audit_log(
+                request=request, action_code="TELECHARGEMENT", objet_type="PieceIdentiteReserve",
+                objet_id=piece.id, commentaire="Accès refusé", succes=False,
+            )
+            return Response(status=403)
+        fichier = getattr(piece, champ)
+        if not fichier:
+            return Response(status=404)
+        audit_log(
+            request=request, action_code="TELECHARGEMENT", objet_type="PieceIdentiteReserve",
+            objet_id=piece.id, commentaire=champ,
+        )
+        # .open("rb") (PAS fichier.path/open() direct, voir le docstring d'EncryptedFileSystemStorage) :
+        # c'est ce qui passe par le storage et déchiffre à la volée.
+        return FileResponse(fichier.open("rb"))
+
+    @action(detail=True, methods=["get"], url_path="telecharger-recto")
+    def telecharger_recto(self, request, pk=None):
+        return self._telecharger_champ(request, pk, "permis_recto")
+
+    @action(detail=True, methods=["get"], url_path="telecharger-verso")
+    def telecharger_verso(self, request, pk=None):
+        return self._telecharger_champ(request, pk, "permis_verso")
+
+
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer # Ajoute la logique de mot de passe dans le serializer
@@ -8091,6 +9367,19 @@ class RegisterView(generics.CreateAPIView):
             objet_id=user.id,
             commentaire=f"Création de compte : {user.email}",
         )
+
+        # Case "Je souhaite rejoindre la réserve" (voir User.souhaite_rejoindre_reserve,
+        # Institution.reserve_active) -- résolu depuis le Host de CETTE requête d'inscription,
+        # pas depuis une institution déjà connue de l'utilisateur (il n'en a pas encore). Exige
+        # reserve_active=True : cocher la case sur le site généraliste assista-crise.fr (qui ne
+        # résout aucune institution) ne fait jamais rien, la case n'y est de toute façon pas
+        # affichée côté frontend (voir register.component.ts).
+        if user.souhaite_rejoindre_reserve:
+            institution = resolve_institution_branding(self.request)
+            if institution is not None and institution.reserve_active:
+                user.reserve_institution = institution
+                user.save(update_fields=["reserve_institution"])
+                _notifier_responsable_reserve(user, institution, self.request)
 
 class InstitutionValidationView(generics.GenericAPIView):
     permission_classes = [permissions.AllowAny]
@@ -8245,25 +9534,26 @@ class PasswordResetRequestView(generics.GenericAPIView):
         if not email:
             return Response({'error': "L'adresse email est requise."}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        user = User.objects.filter(email_bidx=blind_index(email), is_active=True).first()
         if user:
             reset_link = build_magic_link(request, user, "reset-password")
+            # Même raisonnement que UserViewSet.send_password_reset : user.institution est une
+            # FK réelle déjà rattachée, pas de résolution spéculative.
+            branding = branding_for_institution(user.institution)
             message = (
                 f"Bonjour {user.first_name} {user.last_name},\n\n"
-                "Vous avez demandé la réinitialisation du mot de passe de votre compte "
-                "Assista-Crise.\n\n"
+                f"Vous avez demandé la réinitialisation du mot de passe de votre compte "
+                f"{branding.nom_affichage}.\n\n"
                 f"Pour choisir un nouveau mot de passe, cliquez sur le lien suivant :\n{reset_link}\n\n"
                 "Ce lien est valable 7 jours et ne peut être utilisé qu'une seule fois. Si vous "
                 "n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet email : votre "
                 "mot de passe actuel reste valable.\n\n"
-                "Cordialement,\n"
-                "L'équipe Assista-Crise"
+                "{signature}"
             )
-            send_mail_env_aware(
-                request,
-                subject="Réinitialisation de votre mot de passe Assista-Crise",
+            send_branded_mail_env_aware(
+                request, user.institution,
+                subject=f"Réinitialisation de votre mot de passe {branding.nom_affichage}",
                 message=message,
-                from_email=None,
                 recipient_list=[user.email],
                 fail_silently=False,
             )
@@ -8731,7 +10021,16 @@ class AuditLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewS
         if params.get('objet_type'):
             queryset = queryset.filter(objet_type=params['objet_type'])
         if params.get('utilisateur'):
-            queryset = queryset.filter(utilisateur__email__icontains=params['utilisateur'])
+            # User.email chiffré (voir core/crypto_fields.py) -- icontains impossible sur un
+            # ciphertext, filtrage côté Python après déchiffrement (décision utilisateur du
+            # 2026-10-06). Appliqué après les filtres date/action/objet_type ci-dessus, qui
+            # réduisent déjà le candidat avant ce passage.
+            terme = params['utilisateur'].lower()
+            ids = [
+                a.id for a in queryset
+                if a.utilisateur_id and terme in (a.utilisateur.email or '').lower()
+            ]
+            queryset = queryset.filter(id__in=ids)
         if params.get('succes') in ('true', 'false'):
             queryset = queryset.filter(succes=(params['succes'] == 'true'))
         return queryset
@@ -9105,15 +10404,19 @@ class RecherchePersonneViewSet(
         RecherchePersonneSerializer
     )
 
-    # Avant ce correctif : IsAuthenticated seul, contrairement à ce que la page RGPD (/rgpd,
-    # section 1) prétendait déjà ("réservé aux comptes institutionnels") — écart trouvé en
-    # vérifiant cette page, corrigé le 2026-09-18. Traite des données concernant une personne
-    # qui n'a pas pu consentir elle-même (photographie, description physique) : un compte
-    # authentifié quelconque n'a pas vocation à y accéder, seuls les comptes institutionnels
-    # agissant par délégation du maire (voir la finalité décrite dans la page RGPD).
-    permission_classes = [
-        IsInstitutionalActor
-    ]
+    # Historique : IsInstitutionalActor pour TOUT (y compris le dépôt), posé le 2026-09-18 pour
+    # coller à la page RGPD ("réservé aux comptes institutionnels"). Revu le 08/10 : le DÉPÔT
+    # d'une fiche (create) doit rester ouvert à tout compte authentifié -- un citoyen dont un
+    # proche a disparu pendant une crise n'a aucune raison d'être rattaché à une institution
+    # pour signaler sa disparition, c'est structurellement la même logique que Request/Offer/
+    # Information (dépôt public). Seules la CONSULTATION du registre et sa gestion (liste,
+    # détail, archiver, retrouver...) restent réservées aux acteurs institutionnels : c'est là
+    # qu'est la donnée sensible sur un tiers (photo, description physique) qui a motivé le
+    # correctif RGPD initial, pas le fait de signaler sa propre recherche.
+    def get_permissions(self):
+        if self.action == 'create':
+            return [permissions.IsAuthenticated()]
+        return [IsInstitutionalActor()]
     def get_queryset(self):
         # Depuis self.queryset (pas RecherchePersonne.objects.* directement) pour conserver le
         # select_related de la classe.
@@ -10671,7 +11974,11 @@ class PointOperationnelViewSet(
         if ordering == "distance" and has_location:
             queryset = queryset.order_by("distance")
         else:
-            queryset = queryset.order_by("first_name_offer", "last_name_offer")
+            # first_name_offer/last_name_offer sont chiffrés (voir core/crypto_fields.py) --
+            # un ORDER BY SQL sur un ciphertext Fernet trierait par nonce aléatoire, pas par
+            # ordre alphabétique. Tri côté Python après déchiffrement (DRF.paginate_queryset
+            # accepte aussi bien une liste qu'une QuerySet, voir Django Paginator).
+            queryset = sorted(queryset, key=lambda o: ((o.first_name_offer or '').lower(), (o.last_name_offer or '').lower()))
 
         paginator = PageNumberPagination()
         paginator.page_size = int(request.query_params.get("page_size", 25))
@@ -11211,10 +12518,16 @@ class FicheIntervenantView(generics.GenericAPIView):
         # RegistrePresence.nom est un texte libre saisi au secrétariat, jamais un FK vers
         # User : rapprochement par nom complet, best-effort (voir docstring).
         nom_complet = f"{personne.first_name} {personne.last_name}".strip()
-        presences = (
-            RegistrePresence.objects.filter(nom__icontains=nom_complet).select_related('point').order_by('-date_arrivee')
-            if nom_complet else RegistrePresence.objects.none()
-        )
+        if nom_complet:
+            # RegistrePresence.nom chiffré (voir core/crypto_fields.py) -- icontains
+            # impossible sur un ciphertext, filtrage côté Python après déchiffrement (décision
+            # utilisateur du 2026-10-06).
+            terme = nom_complet.lower()
+            toutes = RegistrePresence.objects.select_related('point').order_by('-date_arrivee')
+            ids = [p.id for p in toutes if terme in (p.nom or '').lower()]
+            presences = toutes.filter(id__in=ids)
+        else:
+            presences = RegistrePresence.objects.none()
         presences_centre = [
             {
                 "point_nom": p.point.nom,
@@ -11663,13 +12976,18 @@ class DeclarationSecuriteViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
 
 
 def _institution_est_autorite_locale(institution) -> bool:
-    """Institution de type mairie/EPCI — les deux types d'institution correspondant à une
-    collectivité territoriale (voir SECTEUR_NIVEAU_PAR_TYPE_INSTITUTION, core/geo_reference.py),
-    à distinguer des associations/AASC et des services de l'État (SDIS, préfecture...) : seules
-    ces dernières passent par le workflow d'acceptation d'une déclaration ACTEUR (voir
-    ImplicationInstitutionViewSet.perform_create/valider/refuser)."""
+    """Institution de type collectivité territoriale (mairie/EPCI/département/région, voir
+    TYPES_COLLECTIVITE_TERRITORIALE, core/models.py), à distinguer des associations/AASC et des
+    services de l'État (SDIS, préfecture...) qui partagent pourtant le même niveau de secteur
+    (voir SECTEUR_NIVEAU_PAR_TYPE_INSTITUTION, core/geo_reference.py) : seules ces dernières
+    passent par le workflow d'acceptation d'une déclaration ACTEUR (voir
+    ImplicationInstitutionViewSet.perform_create/valider/refuser). Élargi de mairie/EPCI à
+    département/région le 15/10 (demande utilisateur) : couvre aussi la création de Zone,
+    d'interlocuteur d'alerte PCS, et l'activation du module Estimation des dégâts (seuls
+    appelants de cette fonction) -- un conseil départemental/régional relève du même domaine
+    PCS/PICS."""
     type_code = (getattr(institution.type, 'code', '') or '').upper()
-    return type_code in {"MAIRIE", "EPCI"}
+    return type_code in TYPES_COLLECTIVITE_TERRITORIALE
 
 
 def _institution_est_publique(institution) -> bool:
@@ -12206,10 +13524,15 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
         return self.queryset
 
     def get_permissions(self):
-        if self.action in ('create', 'update', 'partial_update', 'destroy', 'envoyer_advert'):
+        if self.action in ('create', 'update', 'partial_update', 'destroy', 'envoyer_advert', 'lancer_traceroute'):
             return [IsInstitutionalActor(), DenyInDemo()]
-        # `rapporter_etat` est appelé par le service-pont (compte de service authentifié,
-        # pas un acteur institutionnel) : authentifié suffit, voir docstring de l'action.
+        if self.action == 'canaux_detectes':
+            # Lecture destinée à la page admin (voir meshcore-canaux.component), pas au pont.
+            return [IsInstitutionalActor()]
+        # `rapporter_etat`, `signaler_canaux_detectes`, `canaux_a_liberer`,
+        # `rapporter_canal_libere`, `rapporter_batterie`, `traceroutes_a_executer`,
+        # `rapporter_traceroute` : appelés par le service-pont (compte de service authentifié,
+        # pas un acteur institutionnel) : authentifié suffit.
         return [permissions.IsAuthenticated()]
 
     @action(detail=True, methods=['post'], url_path='envoyer-advert')
@@ -12323,6 +13646,7 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
         if etat not in ('CONNECTE', 'DECONNECTE', 'ERREUR'):
             return Response({'detail': "etat doit être CONNECTE, DECONNECTE ou ERREUR."}, status=status.HTTP_400_BAD_REQUEST)
 
+        etat_precedent = compagnon.dernier_etat
         compagnon.dernier_etat = etat
         if etat == 'CONNECTE':
             compagnon.derniere_connexion = timezone.now()
@@ -12334,7 +13658,74 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
             compagnon.derniere_erreur = request.data.get('erreur', '')
 
         compagnon.save(update_fields=['dernier_etat', 'derniere_connexion', 'derniere_erreur', 'pubkey_hex'])
+
+        # Alerte panne/rétablissement -- seulement sur un VRAI changement d'état (edge-
+        # triggered), jamais à chaque tentative de reconnexion répétée (voir boucle de
+        # reconnexion côté pont, toutes les RECONNECT_DELAY_SECONDS -- sans ce garde-fou, une
+        # panne prolongée alerterait en continu). Voir _alerter_panne_companion.
+        est_en_panne = etat in ('ERREUR', 'DECONNECTE')
+        etait_en_panne = etat_precedent in ('ERREUR', 'DECONNECTE')
+        if est_en_panne != etait_en_panne:
+            try:
+                _alerter_panne_companion(request, compagnon, en_panne=est_en_panne)
+            except Exception:
+                logger.exception("Échec de l'alerte de changement d'état pour le companion %s.", compagnon.id)
+
         return Response(CompagnonMeshCoreSerializer(compagnon).data)
+
+    @action(detail=True, methods=['post'], url_path='rapporter-batterie')
+    def rapporter_batterie(self, request, pk=None):
+        """Le service-pont appelle ceci périodiquement (get_bat(), commande locale sans coût
+        d'antenne mesh) pour la batterie du companion LUI-MÊME -- voir docstring de
+        CompagnonMeshCore.derniere_batterie_niveau."""
+        compagnon = self.get_object()
+        niveau = request.data.get('niveau')
+        if niveau is None:
+            return Response({"detail": "niveau est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        compagnon.derniere_batterie_niveau = niveau
+        compagnon.derniere_batterie_date = timezone.now()
+        compagnon.save(update_fields=['derniere_batterie_niveau', 'derniere_batterie_date'])
+        return Response({"ok": True})
+
+    @action(detail=True, methods=['post'], url_path='lancer-traceroute')
+    def lancer_traceroute(self, request, pk=None):
+        """Demande au service-pont d'exécuter un traceroute (paquet de trace en diffusion,
+        voir docstring de TracerouteMeshCore) sur ce companion -- juste une mise en file, voir
+        boucle_traceroutes côté pont pour l'exécution réelle (asynchrone, peut prendre
+        plusieurs secondes selon le nombre de sauts)."""
+        compagnon = self.get_object()
+        trace = TracerouteMeshCore.objects.create(
+            compagnon=compagnon, environment=get_active_environment(request),
+        )
+        return Response(TracerouteMeshCoreSerializer(trace).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='traceroutes-a-executer')
+    def traceroutes_a_executer(self, request, pk=None):
+        compagnon = self.get_object()
+        en_attente = compagnon.traceroutes.filter(statut=StatutTraceroute.EN_ATTENTE)
+        return Response([{"id": str(t.id)} for t in en_attente])
+
+    @action(detail=True, methods=['post'], url_path='rapporter-traceroute')
+    def rapporter_traceroute(self, request, pk=None):
+        """Le service-pont appelle ceci après avoir tenté le traceroute (reçu une réponse
+        TRACE_DATA correspondant au tag envoyé, ou essuyé un échec/timeout -- voir
+        boucle_traceroutes)."""
+        compagnon = self.get_object()
+        traceroute_id = request.data.get('id')
+        statut = request.data.get('statut')
+        if statut not in (StatutTraceroute.TERMINE, StatutTraceroute.ECHEC):
+            return Response({"detail": "statut doit être TERMINE ou ECHEC."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            trace = compagnon.traceroutes.get(id=traceroute_id)
+        except (TracerouteMeshCore.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Traceroute introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        trace.statut = statut
+        trace.tag = request.data.get('tag')
+        trace.chemin = request.data.get('chemin')
+        trace.erreur = request.data.get('erreur')
+        trace.date_reponse = timezone.now()
+        trace.save(update_fields=['statut', 'tag', 'chemin', 'erreur', 'date_reponse'])
+        return Response({"ok": True})
 
     @action(detail=True, methods=['post'], url_path='synchroniser-contacts')
     def synchroniser_contacts(self, request, pk=None):
@@ -12378,6 +13769,15 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
             # un silence).
             if 'nombre_sauts' in contact:
                 defaults['nombre_sauts'] = contact.get('nombre_sauts')
+            # Télémétrie (voir docstring de ContactMeshCore.tension_batterie_v) : les deux
+            # champs arrivent toujours ensemble (même réponse LPP côté pont), mais testés
+            # indépendamment par cohérence avec le reste de cette fonction.
+            if 'tension_batterie_v' in contact:
+                defaults['tension_batterie_v'] = contact.get('tension_batterie_v')
+            if 'niveau_batterie_pct' in contact:
+                defaults['niveau_batterie_pct'] = contact.get('niveau_batterie_pct')
+            if 'tension_batterie_v' in contact or 'niveau_batterie_pct' in contact:
+                defaults['derniere_telemetrie'] = timezone.now()
 
             ContactMeshCore.objects.update_or_create(
                 compagnon=compagnon, pubkey_hex=pubkey_hex,
@@ -12428,18 +13828,60 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
 
     @action(detail=True, methods=['get'], url_path='canaux-a-provisionner')
     def canaux_a_provisionner(self, request, pk=None):
-        """Le service-pont appelle ceci périodiquement pour savoir quels canaux d'équipe
-        (voir TeamViewSet.provisionner_canal_meshcore) ne sont pas encore configurés
+        """Le service-pont appelle ceci périodiquement pour savoir quels canaux (d'équipe, voir
+        TeamViewSet.provisionner_canal_meshcore, OU publics `#nom` rejoints depuis
+        CanalMeshCoreViewSet -- corrigé le 11/10, un canal public ne remontait jamais ici avant
+        ce correctif et restait indéfiniment "en attente") ne sont pas encore configurés
         localement sur CE companion (canal_idx vide, ou provisionné sur un autre companion —
         voir docstring de CanalMeshCore : un canal se configure appareil par appareil, jamais
-        à distance). Expose la clé en clair : action réservée au compte de service du pont,
-        seul habilité à appeler set_channel."""
+        à distance). Le canal "Public" par défaut (SECRET_PUBLIC_PAR_DEFAUT) n'apparaît jamais
+        ici : il est créé avec canal_idx=0 déjà renseigné (voir signaler_canaux_detectes), donc
+        jamais "à provisionner" -- son slot est préconfiguré en usine, pas question d'y
+        toucher. Expose la clé en clair : action réservée au compte de service du pont, seul
+        habilité à appeler set_channel."""
         compagnon = self.get_object()
-        canaux = CanalMeshCore.objects.filter(actif=True, equipe__isnull=False).filter(
+        canaux = CanalMeshCore.objects.filter(actif=True).filter(
+            Q(equipe__isnull=False) | Q(nom__startswith='#')
+        ).filter(
             Q(canal_idx__isnull=True) | ~Q(compagnon=compagnon)
         )
         return Response([
             {"id": str(c.id), "nom": c.nom, "cle_partagee_hex": c.cle_partagee_hex}
+            for c in canaux
+        ])
+
+    @action(detail=True, methods=['get'], url_path='canaux-provisionnes')
+    def canaux_provisionnes(self, request, pk=None):
+        """Canaux déjà configurés localement sur CE companion (canal_idx connu) -- le pont
+        l'appelle une fois au démarrage de session pour reconstruire `canaux_idx_map` en
+        mémoire (remis à zéro à chaque redémarrage du PROCESSUS du pont, alors que Django,
+        lui, ne ré-expose plus ces canaux via canaux-a-provisionner une fois le round-trip
+        complété -- sans cet appel, un simple redémarrage du pont perdait silencieusement le
+        rattachement des messages entrants à leur canal). Couvre aussi le canal "Public" par
+        défaut (idx 0, jamais passé par set_channel, voir SECRET_PUBLIC_PAR_DEFAUT), qui
+        n'existe que par ce chemin."""
+        compagnon = self.get_object()
+        canaux = CanalMeshCore.objects.filter(actif=True, compagnon=compagnon, canal_idx__isnull=False)
+        return Response([{"id": str(c.id), "canal_idx": c.canal_idx} for c in canaux])
+
+    @action(detail=True, methods=['get'], url_path='canaux-pour-decodage-logiciel')
+    def canaux_pour_decodage_logiciel(self, request, pk=None):
+        """Tous les canaux actifs (équipe ou publics), QUEL QUE SOIT leur état de
+        provisionnement physique -- à la différence de canaux_a_provisionner, qui exclut
+        volontairement tout canal déjà provisionné (pour ne pas le re-provisionner). Ici
+        l'exhaustivité est le but : sert à peupler le registre logiciel du pont
+        (MeshcorePacketParser.newChannel, voir meshcore_py/meshcore_parser.py) pour déchiffrer
+        EN LOGICIEL un canal dont le secret est déjà connu de Django, sans attendre un slot
+        physique libre (set_channel) -- voir le plan de conception "Décodage logiciel des
+        canaux MeshCore" (12/10). Le secret exposé ici est le même que celui déjà exposé par
+        canaux_a_provisionner, pas une fuite supplémentaire : même compte de service, même
+        niveau de confiance (voir get_permissions)."""
+        compagnon = self.get_object()
+        canaux = CanalMeshCore.objects.filter(actif=True).filter(
+            Q(equipe__isnull=False) | Q(nom__startswith='#')
+        )
+        return Response([
+            {"id": str(c.id), "nom": c.nom, "cle_partagee_hex": c.cle_partagee_hex, "canal_idx": c.canal_idx}
             for c in canaux
         ])
 
@@ -12460,6 +13902,90 @@ class CompagnonMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelView
         canal.compagnon = compagnon
         canal.canal_idx = canal_idx
         canal.save(update_fields=['compagnon', 'canal_idx'])
+        return Response({"ok": True})
+
+    @action(detail=True, methods=['post'], url_path='signaler-canaux-detectes')
+    def signaler_canaux_detectes(self, request, pk=None):
+        """Le service-pont appelle ceci périodiquement pour remonter les canaux dont il capte
+        le trafic radio sans les connaître localement (voir EventType.RX_LOG_DATA côté pont,
+        et la docstring de CanalMeshCoreDetecte) -- un lot `{"hashes": {"a1": 3, "4f": 1, ...}}`
+        (chan_hash -> nombre de paquets observés depuis le dernier envoi), pas un appel par
+        paquet individuel, pour ne pas saturer l'API au rythme du trafic radio."""
+        compagnon = self.get_object()
+        hashes = request.data.get('hashes')
+        if not isinstance(hashes, dict):
+            return Response({"detail": "hashes (objet chan_hash -> nombre de paquets) est requis."}, status=status.HTTP_400_BAD_REQUEST)
+        # Le canal "Public" par défaut a une clé universelle, connue à l'avance (voir
+        # CanalMeshCore.SECRET_PUBLIC_PAR_DEFAUT) -- contrairement à un canal `#nom` dont le
+        # nom est indevinable depuis le seul chan_hash (fonction à sens unique), celui-là se
+        # reconnaît directement : pas besoin d'un humain pour le "rejoindre", on peut le
+        # provisionner tout seul dès qu'on voit son trafic (demande utilisateur du 11/10).
+        hash_public = CanalMeshCore.chan_hash_pour_secret(CanalMeshCore.SECRET_PUBLIC_PAR_DEFAUT)
+        for chan_hash, nombre in hashes.items():
+            try:
+                nombre = int(nombre)
+            except (TypeError, ValueError):
+                continue
+            if chan_hash == hash_public:
+                CanalMeshCore.objects.get_or_create(
+                    compagnon=compagnon,
+                    cle_partagee_hex=CanalMeshCore.SECRET_PUBLIC_PAR_DEFAUT,
+                    environment=get_active_environment(request),
+                    defaults={"nom": "Public", "canal_idx": 0, "actif": True},
+                )
+                CanalMeshCoreDetecte.objects.filter(compagnon=compagnon, chan_hash=chan_hash).delete()
+                continue
+            detecte, _ = CanalMeshCoreDetecte.objects.get_or_create(
+                compagnon=compagnon, chan_hash=chan_hash,
+                defaults={"nombre_paquets": nombre, "environment": get_active_environment(request)},
+            )
+            if not _:
+                detecte.nombre_paquets = F('nombre_paquets') + nombre
+                detecte.save(update_fields=['nombre_paquets', 'derniere_vue'])
+        return Response({"ok": True})
+
+    @action(detail=True, methods=['get'], url_path='canaux-detectes')
+    def canaux_detectes(self, request, pk=None):
+        """Canaux observés par CE companion sans être connus localement -- voir docstring de
+        CanalMeshCoreDetecte. Affiché en lecture seule sur la page admin (pas de clé, donc pas
+        de fil de discussion possible)."""
+        compagnon = self.get_object()
+        detectes = compagnon.canaux_detectes.order_by('-derniere_vue')
+        return Response([
+            {
+                "id": str(d.id),
+                "chan_hash": d.chan_hash,
+                "premiere_vue": d.premiere_vue,
+                "derniere_vue": d.derniere_vue,
+                "nombre_paquets": d.nombre_paquets,
+            }
+            for d in detectes
+        ])
+
+    @action(detail=True, methods=['get'], url_path='canaux-a-liberer')
+    def canaux_a_liberer(self, request, pk=None):
+        """Le service-pont appelle ceci périodiquement pour savoir quels anciens slots de
+        canal (rotation de clé, voir CanalMeshCoreObsolete) sont mûrs pour être libérés sur CE
+        companion -- délai de grâce de 48h écoulé, pas encore marqués supprimés."""
+        compagnon = self.get_object()
+        a_liberer = compagnon.slots_a_liberer.filter(supprime=False, supprimer_apres__lte=timezone.now())
+        return Response([
+            {"id": str(o.id), "canal_idx": o.canal_idx}
+            for o in a_liberer
+        ])
+
+    @action(detail=True, methods=['post'], url_path='rapporter-canal-libere')
+    def rapporter_canal_libere(self, request, pk=None):
+        """Le service-pont appelle ceci après avoir vidé localement (set_channel avec un nom
+        vide, voir docstring de CanalMeshCoreObsolete) le slot d'un ancien canal."""
+        compagnon = self.get_object()
+        obsolete_id = request.data.get('id')
+        try:
+            obsolete = compagnon.slots_a_liberer.get(id=obsolete_id)
+        except (CanalMeshCoreObsolete.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Slot obsolète introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        obsolete.supprime = True
+        obsolete.save(update_fields=['supprime'])
         return Response({"ok": True})
 
 
@@ -12655,6 +14181,9 @@ class NoeudMeshUtilisateurViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelV
                 'equipe_nom': None if est_demo else (equipe.name if equipe else None),
                 'mission_id': None if est_demo else (str(equipe.mission_active_id) if equipe and equipe.mission_active_id else None),
                 'mission_titre': None if est_demo else (equipe.mission_active.titre if equipe and equipe.mission_active else None),
+                'tension_batterie_v': contact.tension_batterie_v,
+                'niveau_batterie_pct': contact.niveau_batterie_pct,
+                'derniere_telemetrie': contact.derniere_telemetrie,
             })
         return Response(resultats)
 
@@ -12706,6 +14235,9 @@ class MessageMeshLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
         contact_pubkey_hex = self.request.query_params.get('contact_pubkey_hex')
         if contact_pubkey_hex:
             qs = qs.filter(contact_pubkey_hex=contact_pubkey_hex)
+        # Ordre chronologique croissant (plus ancien en premier) -- le chat affiche le plus
+        # récent en bas, demande utilisateur du 10/10.
+        qs = qs.order_by('date_creation')
         if self.action not in ('list', 'retrieve'):
             return qs
         if effective_role_or_none(self.request) == UserRole.ADMINISTRATOR:
@@ -12734,6 +14266,8 @@ class MessageMeshLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
             expediteur = self.request.user if self.request.user.is_authenticated else None
         equipe = expediteur.teams.first() if expediteur is not None else None
         environment = get_active_environment(self.request)
+        if direction == DirectionMessageMesh.SORTANT:
+            _verifier_debit_mesh_sortant(MessageMeshLog, expediteur, environment, contact_pubkey_hex=contact_pubkey_hex)
 
         save_kwargs = dict(
             environment=environment, expediteur=expediteur, equipe=equipe,
@@ -12765,6 +14299,18 @@ class MessageMeshLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelViewSet
             # filet de sécurité si le service-pont omet `statut` dans son POST.
             message.statut = StatutMessageMesh.RECU
             message.save(update_fields=['statut'])
+        if message.direction == DirectionMessageMesh.ENTRANT:
+            mot_cle = _detecter_mot_cle_sos(message.contenu)
+            if mot_cle:
+                try:
+                    _signaler_sos_mesh(
+                        self.request, protocole=ProtocoleMesh.MESHCORE, contenu=message.contenu,
+                        mot_cle_detecte=mot_cle, institution=equipe.institution if equipe else None,
+                        canal_nom=None, expediteur_identifiant=message.contact_pubkey_hex,
+                        expediteur_nom=str(expediteur) if expediteur else '',
+                    )
+                except Exception:
+                    logger.exception("Échec de signalement SOS pour le message DM MeshCore %s.", message.id)
 
     @action(detail=False, methods=['get'], url_path='a-envoyer')
     def a_envoyer(self, request):
@@ -12954,7 +14500,9 @@ class MessageCanalMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelV
         canal_id = self.request.query_params.get('canal')
         if canal_id:
             qs = qs.filter(canal_id=canal_id)
-        return qs
+        # Ordre chronologique croissant (plus ancien en premier) -- le chat affiche le plus
+        # récent en bas, demande utilisateur du 10/10.
+        return qs.order_by('date_creation')
 
     def get_permissions(self):
         if self.action in ('list', 'retrieve'):
@@ -12965,21 +14513,59 @@ class MessageCanalMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelV
         direction = serializer.validated_data.get('direction')
         expediteur = self.request.user if direction == DirectionMessageMesh.SORTANT and self.request.user.is_authenticated else None
         environment = get_active_environment(self.request)
+        canal = serializer.validated_data.get('canal')
+        if direction == DirectionMessageMesh.SORTANT:
+            _verifier_debit_mesh_sortant(MessageCanalMeshCore, expediteur, environment, canal=canal)
 
         save_kwargs = dict(environment=environment, expediteur=expediteur)
         if direction == DirectionMessageMesh.SORTANT and environment == Environment.DEMO:
             save_kwargs['contenu'] = _contenu_message_mesh_demo(serializer.validated_data.get('contenu'))
 
-        serializer.save(**save_kwargs)
+        message = serializer.save(**save_kwargs)
+        if message.direction == DirectionMessageMesh.ENTRANT:
+            mot_cle = _detecter_mot_cle_sos(message.contenu)
+            canal_urgence = canal is not None and _canal_est_dedie_urgence(canal.nom)
+            if mot_cle or canal_urgence:
+                try:
+                    _signaler_sos_mesh(
+                        self.request, protocole=ProtocoleMesh.MESHCORE, contenu=message.contenu,
+                        mot_cle_detecte=mot_cle or "[canal dédié urgence]",
+                        institution=canal.institution if canal else None,
+                        canal_nom=canal.nom if canal else None,
+                        expediteur_identifiant=message.contact_pubkey_hex, expediteur_nom='',
+                    )
+                except Exception:
+                    logger.exception("Échec de signalement SOS pour le message de canal MeshCore %s.", message.id)
 
     @action(detail=False, methods=['get'], url_path='a-envoyer')
     def a_envoyer(self, request):
-        """Même principe que MessageMeshLogViewSet.a_envoyer, pour les messages de canal."""
+        """Même principe que MessageCanalMeshtasticViewSet.a_envoyer (voir sa docstring pour le
+        détail du préfixe expéditeur/institution et de la découpe sous la limite de charge
+        utile, demande utilisateur du 10/10) -- MESHCORE_MAX_OCTETS, nettement plus bas que
+        MESHTASTIC_MAX_OCTETS, le paquet LoRa d'un message de canal MeshCore (chiffré par clé
+        partagée) étant beaucoup plus contraint."""
+        # canal_idx indispensable au pont pour appeler send_chan_msg (index LOCAL du canal sur
+        # CE companion, pas la clé) -- voir boucle_envoi_canaux (meshcore-bridge/bridge.py), qui
+        # ignore silencieusement (`continue`) tout message sans canal_idx. Contrairement à
+        # Meshtastic (filtré canal par canal côté pont via son registre), le pont MeshCore
+        # récupère TOUS les messages en attente en un seul appel, tous canaux confondus.
         canal_id = request.query_params.get('canal')
-        qs = self.get_queryset().filter(direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE)
+        qs = self.get_queryset().filter(
+            direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE,
+        ).select_related('canal__institution')
         if canal_id:
             qs = qs.filter(canal_id=canal_id)
-        return Response(MessageCanalMeshCoreSerializer(qs, many=True).data)
+
+        resultat = []
+        for m in qs:
+            institution = m.canal.institution if m.canal_id else None
+            prefixe = _prefixe_expediteur_mesh_sortant(m.expediteur, institution)
+            for morceau in _decouper_message_mesh(f"{prefixe} : {m.contenu}", MESHCORE_MAX_OCTETS):
+                resultat.append({
+                    "id": str(m.id), "contenu": morceau,
+                    "canal_idx": m.canal.canal_idx if m.canal_id else None,
+                })
+        return Response(resultat)
 
 
 class ContactMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
@@ -12994,6 +14580,65 @@ class ContactMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyMod
 
     def get_queryset(self):
         qs = super().get_queryset()
+        compagnon_id = self.request.query_params.get('compagnon')
+        if compagnon_id:
+            qs = qs.filter(compagnon_id=compagnon_id)
+        return qs
+
+    @action(detail=False, methods=['get'], url_path='analyse-securite')
+    def analyse_securite(self, request):
+        """Analyse passive des clés publiques déjà connues (aucune requête mesh) -- clé à
+        entropie anormalement basse (voir _analyser_cle_pubkey) et clé dupliquée entre deux
+        identités différentes (voir _detecter_cles_dupliquees). Inspiré de la fonctionnalité
+        "Security Monitoring" de MeshMonitor (github.com/Yeraze/meshmonitor), adapté à notre
+        modèle MeshCore -- demande utilisateur du 10/10."""
+        contacts = list(self.get_queryset())
+        cles_faibles = []
+        for c in contacts:
+            probleme = _analyser_cle_pubkey(c.pubkey_hex)
+            if probleme:
+                cles_faibles.append({
+                    "contact_id": str(c.id), "pubkey_hex": c.pubkey_hex, "nom": c.nom,
+                    "compagnon_id": str(c.compagnon_id), "compagnon_nom": c.compagnon.nom,
+                    "probleme": probleme,
+                })
+        doublons = _detecter_cles_dupliquees(contacts)
+        return Response({
+            "cles_faibles": cles_faibles,
+            "cles_dupliquees": [{"pubkey_hex": pk, "noms": sorted(noms)} for pk, noms in doublons.items()],
+        })
+
+
+class AlerteMeshSOSViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Historique des détections SOS sur messages mesh entrants (voir docstring du modèle et
+    core.views._signaler_sos_mesh) -- lecture seule, réservée aux administrateurs (ce sont eux
+    qui sont notifiés en direct, cette liste n'est qu'un complément d'historique)."""
+
+    queryset = AlerteMeshSOS.objects.select_related('institution').order_by('-date_creation').all()
+    serializer_class = AlerteMeshSOSSerializer
+
+    def get_permissions(self):
+        return [permissions.IsAuthenticated(), _EstAdministrateur()]
+
+
+class _EstAdministrateur(permissions.BasePermission):
+    message = "Réservé aux administrateurs."
+
+    def has_permission(self, request, view):
+        return effective_role_or_none(request) == UserRole.ADMINISTRATOR
+
+
+class TracerouteMeshCoreViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Historique des diagnostics traceroute (voir docstring du modèle) -- lecture seule,
+    jamais créé/modifié ici : voir CompagnonMeshCoreViewSet.lancer_traceroute/
+    traceroutes_a_executer/rapporter_traceroute pour le cycle de vie réel d'une ligne."""
+
+    queryset = TracerouteMeshCore.objects.select_related('compagnon').all()
+    serializer_class = TracerouteMeshCoreSerializer
+    permission_classes = [IsInstitutionalActor]
+
+    def get_queryset(self):
+        qs = super().get_queryset().order_by('-date_creation')
         compagnon_id = self.request.query_params.get('compagnon')
         if compagnon_id:
             qs = qs.filter(compagnon_id=compagnon_id)
@@ -13077,6 +14722,7 @@ class CompagnonMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
         if etat not in ('CONNECTE', 'DECONNECTE', 'ERREUR'):
             return Response({'detail': "etat doit être CONNECTE, DECONNECTE ou ERREUR."}, status=status.HTTP_400_BAD_REQUEST)
 
+        etat_precedent = compagnon.dernier_etat
         compagnon.dernier_etat = etat
         if etat == 'CONNECTE':
             compagnon.derniere_connexion = timezone.now()
@@ -13085,6 +14731,17 @@ class CompagnonMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelVi
             compagnon.derniere_erreur = request.data.get('erreur', '')
 
         compagnon.save(update_fields=['dernier_etat', 'derniere_connexion', 'derniere_erreur'])
+
+        # Voir CompagnonMeshCoreViewSet.rapporter_etat pour le détail du garde-fou
+        # edge-triggered (évite une alerte en continu pendant une panne prolongée).
+        est_en_panne = etat in ('ERREUR', 'DECONNECTE')
+        etait_en_panne = etat_precedent in ('ERREUR', 'DECONNECTE')
+        if est_en_panne != etait_en_panne:
+            try:
+                _alerter_panne_companion(request, compagnon, en_panne=est_en_panne)
+            except Exception:
+                logger.exception("Échec de l'alerte de changement d'état pour le companion %s.", compagnon.id)
+
         return Response(CompagnonMeshtasticSerializer(compagnon).data)
 
     @action(detail=True, methods=['get'], url_path='avec-cle-privee')
@@ -13354,6 +15011,9 @@ class MessageMeshtasticLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelV
         contact_node_num = self.request.query_params.get('contact_node_num')
         if contact_node_num:
             qs = qs.filter(contact_node_num=contact_node_num)
+        # Ordre chronologique croissant (plus ancien en premier) -- le chat affiche le plus
+        # récent en bas, demande utilisateur du 10/10.
+        qs = qs.order_by('date_creation')
         if self.action not in ('list', 'retrieve'):
             return qs
         if effective_role_or_none(self.request) == UserRole.ADMINISTRATOR:
@@ -13371,13 +15031,27 @@ class MessageMeshtasticLogViewSet(EnvironmentScopedViewSetMixin, viewsets.ModelV
         elif direction == DirectionMessageMesh.SORTANT:
             expediteur = self.request.user if self.request.user.is_authenticated else None
         equipe = expediteur.teams.first() if expediteur is not None else None
+        environment = get_active_environment(self.request)
+        if direction == DirectionMessageMesh.SORTANT:
+            _verifier_debit_mesh_sortant(MessageMeshtasticLog, expediteur, environment, contact_node_num=contact_node_num)
 
-        message = serializer.save(
-            environment=get_active_environment(self.request), expediteur=expediteur, equipe=equipe,
-        )
+        message = serializer.save(environment=environment, expediteur=expediteur, equipe=equipe)
         if message.direction == DirectionMessageMesh.ENTRANT and message.statut == StatutMessageMesh.EN_ATTENTE:
             message.statut = StatutMessageMesh.RECU
             message.save(update_fields=['statut'])
+        if message.direction == DirectionMessageMesh.ENTRANT:
+            mot_cle = _detecter_mot_cle_sos(message.contenu)
+            if mot_cle:
+                try:
+                    _signaler_sos_mesh(
+                        self.request, protocole=ProtocoleMesh.MESHTASTIC, contenu=message.contenu,
+                        mot_cle_detecte=mot_cle, institution=equipe.institution if equipe else None,
+                        canal_nom=None,
+                        expediteur_identifiant=str(contact_node_num) if contact_node_num is not None else None,
+                        expediteur_nom=str(expediteur) if expediteur else '',
+                    )
+                except Exception:
+                    logger.exception("Échec de signalement SOS pour le message DM Meshtastic %s.", message.id)
 
     @action(detail=False, methods=['get'], url_path='a-envoyer')
     def a_envoyer(self, request):
@@ -13466,7 +15140,9 @@ class MessageCanalMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
         canal_id = self.request.query_params.get('canal')
         if canal_id:
             qs = qs.filter(canal_id=canal_id)
-        return qs
+        # Ordre chronologique croissant (plus ancien en premier) -- le chat affiche le plus
+        # récent en bas, demande utilisateur du 10/10.
+        return qs.order_by('date_creation')
 
     def get_permissions(self):
         if self.action in ('list', 'retrieve'):
@@ -13475,17 +15151,86 @@ class MessageCanalMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.Mode
 
     def perform_create(self, serializer):
         direction = serializer.validated_data.get('direction')
-        expediteur = self.request.user if direction == DirectionMessageMesh.SORTANT and self.request.user.is_authenticated else None
-        serializer.save(environment=get_active_environment(self.request), expediteur=expediteur)
+        contact_node_num = serializer.validated_data.get('contact_node_num')
+        expediteur = None
+        if direction == DirectionMessageMesh.ENTRANT and contact_node_num is not None:
+            # Résout le compte utilisateur si ce nœud est affecté (voir
+            # NoeudUtilisateurMeshtasticViewSet) -- jusqu'ici jamais fait pour un message de
+            # CANAL (seulement pour les DM), donc expediteur_nom restait toujours vide et le
+            # chat de canal n'affichait que "Mesh" générique, demande utilisateur du 10/10.
+            noeud = NoeudUtilisateurMeshtastic.objects.filter(node_num=contact_node_num, actif=True).select_related('utilisateur').first()
+            expediteur = noeud.utilisateur if noeud else None
+        elif direction == DirectionMessageMesh.SORTANT:
+            expediteur = self.request.user if self.request.user.is_authenticated else None
+        environment = get_active_environment(self.request)
+        canal = serializer.validated_data.get('canal')
+        if direction == DirectionMessageMesh.SORTANT:
+            _verifier_debit_mesh_sortant(MessageCanalMeshtastic, expediteur, environment, canal=canal)
+
+        message = serializer.save(environment=environment, expediteur=expediteur)
+        if message.direction == DirectionMessageMesh.ENTRANT:
+            mot_cle = _detecter_mot_cle_sos(message.contenu)
+            # Convention "Fr_EMCOM" (Meshtastic/Gaulix, signalée par l'utilisateur le 10/10) :
+            # c'est précisément ICI qu'elle s'applique, un canal de ce type arrivant toujours
+            # par ce viewset (voir CanalMeshtasticViewSet.avec_cle, canaux routés par Gaulix).
+            canal_urgence = canal is not None and _canal_est_dedie_urgence(canal.nom)
+            if mot_cle or canal_urgence:
+                try:
+                    _signaler_sos_mesh(
+                        self.request, protocole=ProtocoleMesh.MESHTASTIC, contenu=message.contenu,
+                        mot_cle_detecte=mot_cle or "[canal dédié urgence]",
+                        institution=canal.institution if canal else None,
+                        canal_nom=canal.nom if canal else None,
+                        expediteur_identifiant=str(message.contact_node_num) if message.contact_node_num is not None else None,
+                        expediteur_nom='',
+                    )
+                except Exception:
+                    logger.exception("Échec de signalement SOS pour le message de canal Meshtastic %s.", message.id)
 
     @action(detail=False, methods=['get'], url_path='a-envoyer')
     def a_envoyer(self, request):
-        """Même principe que MessageCanalMeshCoreViewSet.a_envoyer."""
+        """Même principe que MessageCanalMeshCoreViewSet.a_envoyer, avec en plus (demande
+        utilisateur du 10/10) : préfixe du nom de l'expéditeur -- ou de l'institution si le
+        message est émis par la plateforme pour son compte -- dans le texte transmis sur le
+        réseau mesh lui-même (voir _prefixe_expediteur_mesh_sortant), et découpe sous la limite
+        de charge utile du firmware si besoin (voir _decouper_message_mesh/
+        MESHTASTIC_MAX_OCTETS), le pont (bridge.py) n'envoyant `contenu` tel quel sans aucune
+        troncature de son côté.
+
+        Le préfixe/la découpe ne touchent QUE ce qui part sur le mesh : `contenu` tel que
+        stocké en base (et donc l'affichage web, qui montre déjà l'expéditeur séparément via
+        `expediteur_nom`, voir TeamViewSet.messagerie_unifiee) reste le texte brut tapé par
+        l'utilisateur -- sans quoi le nom y apparaîtrait en double.
+
+        Un message découpé en plusieurs morceaux produit plusieurs entrées JSON partageant le
+        même `id` : le pont appelle marquer_message_canal(id, "ENVOYE") après CHAQUE paquet
+        envoyé, un appel répété sur le même id est sans effet (idempotent), donc aucun
+        changement requis côté pont.
+
+        `?compagnon=<id>` (demande utilisateur du 10/10) : un message CIBLÉ (voir
+        MessageCanalMeshtastic.compagnon) n'est renvoyé qu'au companion visé -- indispensable
+        quand plusieurs companions actifs servent le même canal "partagé" en parallèle (ex: un
+        companion TCP local ET le pont MQTT Gaulix, voir docstring du champ) : sans ce filtre,
+        les deux se disputeraient les mêmes lignes EN_ATTENTE. Un message NON ciblé
+        (compagnon=None, le cas normal) reste visible de tous, comportement historique
+        inchangé."""
         canal_id = request.query_params.get('canal')
-        qs = self.get_queryset().filter(direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE)
+        compagnon_id = request.query_params.get('compagnon')
+        qs = self.get_queryset().filter(
+            direction=DirectionMessageMesh.SORTANT, statut=StatutMessageMesh.EN_ATTENTE,
+        ).select_related('canal__institution')
         if canal_id:
             qs = qs.filter(canal_id=canal_id)
-        return Response(MessageCanalMeshtasticSerializer(qs, many=True).data)
+        if compagnon_id:
+            qs = qs.filter(Q(compagnon__isnull=True) | Q(compagnon_id=compagnon_id))
+
+        resultat = []
+        for m in qs:
+            institution = m.canal.institution if m.canal_id else None
+            prefixe = _prefixe_expediteur_mesh_sortant(m.expediteur, institution)
+            for morceau in _decouper_message_mesh(f"{prefixe} : {m.contenu}", MESHTASTIC_MAX_OCTETS):
+                resultat.append({"id": str(m.id), "contenu": morceau})
+        return Response(resultat)
 
 
 class ContactMeshtasticViewSet(EnvironmentScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):

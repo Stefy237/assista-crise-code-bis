@@ -12,6 +12,7 @@ from .views import (
     DeleteRequestView, DeleteOfferView, DeleteInformationView, CompetenceViewSet,
     ConfirmerAffectationBenevoleView,
     EngagementRessourcePublicView,
+    AccuserReceptionAlertePCSPublicView,
     OfferReponsePublicView,
     RequestEditionPublicView,
     InformationEditionPublicView,
@@ -26,6 +27,7 @@ from .views import (
     InstitutionDomaineViewSet,
     CompagnonMeshCoreViewSet, NoeudMeshUtilisateurViewSet, MessageMeshLogViewSet, CommandeMeshCoreViewSet,
     RelaisMeshCoreViewSet, CanalMeshCoreViewSet, MessageCanalMeshCoreViewSet, ContactMeshCoreViewSet,
+    TracerouteMeshCoreViewSet, AlerteMeshSOSViewSet,
     CompagnonMeshtasticViewSet, NoeudUtilisateurMeshtasticViewSet, MessageMeshtasticLogViewSet,
     CanalMeshtasticViewSet, MessageCanalMeshtasticViewSet, ContactMeshtasticViewSet,
     SatelliteViewSet,
@@ -47,6 +49,10 @@ from .views import (
     FicheMaterielView,
     DeclarationSecuriteViewSet,
     ZoneViewSet,
+    ConfigurationAlerteSismiqueViewSet, SecteurRechercheViewSet,
+    InterlocuteurAlertePCSViewSet, NotificationAlertePCSViewSet,
+    RisqueMajeurTypeViewSet, RisqueCommunalViewSet,
+    TypeVulnerabiliteViewSet, PersonneVulnerableViewSet,
     PlanViewSet,
     PlanMissionModeleViewSet,
     DashboardStatsView,
@@ -56,11 +62,19 @@ from .views import (
     ImportPersonnelCommunalExempleView,
     ImportInstitutionsView,
     ImportInstitutionsExempleView,
+    ImportCorrespondantsPCSView,
+    ImportCorrespondantsPCSExempleView,
+    ImportInterlocuteursPCSView,
+    ImportInterlocuteursPCSExempleView,
+    ImportMaterielPointView,
+    ImportMaterielPointExempleView,
     HabitationViewSet,
     HabitationCommentaireViewSet,
     HabitationHistoriqueViewSet,
     RattachementHabitationViewSet,
     ModuleDegatsCriseViewSet,
+    PieceIdentiteReserveViewSet,
+    BrandingView,
     ImportHabitationsView,
     ImportHabitationsExempleView,
     SalonMatrixEquipeViewSet,
@@ -115,6 +129,8 @@ router.register(r'messages-canal-meshcore', MessageCanalMeshCoreViewSet)
 router.register(r'salons-matrix', SalonMatrixEquipeViewSet)
 router.register(r'salons-matrix-institution', SalonMatrixInstitutionViewSet)
 router.register(r'contacts-meshcore', ContactMeshCoreViewSet)
+router.register(r'traceroutes-meshcore', TracerouteMeshCoreViewSet)
+router.register(r'alertes-sos-mesh', AlerteMeshSOSViewSet)
 
 router.register(r'compagnons-meshtastic', CompagnonMeshtasticViewSet)
 router.register(r'noeuds-meshtastic', NoeudUtilisateurMeshtasticViewSet)
@@ -196,12 +212,21 @@ router.register(r'recherches-personnes-historique', RecherchePersonneHistoriqueV
 router.register(r'recherches-personnes-photos', RecherchePersonnePhotoViewSet)
 router.register(r'recherches-personnes-commentaires-photos',RecherchePersonneCommentairePhotoViewSet)
 router.register(r'zones', ZoneViewSet)
+router.register(r'configurations-alerte-sismique', ConfigurationAlerteSismiqueViewSet)
+router.register(r'interlocuteurs-alerte-pcs', InterlocuteurAlertePCSViewSet)
+router.register(r'risques-majeurs-types', RisqueMajeurTypeViewSet)
+router.register(r'risques-communaux', RisqueCommunalViewSet)
+router.register(r'types-vulnerabilite', TypeVulnerabiliteViewSet)
+router.register(r'personnes-vulnerables', PersonneVulnerableViewSet)
+router.register(r'notifications-alerte-pcs', NotificationAlertePCSViewSet)
+router.register(r'secteurs-recherche', SecteurRechercheViewSet)
 router.register(r'plans', PlanViewSet)
 router.register(r'habitations', HabitationViewSet)
 router.register(r'habitations-commentaires', HabitationCommentaireViewSet)
 router.register(r'habitations-historique', HabitationHistoriqueViewSet)
 router.register(r'rattachements-habitations', RattachementHabitationViewSet)
 router.register(r'modules-degats', ModuleDegatsCriseViewSet)
+router.register(r'pieces-identite-reserve', PieceIdentiteReserveViewSet)
 router.register(r'plans-missions-modeles', PlanMissionModeleViewSet)
 
 urlpatterns = [
@@ -214,6 +239,7 @@ urlpatterns = [
     path('token/refresh/', MyTokenRefreshView.as_view(), name='token_refresh'),
     path('token/blacklist/', TokenBlacklistView.as_view(), name='token_blacklist'),
     path('register/', RegisterView.as_view(), name='auth_register'),
+    path('branding/', BrandingView.as_view(), name='branding'),
     path('validate-institution/', InstitutionValidationView.as_view(), name='validate_institution'),
     path('activate-account/<str:uidb64>/<str:token>/', AccountActivationView.as_view(), name='activate_account'),
     path('magic-login/<str:uidb64>/<str:token>/', MagicLoginView.as_view(), name='magic_login'),
@@ -229,6 +255,12 @@ urlpatterns = [
     path('imports/personnel-communal/exemple/', ImportPersonnelCommunalExempleView.as_view(), name='import_personnel_communal_exemple'),
     path('imports/institutions/', ImportInstitutionsView.as_view(), name='import_institutions'),
     path('imports/institutions/exemple/', ImportInstitutionsExempleView.as_view(), name='import_institutions_exemple'),
+    path('imports/correspondants-pcs/', ImportCorrespondantsPCSView.as_view(), name='import_correspondants_pcs'),
+    path('imports/correspondants-pcs/exemple/', ImportCorrespondantsPCSExempleView.as_view(), name='import_correspondants_pcs_exemple'),
+    path('imports/interlocuteurs-pcs/', ImportInterlocuteursPCSView.as_view(), name='import_interlocuteurs_pcs'),
+    path('imports/interlocuteurs-pcs/exemple/', ImportInterlocuteursPCSExempleView.as_view(), name='import_interlocuteurs_pcs_exemple'),
+    path('imports/materiel-point/', ImportMaterielPointView.as_view(), name='import_materiel_point'),
+    path('imports/materiel-point/exemple/', ImportMaterielPointExempleView.as_view(), name='import_materiel_point_exemple'),
     path('types-a-lecoute/', TypesALecouteView.as_view(), name='types_a_lecoute'),
     path('crises/<str:crise_id>/cellule/', CelluleCriseView.as_view(), name='cellule_crise'),
     path('simulation-inondation/<str:commune_code>/', SimulationInondationView.as_view(), name='simulation_inondation'),
@@ -251,6 +283,7 @@ urlpatterns = [
     path('confirmer-affectation-benevole/<str:token>/<str:reponse>/', ConfirmerAffectationBenevoleView.as_view(), name='confirmer_affectation_benevole'),
     path('delete-information/<str:token>/', DeleteInformationView.as_view(), name='delete_information'),
     path('engagement-ressource/<str:token>/', EngagementRessourcePublicView.as_view(), name='engagement_ressource_public'),
+    path('accuser-reception-pcs/<str:token>/', AccuserReceptionAlertePCSPublicView.as_view(), name='accuser_reception_alerte_pcs'),
     path('repondre-offre/<str:token>/', OfferReponsePublicView.as_view(), name='offer_reponse_public'),
     path('edit-request/<str:token>/', RequestEditionPublicView.as_view(), name='request_edition_public'),
     path('edit-information/<str:token>/', InformationEditionPublicView.as_view(), name='information_edition_public'),

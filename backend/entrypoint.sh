@@ -9,6 +9,7 @@ echo "Creating initial superuser from DJANGO_SUPERUSER_EMAIL/DJANGO_SUPERUSER_PA
 python manage.py shell <<EOF
 import os
 from django.contrib.auth import get_user_model
+from core.crypto_fields import blind_index
 User = get_user_model()
 
 email = os.environ.get('DJANGO_SUPERUSER_EMAIL')
@@ -18,7 +19,7 @@ if not email or not password:
     print("DJANGO_SUPERUSER_EMAIL/DJANGO_SUPERUSER_PASSWORD non fournis : aucun admin "
           "par défaut créé. Utilisez 'manage.py createsuperuser' pour créer le premier "
           "compte administrateur.")
-elif User.objects.filter(email__iexact=email).exists():
+elif User.objects.filter(email_bidx=blind_index(email)).exists():
     print(f"Un compte existe déjà pour {email}, aucune création.")
 else:
     User.objects.create_user(

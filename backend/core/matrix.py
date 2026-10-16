@@ -157,6 +157,66 @@ def lister_messages_salon(room_id, limite=30) -> list:
     return resultat
 
 
+def _assurer_compte_matrix(user, displayname=None) -> None:
+    """Garantit que `user` a un compte Matrix provisionné, SANS le rattacher à un salon
+    particulier -- préalable à une invitation (DM ou salon). Factorisé hors d'
+    assurer_membre_salon, qui fait la même chose puis rejoint EN PLUS un salon précis."""
+    requests.put(
+        f"{SYNAPSE_URL}/_synapse/admin/v2/users/{matrix_user_id(user)}",
+        headers=_bot_headers(), json={"displayname": displayname or str(user)},
+        timeout=10,
+    ).raise_for_status()
+
+
+def envoyer_dm(user, texte, displayname=None) -> None:
+    """Envoie un message privé (DM) du bot à `user` -- utilisé pour les alertes qui doivent
+    atteindre une personne précise sans dépendre d'un salon d'équipe déjà existant (ex: alerte
+    SOS mesh vers les administrateurs, panne companion vers l'institution propriétaire, demande
+    utilisateur du 10/10). Réutilise un salon DM déjà existant entre le bot et cette personne
+    (compte `m.direct` du bot, convention standard des clients Matrix -- voir
+    https://spec.matrix.org/latest/client-server-api/#dm-rooms) plutôt que d'en créer un
+    nouveau à chaque appel, ce qui disperserait la conversation sur plusieurs salons distincts
+    au fil du temps. `whoami` interrogé à chaque appel plutôt que mis en cache : ce n'est jamais
+    un chemin chaud (quelques alertes au plus par jour), pas la peine d'introduire un état
+    partagé pour économiser un aller-retour réseau."""
+    _assurer_compte_matrix(user, displayname)
+    headers = _bot_headers()
+    cible_mid = matrix_user_id(user)
+
+    whoami = requests.get(f"{SYNAPSE_URL}/_matrix/client/v3/account/whoami", headers=headers, timeout=10)
+    whoami.raise_for_status()
+    bot_mid = whoami.json()["user_id"]
+
+    direct = requests.get(
+        f"{SYNAPSE_URL}/_matrix/client/v3/user/{bot_mid}/account_data/m.direct",
+        headers=headers, timeout=10,
+    )
+    mapping = direct.json() if direct.status_code == 200 else {}
+    room_id = next(iter(mapping.get(cible_mid) or []), None)
+
+    if not room_id:
+        creation = requests.post(
+            f"{SYNAPSE_URL}/_matrix/client/v3/createRoom",
+            headers=headers,
+            json={"is_direct": True, "invite": [cible_mid], "preset": "trusted_private_chat"},
+            timeout=10,
+        )
+        creation.raise_for_status()
+        room_id = creation.json()["room_id"]
+        mapping[cible_mid] = [room_id]
+        requests.put(
+            f"{SYNAPSE_URL}/_matrix/client/v3/user/{bot_mid}/account_data/m.direct",
+            headers=headers, json=mapping, timeout=10,
+        ).raise_for_status()
+
+    txn_id = uuid.uuid4().hex
+    response = requests.put(
+        f"{SYNAPSE_URL}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{txn_id}",
+        headers=headers, json={"msgtype": "m.text", "body": texte}, timeout=10,
+    )
+    response.raise_for_status()
+
+
 def envoyer_message_salon(room_id, user, nom, texte, urgent=False) -> None:
     txn_id = uuid.uuid4().hex
     content = {

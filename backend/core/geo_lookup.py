@@ -114,6 +114,20 @@ def commune_from_code(commune_code: str) -> str | None:
     return commune.nom
 
 
+def commune_from_code_cached(commune_code: str) -> str | None:
+    """Comme commune_from_code, mais jamais de résolution réseau ni d'écriture -- une simple
+    lecture de ce qui est déjà en cache (ou None). Pour les contextes où déclencher un appel
+    externe serait inacceptable (liste de centaines/milliers de lignes, voir
+    CrisisSerializer/RequestSerializer/OfferSerializer/InformationSerializer.get_commune) :
+    mieux vaut un `commune` absent que jusqu'à 5x5s de latence par page (voir
+    GeoResolutionBudgetMiddleware/_consume_budget)."""
+    from core.models import Commune
+
+    if not commune_code:
+        return None
+    return Commune.objects.filter(code=commune_code).values_list("nom", flat=True).first()
+
+
 def commune_center_from_code(commune_code: str) -> dict:
     """Centroïde d'une commune (lat/lon) résolu via geo.api.gouv.fr — sens inverse de
     commune_code_from_point (point -> commune), utilisé pour centrer une minimap sur une
@@ -251,8 +265,76 @@ def commune_from_point(point) -> str | None:
     return _reverse_geocode_point(point)["nom"]
 
 
+def commune_from_point_cached(point) -> str | None:
+    """Comme commune_from_point, mais jamais de résolution réseau ni d'écriture -- voir
+    commune_from_code_cached pour le raisonnement. Même arrondi à 4 décimales que
+    _reverse_geocode_point pour retomber sur la même clé PointCommune déjà en cache."""
+    from core.models import PointCommune
+
+    if point is None:
+        return None
+    lat, lon = round(point.y, 4), round(point.x, 4)
+    point_commune = PointCommune.objects.filter(lat=lat, lon=lon).select_related("commune").first()
+    return point_commune.commune.nom if point_commune and point_commune.commune_id else None
+
+
 def commune_code_from_point(point) -> str | None:
     """Code commune INSEE résolu par reverse-géocodage — voir _reverse_geocode_point. Utilisé
     pour comparer par code exact (ex: filtrage vue mairie) plutôt que par nom, plus fiable
     (accents, casse, doublons de noms de commune)."""
     return _reverse_geocode_point(point)["citycode"]
+
+
+# --- Sens inverse de commune_secteur_codes : secteur -> liste de communes (voir
+# core/models.py::_assurer_zone_mon_territoire) ---------------------------------------------
+
+GEO_API_DECOUPAGE = "https://geo.api.gouv.fr"
+_PLURIEL_NIVEAU = {"epci": "epcis", "departement": "departements", "region": "regions"}
+
+
+def communes_de_secteur(niveau: str, code: str) -> list[str]:
+    """Liste des codes commune INSEE sous la compétence d'un secteur EPCI/département/région --
+    interroge d'abord la table locale Commune (rapide, pas de réseau), puis, si vide, va
+    chercher et upserte le référentiel complet depuis geo.api.gouv.fr (même endpoint/mêmes
+    champs que le management command import_communes, voir son docstring -- Commune n'est PAS
+    garantie complète en PROD tant que cette commande n'a pas été lancée). Hors budget de
+    résolution (_consume_budget ci-dessus, pensé pour des résolutions unitaires enchaînées dans
+    une liste) : ici un seul appel groupé, rare (création/édition d'une institution
+    territoriale), jamais répété en boucle. `niveau="commune"` n'a pas de sens ici (le code EST
+    déjà la commune) -- à filtrer en amont par l'appelant."""
+    from .models import Commune
+
+    locales = list(Commune.objects.filter(**{f"{niveau}_code": code}).values_list("code", flat=True))
+    if locales:
+        return locales
+
+    pluriel = _PLURIEL_NIVEAU.get(niveau)
+    if not pluriel:
+        return []
+
+    url = (
+        f"{GEO_API_DECOUPAGE}/{pluriel}/{urllib.parse.quote(code)}/communes"
+        "?fields=nom,code,population,codeDepartement,codeEpci,codeRegion,centre&format=json"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+
+    objs = []
+    for c in data:
+        centre = (c.get("centre") or {}).get("coordinates")
+        lon, lat = (centre[0], centre[1]) if isinstance(centre, list) and len(centre) == 2 else (None, None)
+        objs.append(Commune(
+            code=c["code"], nom=c.get("nom"), population=c.get("population"),
+            departement_code=c.get("codeDepartement"), epci_code=c.get("codeEpci"),
+            region_code=c.get("codeRegion"), centre_longitude=lon, centre_latitude=lat,
+        ))
+
+    Commune.objects.bulk_create(
+        objs, update_conflicts=True, unique_fields=["code"],
+        update_fields=["nom", "population", "departement_code", "epci_code", "region_code",
+                        "centre_longitude", "centre_latitude"],
+    )
+    return [o.code for o in objs]

@@ -71,20 +71,44 @@ def audit_log(
         logger.exception("Échec de l'écriture de la main courante (action_code=%s, objet_type=%s)", action_code, objet_type)
 
 
-def send_mail_logged(request, subject, message, from_email, recipient_list, **kwargs):
+def send_mail_logged(request, subject, message, from_email, recipient_list, reply_to=None, **kwargs):
     """Enveloppe django.core.mail.send_mail : journalise systématiquement l'envoi (ou l'échec)
     dans la main courante — une vraie main courante ne doit pas laisser passer les emails
     envoyés sans trace, au même titre que les actions qu'ils accompagnent. Utilisée directement
     pour les emails de cycle de vie de compte (hors périmètre de send_mail_env_aware, voir son
     docstring) ; send_mail_env_aware route aussi par ici pour que TOUT email journalise, quel
-    que soit le chemin emprunté."""
+    que soit le chemin emprunté.
+
+    `reply_to` (voir core/branding.py::send_branded_mail) : django.core.mail.send_mail ne
+    supporte aucun header custom -- bascule sur EmailMessage (même mécanisme que
+    send_mail_with_attachment_logged) uniquement quand reply_to est fourni, pour ne rien changer
+    au comportement des ~40 appelants existants qui ne le passent pas."""
+    from django.core.mail import EmailMessage
     from django.core.mail import send_mail as django_send_mail
 
     succes = True
     try:
-        return django_send_mail(subject, message, from_email, recipient_list, **kwargs)
+        if reply_to:
+            fail_silently = kwargs.pop("fail_silently", False)
+            email = EmailMessage(subject, message, from_email, recipient_list, reply_to=reply_to, **kwargs)
+            resultat = email.send(fail_silently=fail_silently)
+        else:
+            resultat = django_send_mail(subject, message, from_email, recipient_list, **kwargs)
+        if not resultat:
+            # fail_silently=True (une vingtaine d'appelants) : django.core.mail.send_mail
+            # avale l'exception SMTP en interne et renvoie 0 plutôt que de lever -- sans ce
+            # test, ni l'except ci-dessous ni l'alerte ne se déclenchaient jamais pour ces
+            # appels, malgré un envoi réellement en échec.
+            succes = False
+            logger.error('Échec silencieux d\'envoi email ("%s" à %s) : send_mail a renvoyé 0', subject, ", ".join(recipient_list))
+        return resultat
     except Exception:
         succes = False
+        # logger.exception (pas seulement l'audit_log juste en dessous) : c'est ce qui
+        # déclenche l'alerte mail_admins/Matrix (voir LOGGING dans config/settings.py) --
+        # avant son ajout, un échec d'envoi ici ne laissait selon les cas AUCUNE trace
+        # exploitable nulle part (voir l'incident du 07/10).
+        logger.exception('Échec d\'envoi email ("%s" à %s)', subject, ", ".join(recipient_list))
         raise
     finally:
         audit_log(
@@ -112,6 +136,10 @@ def send_mail_with_attachment_logged(
         return email.send()
     except Exception:
         succes = False
+        logger.exception(
+            'Échec d\'envoi email ("%s", pièce jointe %s, à %s)',
+            subject, attachment_filename, ", ".join(recipient_list),
+        )
         raise
     finally:
         audit_log(
