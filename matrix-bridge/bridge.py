@@ -167,15 +167,30 @@ class SynapseClient:
         TOKEN_FILE.write_text(json.dumps({"access_token": self.access_token, "user_id": self.user_id}))
         logger.info("Bot Matrix enregistré (%s).", self.user_id)
 
-    async def assurer_compte(self, matrix_user_id, displayname):
-        """Upsert idempotent (voir SalonMatrixEquipeSerializer.get_membres côté Django) --
-        aucun mot de passe posé : ces comptes ne se connectent que par SSO OIDC."""
+    async def assurer_compte(self, matrix_user_id, displayname) -> bool:
+        """Met à jour le displayname SI le compte existe déjà -- ne le crée JAMAIS ici (incident
+        réel du 17/10, voir Laura, et le même correctif côté Django, core/matrix.py::
+        _compte_matrix_existe pour le détail). Avec la délégation MAS active, MAS (pas Synapse)
+        est la source d'autorité des comptes (`external_ids`) -- un compte créé à l'aveugle via
+        cette API admin legacy reste orphelin et bloque la première connexion SSO réelle de la
+        personne avec "Localpart not available". Renvoie False (rien fait) tant que la personne
+        ne s'est jamais connectée au moins une fois via MAS -- normal, pas une erreur : les
+        appelants (boucle_provisionnement_salons/_institution) doivent alors renoncer à
+        l'inviter au salon pour CE passage, elle le sera automatiquement dès qu'elle aura son
+        compte (prochain passage après sa première connexion)."""
+        existant = await self._client.get(
+            f"{self.base_url}/_synapse/admin/v2/users/{matrix_user_id}", headers=self._headers(),
+        )
+        if existant.status_code != 200:
+            return False
         response = await self._client.put(
             f"{self.base_url}/_synapse/admin/v2/users/{matrix_user_id}",
             headers=self._headers(), json={"displayname": displayname},
         )
         if response.status_code not in (200, 201):
             logger.warning("Échec de provisionnement du compte %s : %s %s", matrix_user_id, response.status_code, response.text[:200])
+            return False
+        return True
 
     async def creer_salon(self, nom):
         # power_level_content_override : le preset "private_chat" laisse state_default à 50,
@@ -259,9 +274,15 @@ async def boucle_provisionnement_salons(django, synapse):
         try:
             salons = await django.salons_a_synchroniser()
             for salon in salons:
-                cibles = {m["matrix_user_id"]: m["nom"] for m in salon["membres"]}
-                for matrix_id, nom in cibles.items():
-                    await synapse.assurer_compte(matrix_id, nom)
+                # Un membre dont le compte n'existe pas encore (jamais connecté via MAS, voir
+                # assurer_compte) est exclu de `cibles` -- il ne doit pas être invité/expulsé ce
+                # passage-ci, seulement dès qu'il aura son compte (prochain passage après sa
+                # première connexion).
+                tous_cibles = {m["matrix_user_id"]: m["nom"] for m in salon["membres"]}
+                cibles = {
+                    matrix_id: nom for matrix_id, nom in tous_cibles.items()
+                    if await synapse.assurer_compte(matrix_id, nom)
+                }
 
                 room_id = salon.get("room_id")
                 if not room_id:
@@ -305,9 +326,12 @@ async def boucle_provisionnement_salons_institution(django, synapse):
         try:
             salons = await django.salons_institution_a_synchroniser()
             for salon in salons:
-                cibles = {m["matrix_user_id"]: m["nom"] for m in salon["membres"]}
-                for matrix_id, nom in cibles.items():
-                    await synapse.assurer_compte(matrix_id, nom)
+                # Voir le même filtrage dans boucle_provisionnement_salons ci-dessus.
+                tous_cibles = {m["matrix_user_id"]: m["nom"] for m in salon["membres"]}
+                cibles = {
+                    matrix_id: nom for matrix_id, nom in tous_cibles.items()
+                    if await synapse.assurer_compte(matrix_id, nom)
+                }
 
                 libelle = TYPE_SALON_INSTITUTION_LIBELLE.get(salon["type"], salon["type"])
                 nom_salon = f"{salon['institution_nom']} — {libelle}"

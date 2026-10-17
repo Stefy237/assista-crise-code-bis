@@ -7,15 +7,26 @@ Pas de table de correspondance stockée : le localpart Matrix est calculé de fa
 à partir de l'UUID du User (`u` + hex sans tirets, seuls caractères autorisés par la spec
 Matrix pour un localpart) -- Django et le pont recalculent la même valeur indépendamment,
 aucune synchronisation à maintenir. Le même localpart est aussi exposé en claim OIDC
-(`preferred_username`, voir core/oidc.py) pour que le provisioning JIT de Synapse à la
-connexion SSO d'un utilisateur retombe exactement sur le compte déjà pré-provisionné par le
-pont (voir matrix-bridge/bridge.py, assurer_compte_matrix)."""
+(`preferred_username`, voir core/oidc.py).
+
+IMPORTANT (incident réel du 17/10, voir Laura) : avec la délégation MAS active (voir plus bas),
+NE JAMAIS précréer un compte Matrix via l'API admin Synapse legacy pour quelqu'un qui ne s'est
+jamais connecté -- MAS, pas Synapse, est désormais la source d'autorité des comptes
+(`external_ids`, lié au `sub` OIDC). Sous Synapse natif (avant l'adoption de MAS), le
+provisioning JIT à la connexion SSO retombait silencieusement sur un compte pré-créé de même
+localpart ; sous MAS, un tel compte reste orphelin (external_ids vide) et bloque la première
+connexion réelle avec l'erreur "Localpart not available". Voir _compte_matrix_existe : toutes
+les fonctions de ce module qui provisionnent un compte vérifient désormais qu'il existe déjà
+avant d'y toucher, plutôt que de le créer à l'aveugle."""
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 MATRIX_SERVER_NAME = os.environ.get("MATRIX_SERVER_NAME", "matrix.assista-crise.local")
 
@@ -63,17 +74,40 @@ def _bot_headers() -> dict:
     return {"Authorization": f"Bearer {_bot_access_token()}"}
 
 
+def _compte_matrix_existe(user) -> bool:
+    """True si ce compte a déjà été provisionné côté Synapse, peu importe par qui -- NE JAMAIS
+    créer un compte via PUT /_synapse/admin/v2/users/ pour quelqu'un qui n'existe pas encore :
+    dans ce déploiement, MAS (pas Synapse) est la source d'autorité des comptes
+    (`external_ids`, lié à l'identité OIDC) -- un compte créé directement via cette API legacy
+    reste orphelin (external_ids vide, jamais lié à aucun `sub` OIDC) et bloque ensuite la
+    PREMIÈRE connexion SSO réelle de la personne avec l'erreur "Localpart not available"
+    (incident réel du 17/10 -- voir Laura, compte précréé par assurer_membre_salon lors de son
+    ajout à une équipe, avant toute connexion). Tant que la personne ne s'est jamais connectée
+    au moins une fois via MAS, l'absence de compte ici est normale, pas une erreur -- les
+    appelants doivent juste renoncer pour cette fois (retenté au prochain passage, voir
+    assurer_membre_salon/_assurer_compte_matrix/matrix-bridge/bridge.py::assurer_compte)."""
+    reponse = requests.get(
+        f"{SYNAPSE_URL}/_synapse/admin/v2/users/{matrix_user_id(user)}",
+        headers=_bot_headers(), timeout=10,
+    )
+    return reponse.status_code == 200
+
+
 def assurer_membre_salon(user, room_id, displayname=None) -> None:
-    """Garantit que `user` a un compte Matrix provisionné et a rejoint `room_id` -- nécessaire
-    pour qu'un régulateur qui gère l'équipe sans en être membre (matrix-bridge ne synchronise
-    que les membres de l'équipe, voir boucle_positions/provisionner_salons dans bridge.py)
-    apparaisse comme membre du salon, même si ses messages transitent par le bot. Idempotent --
-    y compris quand l'utilisateur a DÉJÀ rejoint le salon par un autre biais (ex: Element X en
-    direct) : contrairement à son nom, `/_synapse/admin/v1/join/` répond 403 M_FORBIDDEN "already
-    in the room" plutôt que de réussir silencieusement dans ce cas (constaté le 2026-10-04 sur
-    la Cellule de crise, dont l'équipe n'a formellement aucun membre Django -- est_membre est
-    donc toujours faux, ce qui déclenchait cet appel à CHAQUE accès, bloquant durablement la
-    page pour quiconque avait déjà rejoint une fois)."""
+    """Garantit que `user` a rejoint `room_id`, SI son compte Matrix existe déjà (voir
+    _compte_matrix_existe -- ne le crée jamais ici) -- nécessaire pour qu'un régulateur qui gère
+    l'équipe sans en être membre (matrix-bridge ne synchronise que les membres de l'équipe, voir
+    boucle_positions/provisionner_salons dans bridge.py) apparaisse comme membre du salon, même
+    si ses messages transitent par le bot. Idempotent -- y compris quand l'utilisateur a DÉJÀ
+    rejoint le salon par un autre biais (ex: Element X en direct) : contrairement à son nom,
+    `/_synapse/admin/v1/join/` répond 403 M_FORBIDDEN "already in the room" plutôt que de
+    réussir silencieusement dans ce cas (constaté le 2026-10-04 sur la Cellule de crise, dont
+    l'équipe n'a formellement aucun membre Django -- est_membre est donc toujours faux, ce qui
+    déclenchait cet appel à CHAQUE accès, bloquant durablement la page pour quiconque avait déjà
+    rejoint une fois). Ne fait rien (silencieusement, retenté au prochain appel) si le compte
+    n'existe pas encore."""
+    if not _compte_matrix_existe(user):
+        return
     mid = matrix_user_id(user)
     headers = _bot_headers()
     requests.put(
@@ -157,15 +191,21 @@ def lister_messages_salon(room_id, limite=30) -> list:
     return resultat
 
 
-def _assurer_compte_matrix(user, displayname=None) -> None:
-    """Garantit que `user` a un compte Matrix provisionné, SANS le rattacher à un salon
-    particulier -- préalable à une invitation (DM ou salon). Factorisé hors d'
-    assurer_membre_salon, qui fait la même chose puis rejoint EN PLUS un salon précis."""
+def _assurer_compte_matrix(user, displayname=None) -> bool:
+    """Si le compte Matrix de `user` existe déjà (voir _compte_matrix_existe -- ne le crée
+    JAMAIS ici), met à jour son displayname -- préalable à une invitation (DM ou salon).
+    Factorisé hors d'assurer_membre_salon, qui fait la même chose puis rejoint EN PLUS un salon
+    précis. Renvoie False si le compte n'existe pas encore (personne jamais connectée via MAS)
+    -- aux appelants (voir envoyer_dm) de renoncer proprement pour cette fois plutôt que de
+    planter ou de précréer un compte orphelin."""
+    if not _compte_matrix_existe(user):
+        return False
     requests.put(
         f"{SYNAPSE_URL}/_synapse/admin/v2/users/{matrix_user_id(user)}",
         headers=_bot_headers(), json={"displayname": displayname or str(user)},
         timeout=10,
     ).raise_for_status()
+    return True
 
 
 def envoyer_dm(user, texte, displayname=None) -> None:
@@ -178,8 +218,13 @@ def envoyer_dm(user, texte, displayname=None) -> None:
     nouveau à chaque appel, ce qui disperserait la conversation sur plusieurs salons distincts
     au fil du temps. `whoami` interrogé à chaque appel plutôt que mis en cache : ce n'est jamais
     un chemin chaud (quelques alertes au plus par jour), pas la peine d'introduire un état
-    partagé pour économiser un aller-retour réseau."""
-    _assurer_compte_matrix(user, displayname)
+    partagé pour économiser un aller-retour réseau. N'envoie rien (silencieusement, journalisé)
+    si `user` ne s'est jamais connecté à Matrix -- voir _assurer_compte_matrix/
+    _compte_matrix_existe : mieux vaut un DM manqué qu'un compte orphelin qui bloquerait sa
+    future connexion."""
+    if not _assurer_compte_matrix(user, displayname):
+        logger.info("DM Matrix ignoré pour %s : jamais connecté à Matrix (pas encore de compte MAS).", user)
+        return
     headers = _bot_headers()
     cible_mid = matrix_user_id(user)
 
